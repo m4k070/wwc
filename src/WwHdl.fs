@@ -169,7 +169,7 @@ module Library =
           Ports   = [ { Role = In;  Offset = { X = 0;  Y = 0 } }
                       { Role = Out; Offset = { X = n'; Y = 0 } } ]
           Latency = n
-          Pattern = ofAscii [ System.String.replicate (n' + 1) "#" ] }
+          Pattern = ofAscii [ String.replicate (n' + 1) "#" ] }
 
     /// Crossover StdCell のスタブ。水平・垂直 2 信号を交差させる 7×7 パターン。
     /// Pattern は Rule.run で検証後に埋める。ポートは水平(In/Out) + 垂直(In/Out) の 4 本。
@@ -206,9 +206,7 @@ module Library =
                       { Role = In;  Offset = { X = 0; Y = 2 } }
                       { Role = Out; Offset = { X = 4; Y = 1 } } ]
           Latency = 4<gen>
-          Pattern = ofAscii [ "###  "
-                               "   ##"
-                               "###  " ] }
+          Pattern = ofAscii [ "###  "; "   ##"; "###  " ] }
 
     /// SPLIT: 1 入力 2 出力スプリッタ。Latency = 4<gen>。
     ///
@@ -226,68 +224,44 @@ module Library =
                       { Role = Out; Offset = { X = 4; Y = 0 } }
                       { Role = Out; Offset = { X = 4; Y = 2 } } ]
           Latency = 4<gen>
-          Pattern = ofAscii [ "..###"
-                               "##..."
-                               "..###" ] }
+          Pattern = ofAscii [ "..###"; "##..."; "..###" ] }
 
     // -----------------------------------------------------------------------
     // スタブセル (パターン未確定 — Rule.run 検証待ち)
     // -----------------------------------------------------------------------
 
-    /// NOT1: クロック同期型 NOT ゲートのスタブ。
-    ///
-    /// 設計方針 (DESIGN.md §2.3 参照):
-    ///   period-8 クロックループの出力を data=1 の 3-Head 規則で抑制する。
-    ///     data=0 → クロック電子が出力ポートへ (output=1)
-    ///     data=1 → clock + data + 補助信号 = 3 Head → 出力セル発火せず (output=0)
-    ///
-    /// 未解決: ループ周期とデータ到達タイミングの調整。Rule.run で確認後に Pattern/Latency を確定。
-    let not1 : StdCell =
-        { Name    = "NOT1"
-          Kind    = Not
-          Size    = { X = 10; Y = 6 }
-          Ports   = [ { Role = In;    Offset = { X = 0; Y = 3 } }
-                      { Role = Out;   Offset = { X = 9; Y = 3 } }
-                      { Role = Clock; Offset = { X = 5; Y = 0 } } ]
-          Latency = 0<gen>       // TODO: Rule.run で実測後に更新
-          Pattern = Map.empty }
-
     /// JUNC3: 3 入力合流点。NOT / NAND の核となるセル。Latency = 4<gen>。
     ///
-    /// パターン (5×5):
-    ///   ..#..   y=0  入力 C の根本
-    ///   ..#..   y=1  入力 C 経路
-    ///   #####   y=2  左=A, junction=(2,2), 右=出力
-    ///   ..#..   y=3  入力 B 経路
-    ///   ..#..   y=4  入力 B の根本
+    /// パターン (5×3):
+    ///   #....   y=0  入力 A (0,0) — junction(1,1) と対角隣接
+    ///   #####   y=1  入力 B (0,1), junction (1,1), 出力経路 (2,1)..(4,1)
+    ///   #....   y=2  入力 C (0,2) — junction(1,1) と対角隣接
     ///
-    /// 動作 (t=0 で A,B,C が各ポートに Head):
-    ///   t=1 → (1,2),(2,1),(2,3) が Head (中間セル)
-    ///   t=2 → junction (2,2) が隣接 Head 数を評価
-    ///     1 or 2 個 → fires → t=4 で (4,2) = 出力 Head
+    /// 設計ポイント: 3 入力すべてを左列に集約し junction を (1,1) に置く。
+    ///   (2,1) の隣は (1,1) のみ (A/C ポートとの距離=2) → 対角ショートカット排除 ✓
+    ///
+    /// 動作 (t=0 で A,B,C がポートに Head):
+    ///   t=1: junction(1,1) が隣接 Head 数を評価
+    ///     1 or 2 個 → fires → t=4 で (4,1) = 出力 Head
     ///     3 個     → no fire → 出力なし
     ///
-    /// NOT(A)   : left=A, top=clock1, bottom=clock2 → right=NOT(A)
+    /// NOT(A)   : A=(0,0), clock1=(0,1), clock2=(0,2) → out=(4,1)
     ///   A=0 → 2 Head → fires → output=1 ✓
     ///   A=1 → 3 Head → no fire → output=0 ✓
     ///
-    /// NAND(A,B): left=A, top=B, bottom=clock → right=NAND(A,B)
+    /// NAND(A,B): A=(0,0), B=(0,1), clock=(0,2) → out=(4,1)
     ///   A∧B=1 → 3 Head → no fire → NAND=0 ✓
     ///   otherwise → 1-2 Head → fires → NAND=1 ✓
     let junc3 : StdCell =
         { Name    = "JUNC3"
           Kind    = Nand
-          Size    = { X = 5; Y = 5 }
-          Ports   = [ { Role = In;    Offset = { X = 0; Y = 2 } }  // 左: data / A
-                      { Role = In;    Offset = { X = 2; Y = 0 } }  // 上: B / clock1
-                      { Role = In;    Offset = { X = 2; Y = 4 } }  // 下: C / clock2
-                      { Role = Out;   Offset = { X = 4; Y = 2 } } ]// 右: output
+          Size    = { X = 5; Y = 3 }
+          Ports   = [ { Role = In;    Offset = { X = 0; Y = 0 } }  // A: (0,0) diagonal to junction
+                      { Role = In;    Offset = { X = 0; Y = 1 } }  // B: (0,1) direct to junction
+                      { Role = In;    Offset = { X = 0; Y = 2 } }  // C: (0,2) diagonal to junction
+                      { Role = Out;   Offset = { X = 4; Y = 1 } } ]// 右: output
           Latency = 4<gen>
-          Pattern = ofAscii [ "..#.."
-                               "..#.."
-                               "#####"
-                               "..#.."
-                               "..#.." ] }
+          Pattern = ofAscii [ "#...."; "#####"; "#...." ] }
 
     /// NOT1: junc3 の上下ポートにクロックを接続した NOT ゲート。
     /// パターン・Latency は junc3 と同一。コンパイラが Clock ポートへ同期信号を配線する。
@@ -326,17 +300,35 @@ module Library =
           Ports   = [ { Role = In;  Offset = { X = 0; Y = 1 } }
                       { Role = Out; Offset = { X = 3; Y = 1 } } ]
           Latency = 3<gen>
-          Pattern = ofAscii [ ".##."
-                               "##.#"
-                               ".##." ] }
+          Pattern = ofAscii [ ".##."; "##.#"; ".##." ] }
+
+    /// DFF: クロックゲート型 D フリップフロップのスタブ。
+    ///
+    /// 設計方針 (DESIGN.md §2.7 参照):
+    ///   AND(D, CLK) = NAND(NAND(D,CLK)) で実現するクロックセンシティブ D ラッチ。
+    ///   junc3 2 個 (NAND + NOT) を配線して構成する。
+    ///   Ports: In=D(x=0,y=5), Clock=CLK(x=5,y=0), Out=Q(x=11,y=5)
+    ///   Latency ≈ 10<gen> (NAND 4 + NOT 4 + 配線 2)。
+    ///
+    /// 未解決: NAND と NOT の間の Clock 配線タイミング調整。Rule.run 検証後に Pattern/Latency を確定。
+    let dff : StdCell =
+        { Name    = "DFF"
+          Kind    = Dff
+          Size    = { X = 12; Y = 10 }
+          Ports   = [ { Role = In;    Offset = { X = 0;  Y = 5 } }   // D 入力
+                      { Role = Clock; Offset = { X = 5;  Y = 0 } }   // CLK
+                      { Role = Out;   Offset = { X = 11; Y = 5 } } ] // Q 出力
+          Latency = 10<gen>     // TODO: Rule.run で実測後に更新
+          Pattern = Map.empty }
 
     /// M2 ターゲット (`abc -g NAND,NOT`) 対応のデフォルトライブラリ。
-    /// AND は Yosys が NAND+NOT に分解するためモノリシック AND セルは不要。
+    /// AND/XOR は Yosys が NAND+NOT に分解するためモノリシックセルは不要。
     let defaultLib : CellLibrary =
         [ Buf,  buf
           Or,   or2
           Nand, junc3
-          Not,  not1 ]
+          Not,  not1
+          Dff,  dff ]
         |> Map.ofList
 
 
@@ -393,8 +385,9 @@ module CellTest =
         let initial =
             headPortIndices
             |> List.fold (fun g i -> g |> Map.add inPorts.[i].Offset Head) junc3.Pattern
-        let result = run (int junc3.Latency) initial
-        let fired  = get result { X = 4; Y = 2 } = Head
+        let outPort = junc3.Ports |> List.find (fun p -> p.Role = Out)
+        let result  = run (int junc3.Latency) initial
+        let fired   = get result outPort.Offset = Head
         fired = expectFires
 
     /// DIODE の順方向通過と逆方向遮断を確認する。
@@ -612,7 +605,7 @@ module Pipeline =
         | "$_NAND_"  -> Some Nand
         | "$_AND_"   -> Some And    // abc -g AND,NOT 使用時の後方互換
         | "$_OR_"    -> Some Or
-        | "$_XOR_"   -> Some Xor
+        | "$_XOR_"   -> Some Xor    // abc -g NAND,NOT では出力されないが後方互換用に残す
         | "$_DFF_P_" -> Some Dff
         | "$_BUF_"   -> Some Buf
         | _          -> None

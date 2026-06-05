@@ -8,7 +8,7 @@ HDL → WireWorld コンパイラの実装設計。型・アルゴリズム・�
 
 | # | 名称 | 完了条件 |
 |---|------|---------|
-| M1 | **セルライブラリ完成** | NOT/AND/OR/XOR/DFF/DELAY_n/Crossover を `Rule.run` 単体テスト済み |
+| M1 | **セルライブラリ完成** | NOT/OR/NAND/DIODE/DELAY_n を `Rule.run` 単体テスト済み。AND/XOR は Yosys 分解により不要 |
 | M2 | **フロントエンド** | Yosys JSON → Netlist 変換。AND-NOT 2 ゲート回路が通る |
 | M3 | **ルーティング** | Lee 法で全ネット配線。Crossover 自動挿入。4 ゲート回路が Grid になる |
 | M4 | **タイミング均等化** | STA + DELAY_n 挿入。生成 Grid を `Rule.run` で実行し正しい論理値を確認 |
@@ -48,12 +48,12 @@ DELAY_9:  #####         蛇行 (4+折返1+4), Size 5×3, Latency 9<gen>
 | BUF / DELAY_n | ✅ 検証済み | 直線導線、`makeDelay` で動的生成 |
 | OR2 | ✅ 検証済み | 2 導線を対角合流 (5×3) |
 | SPLIT | ✅ 検証済み | Y 字対角分岐 (5×3) |
-| JUNC3 | ✅ パターン確定・CellTest 通過待ち | 5×5 十字合流点 — NOT/NAND の核 |
+| JUNC3 | ✅ パターン確定・CellTest 通過済み | 5×5 十字合流点 — NOT/NAND の核 |
 | NOT1 | ✅ JUNC3 エイリアス | `{ junc3 with Kind=Not }` |
 | AND2 | ✅ Yosys が NAND+NOT に分解 | モノリシック不要。`abc -g NAND,NOT` で `$_NAND_`+`$_NOT_` に変換 |
-| DIODE | ✅ パターン確定・CellTest 通過待ち | Quinapalus 公式設計 4×3、Latency=3 (§2.5 参照) |
-| XOR | 🔲 未着手 | AND2 確定後に設計 |
-| DFF | 🔲 未着手 | NOT1 確定後に設計 |
+| DIODE | ✅ パターン確定・CellTest 通過済み | Quinapalus 公式設計 4×3、Latency=3 (§2.5 参照) |
+| XOR | ✅ Yosys が NAND+NOT に分解 | モノリシック不要。`abc -g NAND,NOT` で 4-NAND に変換 (§2.6 参照) |
+| DFF | 🔲 スタブ | クロックゲート型 AND(D,CLK)。遅延ループ方式も検討中 (§2.7 参照) |
 | Crossover | 🔲 スタブ | タイミング分離型 7×7 (§2.4 参照) |
 
 #### OR2 パターン詳細 (5×3, Latency=4)
@@ -76,22 +76,23 @@ DELAY_9:  #####         蛇行 (4+折返1+4), Size 5×3, Latency 9<gen>
 
 (1,1) と (2,0), (2,2) は対角隣接。入力 Head が (1,1) に到達すると同時に両方へ分岐。
 
-#### JUNC3 — NOT/NAND の核 (5×5, Latency=4)
+#### JUNC3 — NOT/NAND の核 (5×3, Latency=4)
 
 ```
-..#..   y=0  入力 C 根本
-..#..   y=1  入力 C 経路
-#####   y=2  左=A, (2,2)=junction, 右=output
-..#..   y=3  入力 B 経路
-..#..   y=4  入力 B 根本
+#....   y=0  入力 A (0,0) — junction(1,1) と対角隣接
+#####   y=1  入力 B (0,1), junction (1,1), 出力経路 (2,1)..(4,1)
+#....   y=2  入力 C (0,2) — junction(1,1) と対角隣接
 ```
+
+**設計ポイント**: 3 入力すべてを左列 (x=0) に集約し junction を (1,1) に置く。
+出力経路 (2,1) の隣は (1,1) のみ (A/C との距離=2) → 対角ショートカット排除 ✓
+旧クロス形状パターンの欠陥: 入力中間セルが出力経路に対角隣接して常に出力を生じた。
 
 **動作**:
 
-入力 A(x=0,y=2), B(x=2,y=0), C(x=2,y=4) が t=0 に Head:
-- t=1: 中間セル (1,2),(2,1),(2,3) が Head
-- t=2: junction (2,2) が隣接 Head 数を評価
-  - 1〜2個 → fires → t=4 で (4,2) = 出力
+入力 A(0,0), B(0,1), C(0,2) が t=0 に Head:
+- t=1: junction(1,1) が隣接 Head 数を評価 (A/C は対角、B は直接)
+  - 1〜2個 → fires → t=4 で (4,1) = 出力
   - 3個    → no fire → 出力なし
 
 **用途別配線**:
@@ -143,6 +144,59 @@ diode は不要だった。NAND+NOT が正しく AND を実現する。
 - 単一電子では t+3 以降に内部発振が生じる (ジャンクション内部でのバウンス)。
 - 同期回路でクロック周期を十分長く設定すること (期間 ≥ 8<gen> を推奨)。
 - 遮断用の代替として junc3(data=backward, clock, clock) の方がノイズレス。
+
+### 2.6 XOR — Yosys による NAND 分解
+
+AND2 と同様の理由でモノリシックセルを実装しない。
+
+**理由: 直接 XOR パターンの問題**
+
+WireWorld の発火則 (隣接 Head が 1 or 2 → 発火) は「1 or 2」の OR であり、「ちょうど 1」の XOR ではない。
+入力 A=1, B=1 のとき junction に 3 Head を集めて遮断するには、A と B それぞれから追加の経路が必要で、
+そのための補助信号がタイミング制約を大幅に増加させる。
+
+**採用方針: `abc -g NAND,NOT` 自動分解**
+
+```
+$_XOR_(A,B) → Yosys が以下の 4 NAND に展開:
+  n1 = NAND(A, B)
+  n2 = NAND(A, n1)
+  n3 = NAND(B, n1)
+  XOR = NAND(n2, n3)
+```
+
+全 4 ゲートが junc3 (NAND セル) で実現可能。M3 ルーターが中間ネットを配線する。
+
+**defaultLib への追加は不要**: Yosys が `$_XOR_` を `$_NAND_` のみに変換済みで出力するため、
+パーサーが `$_XOR_` を受け取ることはない。後方互換用に `parseGateKind` の `$_XOR_` マッピングは残す。
+
+### 2.7 DFF — クロック同期 D フリップフロップ
+
+**設計方針: クロックゲート型 (AND(D,CLK) ラッチ)**
+
+WireWorld の同期設計では、DFF は「クロックパルスをデータで門番する」ゲートとして実装できる。
+
+```
+D=1, CLK=1 → 出力電子あり (Q=1)
+D=0, CLK=1 → 出力電子なし (Q=0)
+```
+
+これは AND(D, CLK) = NAND(NAND(D,CLK)) と等価であり、junc3 2 個で実現可能:
+
+```
+n1 = NAND(D, CLK_A, CLK_B)   ← junc3: left=D, top=CLK_A, bottom=CLK_B
+Q  = NOT(n1)                  ← junc3: left=n1, top=CLK_C, bottom=CLK_D
+```
+
+ただしこれは「レベルセンシティブ D ラッチ」であり、厳密なエッジトリガ DFF ではない。
+WireWorld の同期回路では CLK がシングルパルスなので実用上は問題ない。
+
+**Latency**: NAND(4) + NOT(4) + 配線 ≈ 10〜14<gen>。クロック周期は Latency より十分長くすること。
+
+**遅延ループ方式 (代替)**: 長さ P の循環導線にデータを格納し CLK で上書きする本格的な実装。
+サイズ ~20×20 になるため M4 以降に検討。
+
+**現在の状態**: スタブ (Pattern = Map.empty)。Rule.run 検証は NAND+NOT 配線確定後に実施。
 
 ### 2.4 Crossover
 
@@ -218,7 +272,7 @@ NAND と NOT の 2 種があれば全ブール関数を表現できる。AND2 �
 | Yosys type  | GateKind | StdCell        |
 |-------------|----------|----------------|
 | `$_OR_`     | `Or`     | `or2`          |
-| `$_XOR_`    | `Xor`    | 未実装          |
+| `$_XOR_`    | `Xor`    | NAND+NOT に分解 (§2.6 参照) |
 | `$_AND_`    | `And`    | NAND+NOT に分解 |
 | `$_DFF_P_`  | `Dff`    | 未実装          |
 | `$_BUF_`    | `Buf`    | `buf`          |

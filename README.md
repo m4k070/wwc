@@ -152,3 +152,4 @@ MIT
 - QFT（Quest For Tetris）プロジェクト — CA 上の汎用計算機構築
 - Golly — セルオートマトンシミュレータ
 - [suzuki-navi/domino](https://github.com/suzuki-navi/domino) — 独自 CA による論理回路ビジュアルシミュレータ。crossover セル・遅延素子・ALU まで実装済み。交差処理と遅延挿入の設計参考。
+- https://www.quinapalus.com/wi-index.html
