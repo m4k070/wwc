@@ -110,7 +110,7 @@ printfn "%s" (toRle g')
 
 ## ライセンス
 
-未定（TODO: LICENSE 追加）。
+MIT
 
 ## 参考
 
