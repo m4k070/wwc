@@ -547,6 +547,7 @@ module Route =
 // ---------------------------------------------------------------------
 module Sta =
     open Units
+    open Domain
     open Netlist
     open Place
     open Route
@@ -623,13 +624,37 @@ module Sta =
         |> List.map (fun (k, vs) -> k, vs |> List.map snd |> List.min)
         |> Map.ofList
 
-    /// スラックが正の Wire に DELAY_n 相当の遅延を付加して均等化する。
-    /// Delay フィールドを更新する。物理的なパス延長は emit / place 段で行う (TODO M5)。
+    /// パスに extra 世代分のジグザグ迂回を物理的に挿入する。
+    ///
+    /// 戦略: パスの終端直前の点 pivot から -Y 方向へ N/2 セル往復する。
+    ///   これで 2*(N/2) = N セル追加 (偶数)。
+    ///   奇数の extra は N+1 に切り上げる (STA は 1 gen 余裕を持って吸収)。
+    /// 前提: pivot の Y < 0 空間が空いている (直線配置なら常に成立)。
+    let extendPath (extra: int<gen>) (path: Coord list) : Coord list =
+        let n = int extra
+        if n <= 0 || path.Length < 2 then path
+        else
+            let n' = if n % 2 = 0 then n else n + 1  // 偶数に切り上げ
+            let halfN = n' / 2
+            // pivot = 終端 dst の 1 つ手前
+            let pivot = List.item (path.Length - 2) path
+            let dst   = List.last path
+            let initPath = path |> List.take (path.Length - 2)
+            // pivot から -Y へ halfN 歩、戻り pivot を経由して dst へ
+            let up   = [ for i in 1 .. halfN          -> { X = pivot.X; Y = pivot.Y - i } ]
+            let down = [ for i in halfN - 1 .. -1 .. 0 -> { X = pivot.X; Y = pivot.Y - i } ]
+            // down の末尾は pivot 自身 (i=0)
+            initPath @ [pivot] @ up @ down @ [dst]
+
+    /// スラックが正の Wire に DELAY_n 相当の遅延を物理的に付加して均等化する。
+    /// Path を extendPath でジグザグ延長し、Delay フィールドも更新する。
     let insertDelays (slack: Map<NetId, int<gen>>) (wires: Wire list) : Wire list =
         wires |> List.map (fun w ->
             match Map.tryFind w.Net slack with
-            | Some s when s > 0<gen> -> { w with Delay = w.Delay + s }
-            | _                       -> w)
+            | Some s when s > 0<gen> ->
+                let path' = extendPath s w.Path
+                { w with Path = path'; Delay = (List.length path') * 1<gen> }
+            | _ -> w)
 
 
 // ---------------------------------------------------------------------
@@ -948,7 +973,6 @@ module Pipeline =
     let (>>=) m f = Result.bind f m
 
     /// トップレベル: HDL ソース → WireWorld Grid。
-    /// 各段が Result を返すので、どこで落ちても CompileError で伝播する。
     let compile (lib: CellLibrary) (src: string) : Result<Grid, CompileError> =
         frontend src >>= fun nl ->
         techMap lib nl >>= fun mapped ->
@@ -958,6 +982,18 @@ module Pipeline =
         let slack    = Sta.computeSlack   placement wires arrivals
         let wires'   = Sta.insertDelays   slack wires
         Ok (emit placement wires')
+
+    /// Grid + Placement + Wire list を返す詳細版 (テスト・デバッグ用)。
+    let compileFull (lib: CellLibrary) (src: string)
+        : Result<Grid * Placement * Wire list, CompileError> =
+        frontend src >>= fun nl ->
+        techMap lib nl >>= fun mapped ->
+        place mapped >>= fun placement ->
+        route placement >>= fun wires ->
+        let arrivals = Sta.computeArrival placement wires
+        let slack    = Sta.computeSlack   placement wires arrivals
+        let wires'   = Sta.insertDelays   slack wires
+        Ok (emit placement wires', placement, wires')
 
 
 // ---------------------------------------------------------------------
@@ -1251,5 +1287,149 @@ module StaTest =
           "compile 4-NOT chain still passes with STA in pipeline",
             match Pipeline.compile Library.defaultLib RoutingTest.chainJson with
             | Ok g -> not (Map.isEmpty g)
+            | _    -> false
+        ]
+
+
+// ---------------------------------------------------------------------
+// 11. E2E シミュレーション検証 (M5)
+//     コンパイラが生成した Grid を Rule.run で動かし正しい論理値を確認する。
+// ---------------------------------------------------------------------
+module E2eTest =
+    open Units
+    open Domain
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Sta
+    open Pipeline
+    open Rule
+
+    // ── ヘルパー ─────────────────────────────────────────────────────────
+
+    /// 配置済みゲートのクロックポート座標を返す。
+    /// In ポートのうち Gate.Inputs.Length 番目以降が「論理入力を超えた物理ポート」= クロック用。
+    let clockCoords (p: Placed) : Coord list =
+        let inPorts = p.Cell.Ports |> List.filter (fun port -> port.Role = In)
+        let nLogical = p.Gate.Inputs.Length
+        inPorts
+        |> List.mapi (fun i port -> i, port)
+        |> List.choose (fun (i, port) ->
+            if i >= nLogical then Some (portCoord p port) else None)
+
+    /// 格子上に Head を注入し `steps` 世代後の状態を返す。
+    let inject (coords: Coord list) (g: Grid) : Grid =
+        coords |> List.fold (fun acc c -> Map.add c Head acc) g
+
+    /// Grid + Placement を受け取り、全ゲートのクロックポートに Head を注入する。
+    let injectClocks (placement: Placement) (g: Grid) : Grid =
+        placement |> List.collect clockCoords |> fun cs -> inject cs g
+
+    // ── extendPath 単体テスト ────────────────────────────────────────────
+
+    let private straightPath n = [ for x in 0..n -> { X=x; Y=0 } ]
+
+    // ── NOT ゲート E2E JSON ──────────────────────────────────────────────
+
+    let private notJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a": {"direction":"input","bits":[2]},
+      "y": {"direction":"output","bits":[3]}
+    },
+    "cells": {
+      "u0": {"type":"$_NOT_",
+             "port_directions":{"A":"input","Y":"output"},
+             "connections":{"A":[2],"Y":[3]}}
+    }
+  }}
+}"""
+
+    let runAll () : (string * bool) list =
+        // ── extendPath テスト ──
+        let path5  = straightPath 4              // 5 cells, Delay=5
+        let ext2   = extendPath 2<gen> path5     // add 2: should be 7 cells
+        let ext4   = extendPath 4<gen> path5     // add 4: should be 9 cells
+        let ext3   = extendPath 3<gen> path5     // odd: rounds up to 4 → 9 cells
+
+        // パスが連続している (各ステップが隣接) か検証
+        let isContinuous (p: Coord list) =
+            p |> List.pairwise
+              |> List.forall (fun (a, b) ->
+                  abs (a.X - b.X) + abs (a.Y - b.Y) = 1)
+
+        // ── NOT E2E コンパイル ──
+        let lib = Library.defaultLib
+        let fullResult = compileFull lib notJson
+
+        // not1 ゲートのポート座標 (origin = (0,0) で place される)
+        // Port[0]=(0,0)=A, Port[1]=(0,1)=clk1, Port[2]=(0,2)=clk2, Out=(4,1)
+        let portA    = { X=0; Y=0 }
+        let portClk1 = { X=0; Y=1 }
+        let portClk2 = { X=0; Y=2 }
+        let portOut  = { X=4; Y=1 }
+
+        let latency = int Library.not1.Latency
+
+        // NOT(A=0)=1: クロックのみ注入 → Latency 後に出力 Head
+        let not0Result =
+            match fullResult with
+            | Ok (grid, placement, _) ->
+                let g = grid |> inject [portClk1; portClk2]
+                get (run latency g) portOut = Head
+            | _ -> false
+
+        // NOT(A=1)=0: A + クロック注入 → Latency 後に出力 Head なし
+        let not1Result =
+            match fullResult with
+            | Ok (grid, placement, _) ->
+                let g = grid |> inject [portA; portClk1; portClk2]
+                get (run latency g) portOut = Head
+            | _ -> true   // error → fail
+
+        // ── テスト一覧 ──
+        [ "extendPath: +2 → length 7",
+            ext2.Length = 7
+
+          "extendPath: +4 → length 9",
+            ext4.Length = 9
+
+          "extendPath: +3 (odd) → length 9 (rounded up to +4)",
+            ext3.Length = 9
+
+          "extendPath: result is continuous (each step adjacent)",
+            isContinuous ext2 && isContinuous ext4 && isContinuous ext3
+
+          "extendPath: endpoints unchanged",
+            List.head ext2 = List.head path5 &&
+            List.last ext2 = List.last path5
+
+          "NOT E2E: compileFull succeeds",
+            match fullResult with Ok _ -> true | _ -> false
+
+          "NOT E2E: grid is non-empty",
+            match fullResult with
+            | Ok (g, _, _) -> not (Map.isEmpty g)
+            | _ -> false
+
+          "NOT E2E: port A is Wire in compiled grid",
+            match fullResult with
+            | Ok (g, _, _) -> get g portA = Wire
+            | _ -> false
+
+          "NOT E2E: NOT(A=0)=1  (clocks only → output fires)",
+            not0Result
+
+          "NOT E2E: NOT(A=1)=0  (A + clocks → output blocked)",
+            not (not1Result)
+
+          "NOT E2E: insertDelays with slack=2 extends path length",
+            let p = straightPath 6   // 7 cells, Delay=7
+            let w = { Net = NetId 1; Path = p; Delay = 7<gen> }
+            let slack = Map.ofList [ NetId 1, 2<gen> ]
+            match insertDelays slack [w] with
+            | [w'] -> w'.Path.Length = 9 && w'.Delay = 9<gen>
             | _    -> false
         ]
