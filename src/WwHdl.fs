@@ -591,11 +591,59 @@ module Pipeline =
 
     // --- 段の境界。それぞれ別の型を返すので順序を取り違えられない ---
 
+    /// JSON の bits 配列から整数ネット番号だけを抽出する。
+    /// Yosys は定数 "0"/"1" を文字列で埋め込む場合があるので数値要素のみ取る。
+    let private parseBits (el: System.Text.Json.JsonElement) : int list =
+        el.EnumerateArray()
+        |> Seq.choose (fun b ->
+            if b.ValueKind = System.Text.Json.JsonValueKind.Number
+            then Some (b.GetInt32())
+            else None)
+        |> List.ofSeq
+
     /// Yosys write_json 出力を YosysModule へパースする。
-    let parseYosysJson (_json: string) : Result<YosysModule, CompileError> =
-        // TODO: System.Text.Json でデシリアライズ
-        // JSON 構造: { "modules": { "top": { "ports": {...}, "cells": {...} } } }
-        Error (ParseError "parseYosysJson not implemented")
+    /// JSON 構造: { "modules": { "<top>": { "ports": {...}, "cells": {...} } } }
+    /// 複数モジュールがある場合は "top" を優先し、なければ先頭を使用する。
+    let parseYosysJson (json: string) : Result<YosysModule, CompileError> =
+        try
+            use doc = System.Text.Json.JsonDocument.Parse(json)
+            let modulesEl = doc.RootElement.GetProperty("modules")
+            let entries = modulesEl.EnumerateObject() |> Array.ofSeq
+            if entries.Length = 0 then
+                Error (ParseError "no modules in JSON")
+            else
+                let topEntry =
+                    entries |> Array.tryFind (fun e -> e.Name = "top")
+                    |> Option.defaultValue entries.[0]
+                let m = topEntry.Value
+
+                let ports =
+                    m.GetProperty("ports").EnumerateObject()
+                    |> Seq.map (fun p ->
+                        let dir  = p.Value.GetProperty("direction").GetString()
+                        let bits = parseBits (p.Value.GetProperty("bits"))
+                        p.Name, { Direction = dir; Bits = bits })
+                    |> Map.ofSeq
+
+                let cells =
+                    m.GetProperty("cells").EnumerateObject()
+                    |> Seq.map (fun c ->
+                        let v = c.Value
+                        let cellType = v.GetProperty("type").GetString()
+                        let portDirs =
+                            v.GetProperty("port_directions").EnumerateObject()
+                            |> Seq.map (fun p -> p.Name, p.Value.GetString())
+                            |> Map.ofSeq
+                        let conns =
+                            v.GetProperty("connections").EnumerateObject()
+                            |> Seq.map (fun p -> p.Name, parseBits p.Value)
+                            |> Map.ofSeq
+                        c.Name, { Type = cellType; PortDirections = portDirs; Connections = conns })
+                    |> Map.ofSeq
+
+                Ok { Ports = ports; Cells = cells }
+        with ex ->
+            Error (ParseError ex.Message)
 
     /// Yosys type 文字列を GateKind に変換する。
     /// `abc -g NAND,NOT` の出力は $\_NOT\_ と $\_NAND\_ のみ。
@@ -611,12 +659,66 @@ module Pipeline =
         | _          -> None
 
     /// YosysModule を Netlist IR へ変換する。
-    let yosysToNetlist (_m: YosysModule) : Result<Netlist, CompileError> =
-        // TODO:
-        //   1. cells → Gate list (parseGateKind で Type → GateKind、connections → NetId)
-        //   2. ports → PrimaryInputs / PrimaryOutputs
-        //   3. clk ポートを検出して ClockNet に設定
-        Error (ParseError "yosysToNetlist not implemented")
+    let yosysToNetlist (m: YosysModule) : Result<Netlist, CompileError> =
+        // ① ports → PrimaryInputs / PrimaryOutputs / ClockNet
+        let primaryInputs =
+            m.Ports |> Map.toList
+            |> List.filter (fun (_, p) -> p.Direction = "input")
+            |> List.collect (fun (_, p) -> p.Bits |> List.map NetId)
+
+        let primaryOutputs =
+            m.Ports |> Map.toList
+            |> List.filter (fun (_, p) -> p.Direction = "output")
+            |> List.collect (fun (_, p) -> p.Bits |> List.map NetId)
+
+        let clockNet =
+            m.Ports |> Map.tryFindKey (fun name _ ->
+                let n = name.ToLowerInvariant()
+                n = "clk" || n = "clock" || n = "ck" || n = "clk_i")
+            |> Option.bind (fun name ->
+                m.Ports.[name].Bits |> List.tryHead |> Option.map NetId)
+
+        // ② cells → Gate list
+        let gateResults =
+            m.Cells |> Map.toList
+            |> List.mapi (fun i (name, cell) ->
+                match parseGateKind cell.Type with
+                | None -> Error (ParseError $"unknown gate type '{cell.Type}' in cell '{name}'")
+                | Some kind ->
+                    let inputs =
+                        cell.PortDirections |> Map.toList
+                        |> List.filter (fun (_, dir) -> dir = "input")
+                        |> List.sortBy fst        // 名前順: A → B → C → ...
+                        |> List.collect (fun (port, _) ->
+                            cell.Connections |> Map.tryFind port
+                            |> Option.defaultValue []
+                            |> List.map NetId)
+
+                    let outputNet =
+                        cell.PortDirections |> Map.toList
+                        |> List.filter (fun (_, dir) -> dir = "output")
+                        |> List.sortBy fst
+                        |> List.tryHead
+                        |> Option.bind (fun (port, _) ->
+                            cell.Connections |> Map.tryFind port
+                            |> Option.bind List.tryHead
+                            |> Option.map NetId)
+
+                    match outputNet with
+                    | None    -> Error (ParseError $"cell '{name}' has no output connection")
+                    | Some o  -> Ok { Id = i; Kind = kind; Inputs = inputs; Output = o })
+
+        gateResults
+        |> List.fold (fun acc r ->
+            match acc, r with
+            | Ok xs, Ok x -> Ok (x :: xs)
+            | Error e, _  -> Error e
+            | _, Error e  -> Error e) (Ok [])
+        |> Result.map (fun gates ->
+            { Gates          = List.rev gates
+              PrimaryInputs  = primaryInputs
+              PrimaryOutputs = primaryOutputs
+              ClockNet       = clockNet })
 
     /// Frontend: Yosys JSON 文字列 → Netlist。
     /// 呼び出し元は `yosys -p "synth -flatten; abc -g NAND,NOT; write_json out.json" design.v`
@@ -725,6 +827,90 @@ module Pipeline =
         >>= (fun placement ->
                 route placement
                 >>= (fun wires ->
-                        // 本来はゲートごとに balanceGateInputs を適用して
-                        // タイミングを均等化してから emit する
                         Ok (emit placement wires)))
+
+
+// ---------------------------------------------------------------------
+// 8. フロントエンド単体テスト (M2)
+//    parseYosysJson → yosysToNetlist のパイプラインを JSON 文字列で検証する。
+// ---------------------------------------------------------------------
+module FrontendTest =
+    open Netlist
+    open Pipeline
+
+    /// AND-NOT 2 ゲート回路: NAND(a,b) + NOT(nand_out) = AND(a,b)
+    /// `abc -g NAND,NOT` が出力する典型的な JSON。
+    let andNotJson = """
+{
+  "modules": {
+    "top": {
+      "ports": {
+        "a": { "direction": "input",  "bits": [2] },
+        "b": { "direction": "input",  "bits": [3] },
+        "y": { "direction": "output", "bits": [5] }
+      },
+      "cells": {
+        "u0": {
+          "type": "$_NAND_",
+          "port_directions": { "A": "input", "B": "input", "Y": "output" },
+          "connections": { "A": [2], "B": [3], "Y": [4] }
+        },
+        "u1": {
+          "type": "$_NOT_",
+          "port_directions": { "A": "input", "Y": "output" },
+          "connections": { "A": [4], "Y": [5] }
+        }
+      }
+    }
+  }
+}"""
+
+    let runAll () : (string * bool) list =
+        let result = frontend andNotJson
+
+        [ "parse succeeds",
+            match result with Ok _ -> true | _ -> false
+
+          "gate count = 2",
+            match result with
+            | Ok nl -> nl.Gates.Length = 2
+            | _ -> false
+
+          "primary inputs = [2;3]",
+            match result with
+            | Ok nl -> nl.PrimaryInputs = [NetId 2; NetId 3]
+            | _ -> false
+
+          "primary outputs = [5]",
+            match result with
+            | Ok nl -> nl.PrimaryOutputs = [NetId 5]
+            | _ -> false
+
+          "clock net = None",
+            match result with
+            | Ok nl -> nl.ClockNet = None
+            | _ -> false
+
+          "u0 is Nand with inputs [2;3] output 4",
+            match result with
+            | Ok nl ->
+                nl.Gates |> List.exists (fun g ->
+                    g.Kind = Nand &&
+                    g.Inputs = [NetId 2; NetId 3] &&
+                    g.Output = NetId 4)
+            | _ -> false
+
+          "u1 is Not with input [4] output 5",
+            match result with
+            | Ok nl ->
+                nl.Gates |> List.exists (fun g ->
+                    g.Kind = Not &&
+                    g.Inputs = [NetId 4] &&
+                    g.Output = NetId 5)
+            | _ -> false
+
+          "techMap succeeds with defaultLib",
+            match result |> Result.bind (techMap Library.defaultLib) with
+            | Ok mapped -> mapped.Length = 2
+            | _ -> false
+        ]

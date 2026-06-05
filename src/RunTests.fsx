@@ -1,7 +1,14 @@
 #r "bin/Debug/net8.0/WwHdl.dll"
-open WwHdl.CellTest
-let results = runAll ()
-for (name, passed) in results do
-    printfn "%s  %s" (if passed then "PASS" else "FAIL") name
-let fails = results |> List.filter (snd >> not)
-printfn "\n%d/%d passed" (results.Length - fails.Length) results.Length
+
+let run label (results: (string * bool) list) =
+    printfn "\n=== %s ===" label
+    for (name, passed) in results do
+        printfn "%s  %s" (if passed then "PASS" else "FAIL") name
+    results
+
+let m1 = run "M1 CellTest"     (WwHdl.CellTest.runAll ())
+let m2 = run "M2 FrontendTest" (WwHdl.FrontendTest.runAll ())
+
+let all = m1 @ m2
+let fails = all |> List.filter (snd >> not)
+printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length
