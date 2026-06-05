@@ -101,15 +101,46 @@ printfn "%s" (toRle g')
 
 ## ロードマップ
 
-- [ ] **`frontend`**: Yosys の `write_json`（`synth -flatten; abc -g AND,NOT`）出力を取り込む。パーサ自作より高速。
-- [ ] **セルライブラリ拡充**: NOT / AND / OR / XOR / DFF / splitter / crossover の検証済みパターンと `Latency` を登録。
-  - 参考: suzuki-navi/domino はこれら全ゲートを独自 CA で実装済み。ゲートの入出力構造・組み合わせ方が設計の参考になる。
-- [ ] **遅延セルの追加**: 蛇行配線だけでなく、固定長の `DELAY_n` StdCell をライブラリに登録する。
-  domino の `sofaA`（遅延素子）に相当する専用セルを用意することで `balanceGateInputs` の実装が単純になる（パスを伸ばす代わりにセルを挿入するだけになる）。
-- [ ] **交差処理**: domino が方向性ありの `cross` ノードで解いているように、WireWorld でも専用の crossover StdCell（既知の 2 配線交差パターン）を設計して `route` に組み込む。標準ルールで面積が大きくなる場合は `Wireworld++`（5 状態拡張）採用も検討。
-- [ ] **`route`**: Lee 法（迷路探索）+ 遅延補償のための意図的迂回。交差が必要な箇所に crossover セルを自動挿入する。
-- [ ] **タイミング均等化の本実装**: `balanceGateInputs` を全ゲートへ適用する STA（静的タイミング解析）。速いパスへ `DELAY_n` セルを挿入して最遅パスに合わせる。
-- [ ] **エンドツーエンド検証**: 生成回路を `Rule.run` で実行し HDL のシミュレーション結果と突き合わせる回帰テスト。検証ターゲットは domino の実装例（カウンタ → レジスタ → ALU → 乗算器）を難易度順に追う。
+詳細設計は [DESIGN.md](DESIGN.md) を参照。
+
+### M1 — セルライブラリ完成
+
+- [ ] NOT / AND / OR / XOR / DFF を `Rule.run` で単体テストし `Latency` を実測して登録
+- [ ] Splitter (Y 字分岐) パターンの設計と検証
+- [ ] `makeDelay (n: int<gen>)` — 直線（n ≤ 16）/ 蛇行（n > 16）の自動生成
+  - 参考: suzuki-navi/domino の `sofaA` 遅延素子
+- [ ] Crossover StdCell — タイミング分離型 (7×7 目標) を先行実装。面積超過なら Wireworld++ 型に切替
+  - 参考: suzuki-navi/domino の `cross` ノード設計
+
+### M2 — フロントエンド
+
+- [ ] Yosys `synth -flatten; abc -g AND,NOT; write_json` の出力スキーマを確定
+- [ ] `parseYosysJson : string -> Result<YosysModule, CompileError>`
+- [ ] `yosysToNetlist : YosysModule -> Result<Netlist, CompileError>`
+- [ ] AND-NOT 2 ゲート回路でパース結果を手検証
+
+### M3 — ルーティング
+
+- [ ] `buildGrid : Placement -> RoutingGrid` — セルの bounding box を Blocked に
+- [ ] `leePath : RoutingGrid -> Coord -> Coord -> Coord list option` — BFS 最短経路
+- [ ] `routeAll` — 全ネット配線（扇出優先で順序制御）
+- [ ] `findConflicts` + `insertCrossovers` — 衝突点に Crossover セルを自動挿入
+
+### M4 — タイミング均等化
+
+- [ ] `computeArrival` — トポロジカル順で `ArrivalMap` を計算
+- [ ] `computeSlack` + `insertDelays` — DELAY_n セルを挿入してスラックを 0 に揃える
+- [ ] 生成 Grid を `Rule.run` で実行し正しい論理値を確認
+
+### M5 — E2E 検証
+
+- [ ] カウンタ (4 bit)
+- [ ] レジスタ (8 bit)
+- [ ] ALU (加算器)
+- [ ] 乗算器
+
+各回路: HDL 記述 → `compile` → `toRle` → Golly 目視 + `Rule.run` 回帰テスト。
+難易度順は suzuki-navi/domino の実装例に倣う。
 
 ## ライセンス
 
