@@ -557,29 +557,75 @@ module Sta =
     /// トポロジカル順で各ネットの到達時刻を計算する。
     ///   arrival(primary_input) = 0<gen>
     ///   arrival(gate_output)   = max(arrival(input_i) + wire_i.Delay) + gate.Latency
-    let computeArrival
-        (_placement: Placement)
-        (_wires: Wire list)
-        : ArrivalMap =
-        // TODO: 依存グラフのトポロジカルソート → 各ネットへ伝播
-        Map.empty
+    ///
+    /// 実装: 全入力の到達時刻が確定したゲートを繰り返し処理する。
+    ///   組合せ回路 (DAG) なら必ず収束する。
+    let computeArrival (placement: Placement) (wires: Wire list) : ArrivalMap =
+        let wireDelay =
+            wires |> List.map (fun w -> w.Net, w.Delay) |> Map.ofList
+
+        let gateDrivenNets =
+            placement |> List.map (fun p -> p.Gate.Output) |> Set.ofList
+
+        // 一次入力ネット (いずれのゲートも駆動しないネット) の到達時刻 = 0
+        let primaryArrivals =
+            placement
+            |> List.collect (fun p -> p.Gate.Inputs)
+            |> List.filter (fun n -> not (Set.contains n gateDrivenNets))
+            |> List.distinct
+            |> List.map (fun n -> n, 0<gen>)
+            |> Map.ofList
+
+        // 全入力の到達時刻が確定したゲートを順次処理して伝播する。
+        let rec propagate (arr: ArrivalMap) (remaining: Placed list) =
+            if List.isEmpty remaining then arr
+            else
+                let ready, notReady =
+                    remaining |> List.partition (fun p ->
+                        p.Gate.Inputs |> List.forall (fun n -> Map.containsKey n arr))
+                if List.isEmpty ready then arr  // 進捗なし (サイクル or 孤立)
+                else
+                    let arr' =
+                        ready |> List.fold (fun acc p ->
+                            let inputTimes =
+                                p.Gate.Inputs |> List.map (fun n ->
+                                    (Map.tryFind n acc |> Option.defaultValue 0<gen>)
+                                    + (Map.tryFind n wireDelay |> Option.defaultValue 0<gen>))
+                            let target =
+                                if List.isEmpty inputTimes then 0<gen>
+                                else List.max inputTimes
+                            Map.add p.Gate.Output (target + p.Cell.Latency) acc) arr
+                    propagate arr' notReady
+
+        propagate primaryArrivals placement
 
     /// 各 Wire のスラック（余裕世代）を計算する。
-    ///   slack(w) = target(gate) - arrival(src(w)) - w.Delay
-    /// target は当該ゲートの全入力の中で最大の到達時刻。
-    let computeSlack
-        (_arrival: ArrivalMap)
-        (_wires: Wire list)
+    ///   target(gate)  = max { arrival(input_i) + wireDelay(input_i) }
+    ///   slack(net_i)  = target(gate) - arrival(net_i) - wireDelay(net_i)
+    /// スラック > 0 のネットは target に合わせて遅延を追加する必要がある。
+    /// 同一ネットが複数ゲートを駆動する場合は最小スラックを採用する。
+    let computeSlack (placement: Placement) (wires: Wire list) (arrivals: ArrivalMap)
         : Map<NetId, int<gen>> =
-        // TODO: ゲートごとに target を算出しスラックを返す
-        Map.empty
+        let wireDelay =
+            wires |> List.map (fun w -> w.Net, w.Delay) |> Map.ofList
+
+        let inputArrivalAt n =
+            (Map.tryFind n arrivals   |> Option.defaultValue 0<gen>)
+            + (Map.tryFind n wireDelay |> Option.defaultValue 0<gen>)
+
+        placement
+        |> List.collect (fun p ->
+            if List.isEmpty p.Gate.Inputs then []
+            else
+                let target = p.Gate.Inputs |> List.map inputArrivalAt |> List.max
+                p.Gate.Inputs |> List.map (fun n -> n, target - inputArrivalAt n))
+        |> List.groupBy fst
+        |> List.map (fun (k, vs) -> k, vs |> List.map snd |> List.min)
+        |> Map.ofList
 
     /// スラックが正の Wire に DELAY_n 相当の遅延を付加して均等化する。
-    /// Delay フィールドを更新し、emit 時に伸長したパスとして展開する。
-    let insertDelays
-        (slack: Map<NetId, int<gen>>)
-        (wires: Wire list)
-        : Wire list =
+    /// Delay フィールドを更新する。物理的なパス延長は emit / place 段で行う (TODO M5)。
+    let insertDelays (slack: Map<NetId, int<gen>>) (wires: Wire list) : Wire list =
         wires |> List.map (fun w ->
             match Map.tryFind w.Net slack with
             | Some s when s > 0<gen> -> { w with Delay = w.Delay + s }
@@ -904,11 +950,14 @@ module Pipeline =
     /// トップレベル: HDL ソース → WireWorld Grid。
     /// 各段が Result を返すので、どこで落ちても CompileError で伝播する。
     let compile (lib: CellLibrary) (src: string) : Result<Grid, CompileError> =
-        frontend src >>= fun _nl ->
-        techMap lib _nl >>= fun mapped ->
+        frontend src >>= fun nl ->
+        techMap lib nl >>= fun mapped ->
         place mapped >>= fun placement ->
         route placement >>= fun wires ->
-        Ok (emit placement wires)
+        let arrivals = Sta.computeArrival placement wires
+        let slack    = Sta.computeSlack   placement wires arrivals
+        let wires'   = Sta.insertDelays   slack wires
+        Ok (emit placement wires')
 
 
 // ---------------------------------------------------------------------
@@ -1111,4 +1160,96 @@ module RoutingTest =
                 // (5,1) is in the gap between gate 0 (x:0-4) and gate 1 (x:9-13)
                 Map.containsKey {X=5;Y=1} g
             | _ -> false
+        ]
+
+
+// ---------------------------------------------------------------------
+// 10. STA 単体テスト (M4)
+// ---------------------------------------------------------------------
+module StaTest =
+    open Units
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Sta
+    open Pipeline
+
+    // ── ヘルパー: ダミー Placed を作る ──────────────────────────────────
+    let private makePlaced (id: int) (kind: GateKind) (inputs: int list) (output: int) (cell: StdCell) : Placed =
+        { Gate   = { Id = id; Kind = kind; Inputs = inputs |> List.map NetId; Output = NetId output }
+          Cell   = cell
+          Origin = { X = id * (cell.Size.X + 4); Y = 0 } }
+
+    // ── テスト 1: 2-NOT チェーン (対称) ─────────────────────────────────
+    //   net2(pi) → NOT(u0) → net3 --wire(delay=7)--> NOT(u1) → net4
+    //   arrival(net2) = 0
+    //   arrival(net3) = 0 + 0(no wire for pi) + 4(latency) = 4
+    //   arrival(net4) = 4 + 7(wire) + 4(latency) = 15
+    //   slack(net3 wire) = 0  (only input to u1, it IS the target)
+    let private chain2 =
+        [ makePlaced 0 Not [2] 3 Library.not1
+          makePlaced 1 Not [3] 4 Library.not1 ]
+
+    let private chain2Wires =
+        [ { Net = NetId 3; Path = [ for x in 4..10 -> {X=x;Y=1} ]; Delay = 7<gen> } ]
+
+    // ── テスト 2: NAND(a,b) — 入力パスの非対称スラック ──────────────────
+    //   net2(pi), net3(pi)  → NAND(u0) → net4
+    //   wire net2: delay=5,  wire net3: delay=3
+    //   target = max(0+5, 0+3) = 5
+    //   slack(net2 wire) = 5-5 = 0,  slack(net3 wire) = 5-3 = 2
+    let private nandPlaced =
+        [ makePlaced 0 Nand [2; 3] 4 Library.junc3 ]
+
+    let private nandWires =
+        [ { Net = NetId 2; Path = [ for x in 0..4  -> {X=x;Y=0} ]; Delay = 5<gen> }
+          { Net = NetId 3; Path = [ for x in 0..2  -> {X=x;Y=0} ]; Delay = 3<gen> } ]
+
+    let runAll () : (string * bool) list =
+        let arr2    = computeArrival chain2 chain2Wires
+        let slk2    = computeSlack   chain2 chain2Wires arr2
+        let wires2' = insertDelays   slk2  chain2Wires
+
+        let arrN    = computeArrival nandPlaced nandWires
+        let slkN    = computeSlack   nandPlaced nandWires arrN
+        let wiresN' = insertDelays   slkN  nandWires
+        let net3DelayAfterInsert =
+            wiresN' |> List.find (fun w -> w.Net = NetId 3) |> fun w -> w.Delay
+
+        [ "chain2: arrival(net2)=0 (primary input)",
+            Map.tryFind (NetId 2) arr2 = Some 0<gen>
+
+          "chain2: arrival(net3)=4 (u0 output after Latency=4)",
+            Map.tryFind (NetId 3) arr2 = Some 4<gen>
+
+          "chain2: arrival(net4)=15 (4 + wire7 + Latency4)",
+            Map.tryFind (NetId 4) arr2 = Some 15<gen>
+
+          "chain2: slack(net3)=0 (only path, no slack)",
+            Map.tryFind (NetId 3) slk2 = Some 0<gen>
+
+          "chain2: insertDelays is no-op when all slacks=0",
+            wires2' = chain2Wires
+
+          "nand: arrival(net2)=0, arrival(net3)=0 (both primary)",
+            Map.tryFind (NetId 2) arrN = Some 0<gen> &&
+            Map.tryFind (NetId 3) arrN = Some 0<gen>
+
+          "nand: arrival(net4)=5+4=9 (target=5, Latency=4)",
+            Map.tryFind (NetId 4) arrN = Some 9<gen>
+
+          "nand: slack(net2 wire)=0 (critical path)",
+            Map.tryFind (NetId 2) slkN = Some 0<gen>
+
+          "nand: slack(net3 wire)=2 (shorter path needs 2 gen delay)",
+            Map.tryFind (NetId 3) slkN = Some 2<gen>
+
+          "nand: insertDelays adds 2 to net3 wire delay (3+2=5)",
+            net3DelayAfterInsert = 5<gen>
+
+          "compile 4-NOT chain still passes with STA in pipeline",
+            match Pipeline.compile Library.defaultLib RoutingTest.chainJson with
+            | Ok g -> not (Map.isEmpty g)
+            | _    -> false
         ]

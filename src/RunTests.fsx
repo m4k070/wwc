@@ -9,7 +9,8 @@ let run label (results: (string * bool) list) =
 let m1 = run "M1 CellTest"     (WwHdl.CellTest.runAll ())
 let m2 = run "M2 FrontendTest" (WwHdl.FrontendTest.runAll ())
 let m3 = run "M3 RoutingTest"  (WwHdl.RoutingTest.runAll ())
+let m4 = run "M4 StaTest"      (WwHdl.StaTest.runAll ())
 
-let all = m1 @ m2 @ m3
+let all = m1 @ m2 @ m3 @ m4
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length
