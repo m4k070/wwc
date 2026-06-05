@@ -159,6 +159,31 @@ module Library =
     // 誤りやすい。実際にはここに検証済みパターンを登録していく。
     // (各セルは Rule.run で単体テストして Latency を確定させる)
 
+    /// DELAY_n StdCell を動的生成する。n+1 セルの直線導線 (1 セル = 1 gen)。
+    /// n > 16 のときは蛇行パターンに切り替える予定 (TODO)。
+    let makeDelay (n: int<gen>) : StdCell =
+        let n' = int n
+        { Name    = sprintf "DELAY_%d" n'
+          Kind    = Buf
+          Size    = { X = n' + 1; Y = 1 }
+          Ports   = [ { Role = In;  Offset = { X = 0;  Y = 0 } }
+                      { Role = Out; Offset = { X = n'; Y = 0 } } ]
+          Latency = n
+          Pattern = ofAscii [ System.String.replicate (n' + 1) "#" ] }
+
+    /// Crossover StdCell のスタブ。水平・垂直 2 信号を交差させる 7×7 パターン。
+    /// Pattern は Rule.run で検証後に埋める。ポートは水平(In/Out) + 垂直(In/Out) の 4 本。
+    let crossover : StdCell =
+        { Name    = "CROSSOVER"
+          Kind    = Buf        // 専用 GateKind への変更は交差処理実装時に検討
+          Size    = { X = 7; Y = 7 }
+          Ports   = [ { Role = In;  Offset = { X = 0; Y = 3 } }   // 水平入力
+                      { Role = Out; Offset = { X = 6; Y = 3 } }   // 水平出力
+                      { Role = In;  Offset = { X = 3; Y = 0 } }   // 垂直入力
+                      { Role = Out; Offset = { X = 3; Y = 6 } } ] // 垂直出力
+          Latency = 6<gen>
+          Pattern = Map.empty }
+
 
 // ---------------------------------------------------------------------
 // 4. 配置 (Placement) と配線 (Routing)
@@ -185,6 +210,7 @@ module Route =
     open Units
     open Domain
     open Netlist
+    open Place
 
     /// 1 本の配線。長さ (= Path のセル数) がそのまま遅延になる。
     type Wire =
@@ -197,9 +223,97 @@ module Route =
           Path = path
           Delay = (List.length path) * 1<gen> }
 
+    type RoutingCell =
+        | Free              // 配線可能
+        | Blocked           // セルが占有または禁止領域
+        | Routed of NetId   // 既配線済みのネット
+
+    type RoutingGrid = Map<Coord, RoutingCell>
+
+    /// Placement からルーティンググリッドを構築する。
+    /// 各セルの bounding box 内を Blocked にし、それ以外は Free (= Map に存在しない) とする。
+    let buildGrid (placement: Placement) : RoutingGrid =
+        placement
+        |> List.collect (fun p ->
+            [ for x in 0 .. p.Cell.Size.X - 1 do
+                for y in 0 .. p.Cell.Size.Y - 1 do
+                    yield { X = p.Origin.X + x; Y = p.Origin.Y + y }, Blocked ])
+        |> Map.ofList
+
+    /// Lee 法 BFS で src から dst への最短経路を返す。到達不能なら None。
+    let leePath (grid: RoutingGrid) (src: Coord) (dst: Coord) : Coord list option =
+        // TODO: BFS 実装
+        // 1. dist: Map<Coord, int> で管理、初期値 src=0
+        // 2. 上下左右の隣接セルを展開、Free (= gridに存在しない) のみ通過可
+        // 3. dst 到達後に逆追跡して Path を返す
+        if src = dst then Some [ src ] else None
+
+    /// Wire リストから 2 本以上の経路が共有するセルを衝突として列挙する。
+    let findConflicts (wires: Wire list) : (Coord * NetId * NetId) list =
+        wires
+        |> List.collect (fun w -> w.Path |> List.map (fun c -> c, w.Net))
+        |> List.groupBy fst
+        |> List.choose (fun (coord, entries) ->
+            match List.map snd entries |> List.distinct with
+            | a :: b :: _ -> Some (coord, a, b)
+            | _            -> None)
+
+    /// 衝突点に Crossover セルを挿入し両ネットの経路を張り替える。
+    let insertCrossovers
+        (_conflicts: (Coord * NetId * NetId) list)
+        (wires: Wire list)
+        : Wire list =
+        // TODO: Crossover StdCell を配置し Path を入出力ポートに接続しなおす
+        wires
+
 
 // ---------------------------------------------------------------------
-// 5. パイプライン: 各段の型と railway 合成
+// 6. 静的タイミング解析 (STA)
+//    到達時刻の計算と DELAY_n セル挿入によるタイミング均等化。
+// ---------------------------------------------------------------------
+module Sta =
+    open Units
+    open Netlist
+    open Place
+    open Route
+
+    /// ネットごとの信号到達世代。
+    type ArrivalMap = Map<NetId, int<gen>>
+
+    /// トポロジカル順で各ネットの到達時刻を計算する。
+    ///   arrival(primary_input) = 0<gen>
+    ///   arrival(gate_output)   = max(arrival(input_i) + wire_i.Delay) + gate.Latency
+    let computeArrival
+        (_placement: Placement)
+        (_wires: Wire list)
+        : ArrivalMap =
+        // TODO: 依存グラフのトポロジカルソート → 各ネットへ伝播
+        Map.empty
+
+    /// 各 Wire のスラック（余裕世代）を計算する。
+    ///   slack(w) = target(gate) - arrival(src(w)) - w.Delay
+    /// target は当該ゲートの全入力の中で最大の到達時刻。
+    let computeSlack
+        (_arrival: ArrivalMap)
+        (_wires: Wire list)
+        : Map<NetId, int<gen>> =
+        // TODO: ゲートごとに target を算出しスラックを返す
+        Map.empty
+
+    /// スラックが正の Wire に DELAY_n 相当の遅延を付加して均等化する。
+    /// Delay フィールドを更新し、emit 時に伸長したパスとして展開する。
+    let insertDelays
+        (slack: Map<NetId, int<gen>>)
+        (wires: Wire list)
+        : Wire list =
+        wires |> List.map (fun w ->
+            match Map.tryFind w.Net slack with
+            | Some s when s > 0<gen> -> { w with Delay = w.Delay + s }
+            | _                       -> w)
+
+
+// ---------------------------------------------------------------------
+// 7. パイプライン: 各段の型と railway 合成
 // ---------------------------------------------------------------------
 module Pipeline =
     open Units
@@ -208,6 +322,22 @@ module Pipeline =
     open Library
     open Place
     open Route
+
+    // --- Yosys write_json の最小デシリアライズ型 ---
+    // `synth -flatten; abc -g AND,NOT; write_json` の出力に対応。
+
+    type YosysPort =
+        { Direction: string       // "input" | "output"
+          Bits: int list }        // ネット番号 (= NetId の元になる)
+
+    type YosysCell =
+        { Type: string                        // "$_NOT_", "$_AND_" など
+          PortDirections: Map<string, string> // ポート名 → "input"/"output"
+          Connections: Map<string, int list> } // ポート名 → ネット番号リスト
+
+    type YosysModule =
+        { Ports: Map<string, YosysPort>
+          Cells: Map<string, YosysCell> }
 
     type CompileError =
         | ParseError      of string
@@ -218,12 +348,25 @@ module Pipeline =
 
     // --- 段の境界。それぞれ別の型を返すので順序を取り違えられない ---
 
-    /// Frontend: HDL ソース → AST → 合成 → ネットリスト。
-    /// 実装方針: Yosys に投げて write_json した結果をパースするのが現実的
-    /// (`synth -flatten; abc -g AND,NOT` で正規化済みネットリストを得る)。
+    /// Yosys write_json 出力を YosysModule へパースする。
+    let parseYosysJson (_json: string) : Result<YosysModule, CompileError> =
+        // TODO: System.Text.Json でデシリアライズ
+        // JSON 構造: { "modules": { "top": { "ports": {...}, "cells": {...} } } }
+        Error (ParseError "parseYosysJson not implemented")
+
+    /// YosysModule を Netlist IR へ変換する。
+    let yosysToNetlist (_m: YosysModule) : Result<Netlist, CompileError> =
+        // TODO:
+        //   1. cells → Gate list (Type を GateKind に、connections を NetId に変換)
+        //   2. ports → PrimaryInputs / PrimaryOutputs
+        //   3. clk ポートを検出して ClockNet に設定
+        Error (ParseError "yosysToNetlist not implemented")
+
+    /// Frontend: Yosys JSON 文字列 → Netlist。
+    /// 呼び出し元は `yosys -p "synth -flatten; abc -g AND,NOT; write_json out.json" design.v`
+    /// で生成した JSON ファイルの内容を渡す。
     let frontend (src: string) : Result<Netlist, CompileError> =
-        // TODO: Verilog パーサ or Yosys JSON 取り込み
-        Error (ParseError "frontend not implemented")
+        parseYosysJson src |> Result.bind yosysToNetlist
 
     /// テクノロジマッピング: 各ゲートを StdCell に割り当てる。
     let techMap (lib: CellLibrary) (nl: Netlist)
