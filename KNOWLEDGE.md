@@ -181,6 +181,38 @@ match Map.tryFind c baseGrid with
 
 ---
 
+## M4 — STA / タイミング均等化
+
+### `|>` と `+` の演算子優先順位
+
+F# では `|>` が `+` より優先順位が **低い**。次のコードは意図通りに動かない:
+
+```fsharp
+// NG: A |> (f + B) と解釈される
+Map.tryFind n m |> Option.defaultValue 0<gen>
++ (Map.tryFind n w |> Option.defaultValue 0<gen>)
+
+// OK: 括弧で明示する
+(Map.tryFind n m |> Option.defaultValue 0<gen>)
++ (Map.tryFind n w |> Option.defaultValue 0<gen>)
+```
+
+### 一次入力の検出 (Placement のみから)
+
+Netlist を持たなくても、Placement から一次入力ネットを導出できる:
+- ゲート駆動ネット = `{ p.Gate.Output for p in placement }`
+- 一次入力ネット  = `{ n in p.Gate.Inputs } ∖ ゲート駆動ネット`
+
+### `computeArrival` iterative propagation
+
+Kahn のトポロジカルソートの代わりに「全入力が確定したゲートを繰り返し処理する」iterative 方式を採用。実装がシンプルで、組合せ回路 (DAG) なら必ず収束する。O(n²) だが小回路では十分。
+
+### `insertDelays` の物理実装は未完 (M5 以降)
+
+`insertDelays` は現在 Wire.Delay フィールドを更新するだけで、Path を実際に延長しない。物理的なメアンダリング (蛇行配線) は M5 以降で実装予定。STA の計算は正確だが、生成 Grid の実際の動作検証はまだできない。
+
+---
+
 ## 設計全般
 
 ### WireWorld の根本制約: 距離 = 遅延
