@@ -103,10 +103,13 @@ printfn "%s" (toRle g')
 
 - [ ] **`frontend`**: Yosys の `write_json`（`synth -flatten; abc -g AND,NOT`）出力を取り込む。パーサ自作より高速。
 - [ ] **セルライブラリ拡充**: NOT / AND / OR / XOR / DFF / splitter / crossover の検証済みパターンと `Latency` を登録。
-- [ ] **`route`**: Lee 法（迷路探索）+ 遅延補償のための意図的迂回。
-- [ ] **タイミング均等化の本実装**: `balanceGateInputs` を全ゲートへ適用する STA（静的タイミング解析）。配線パスの蛇行延長で遅延を吸収。
-- [ ] **交差処理**: 標準ルールでは面積大。`Wireworld++`（5 状態拡張）採用を検討。
-- [ ] **エンドツーエンド検証**: 生成回路を `Rule.run` で実行し、HDL のシミュレーション結果と突き合わせる回帰テスト。
+  - 参考: suzuki-navi/domino はこれら全ゲートを独自 CA で実装済み。ゲートの入出力構造・組み合わせ方が設計の参考になる。
+- [ ] **遅延セルの追加**: 蛇行配線だけでなく、固定長の `DELAY_n` StdCell をライブラリに登録する。
+  domino の `sofaA`（遅延素子）に相当する専用セルを用意することで `balanceGateInputs` の実装が単純になる（パスを伸ばす代わりにセルを挿入するだけになる）。
+- [ ] **交差処理**: domino が方向性ありの `cross` ノードで解いているように、WireWorld でも専用の crossover StdCell（既知の 2 配線交差パターン）を設計して `route` に組み込む。標準ルールで面積が大きくなる場合は `Wireworld++`（5 状態拡張）採用も検討。
+- [ ] **`route`**: Lee 法（迷路探索）+ 遅延補償のための意図的迂回。交差が必要な箇所に crossover セルを自動挿入する。
+- [ ] **タイミング均等化の本実装**: `balanceGateInputs` を全ゲートへ適用する STA（静的タイミング解析）。速いパスへ `DELAY_n` セルを挿入して最遅パスに合わせる。
+- [ ] **エンドツーエンド検証**: 生成回路を `Rule.run` で実行し HDL のシミュレーション結果と突き合わせる回帰テスト。検証ターゲットは domino の実装例（カウンタ → レジスタ → ALU → 乗算器）を難易度順に追う。
 
 ## ライセンス
 
@@ -117,3 +120,4 @@ MIT
 - Conway's Game of Life / WireWorld のチューリング完全性
 - QFT（Quest For Tetris）プロジェクト — CA 上の汎用計算機構築
 - Golly — セルオートマトンシミュレータ
+- [suzuki-navi/domino](https://github.com/suzuki-navi/domino) — 独自 CA による論理回路ビジュアルシミュレータ。crossover セル・遅延素子・ALU まで実装済み。交差処理と遅延挿入の設計参考。
