@@ -43,16 +43,18 @@ DELAY_9:  #####         蛇行 (4+折返1+4), Size 5×3, Latency 9<gen>
 
 ### 2.3 基本ゲート
 
-| ゲート | 実装状況 | 方式 | 留意点 |
-|--------|---------|------|--------|
-| BUF (DELAY_n) | ✅ 検証済み | 直線導線 | `makeDelay` で動的生成 |
-| OR2 | ✅ 検証済み | 2 導線を対角合流 | 同 tick に 2 Head → 2 近傍 → fires (WW 規則 OK) |
-| SPLIT | ✅ 検証済み | Y 字対角分岐 | (1,1) から (2,0)/(2,2) へ同時分岐 |
-| NOT1 | 🔲 スタブ | クロックループ + 3-Head 抑制 | ループ周期と data タイミングの整合が課題 |
-| AND2 | 🔲 スタブ | NAND(A,B,clock) + NOT | A=1,B=0 の誤発火防止に diode が必要 |
-| XOR | 🔲 未着手 | OR − AND (NAND 2 段) | AND2 確定後に設計 |
-| DFF | 🔲 未着手 | ループ型ラッチ + クロックゲート | NOT1 確定後に設計 |
-| Crossover | 🔲 スタブ | タイミング分離型 7×7 | 後述 §2.4 |
+| ゲート | 実装状況 | 方式 |
+|--------|---------|------|
+| BUF / DELAY_n | ✅ 検証済み | 直線導線、`makeDelay` で動的生成 |
+| OR2 | ✅ 検証済み | 2 導線を対角合流 (5×3) |
+| SPLIT | ✅ 検証済み | Y 字対角分岐 (5×3) |
+| JUNC3 | ✅ パターン確定・CellTest 通過待ち | 5×5 十字合流点 — NOT/NAND の核 |
+| NOT1 | ✅ JUNC3 エイリアス | `{ junc3 with Kind=Not }` |
+| AND2 | 🔲 設計確定、Pattern 未実装 | JUNC3×2 直列 (NAND + NOT), Latency=8 |
+| DIODE | ✅ パターン確定・CellTest 通過待ち | Quinapalus 公式設計 4×3、Latency=3 (§2.5 参照) |
+| XOR | 🔲 未着手 | AND2 確定後に設計 |
+| DFF | 🔲 未着手 | NOT1 確定後に設計 |
+| Crossover | 🔲 スタブ | タイミング分離型 7×7 (§2.4 参照) |
 
 #### OR2 パターン詳細 (5×3, Latency=4)
 
@@ -63,7 +65,6 @@ DELAY_9:  #####         蛇行 (4+折返1+4), Size 5×3, Latency 9<gen>
 ```
 
 (2,0) と (3,1) は対角隣接 (Δx=1, Δy=1)。Head 1〜2 個で (3,1) が発火し (4,1) から出力。
-`CellTest.verifyLatency` と `verifySymmetry` で確認済み。
 
 #### SPLIT パターン詳細 (5×3, Latency=4)
 
@@ -74,28 +75,74 @@ DELAY_9:  #####         蛇行 (4+折返1+4), Size 5×3, Latency 9<gen>
 ```
 
 (1,1) と (2,0), (2,2) は対角隣接。入力 Head が (1,1) に到達すると同時に両方へ分岐。
-`CellTest.verifyAllOutputs` で確認済み。
 
-#### NOT1 設計方針 (未実装)
+#### JUNC3 — NOT/NAND の核 (5×5, Latency=4)
 
-WireWorld の NOT には **クロック信号** が必須。
-- 理由: `Wire → Head` の条件は「1 or 2 Head 近傍」のみ。data=1 単独でも出力が発火してしまうため、data=1 のときに発火を抑制する「3 Head = 不発火」メカニズムが必要。
-- アプローチ: period-P クロックループの電子を常時出力方向へ流し、data=1 のとき合流点で 3 Head を作り出力を止める。
-- 課題: clock Head と data Head が合流点に「同時」に届くタイミング設計。
-
-#### AND2 設計方針 (未実装)
-
-AND の本質的困難: `Wire → Head` が「1 or 2 Head」で発火するため、A=1,B=0 でも合流点が発火してしまう(= OR と同じ)。
-
-解決策: **NAND + NOT の組み合わせ**
 ```
-NAND(A,B,clock): 3 Head → 不発火 (NAND出力=0)、1-2 Head → 発火 (NAND出力=1)
-AND(A,B) = NOT(NAND(A,B))
+..#..   y=0  入力 C 根本
+..#..   y=1  入力 C 経路
+#####   y=2  左=A, (2,2)=junction, 右=output
+..#..   y=3  入力 B 経路
+..#..   y=4  入力 B 根本
 ```
 
-ただし NAND は「常時 clock が来ている」前提。clock + A + B = 3 Head が揃ったときのみ出力を止める。A=1 のみでも clock + A = 2 Head → 発火してしまう → AND(1,0)=1 になり誤動作。
+**動作**:
 
-**根本解決**: electron diode (電子ダイオード) を組み込み、A 単独では合流点に到達できないようにする。ダイオードパターンの設計が NOT1 の後続タスク。
+入力 A(x=0,y=2), B(x=2,y=0), C(x=2,y=4) が t=0 に Head:
+- t=1: 中間セル (1,2),(2,1),(2,3) が Head
+- t=2: junction (2,2) が隣接 Head 数を評価
+  - 1〜2個 → fires → t=4 で (4,2) = 出力
+  - 3個    → no fire → 出力なし
+
+**用途別配線**:
+
+```
+NOT(A)   : left=A, top=clock1, bottom=clock2
+  A=0 → 2 Head → fires → output=1 ✓
+  A=1 → 3 Head → no fire → output=0 ✓
+
+NAND(A,B): left=A, top=B, bottom=clock
+  A∧B=0 → 1-2 Head → fires → NAND=1 ✓
+  A∧B=1 → 3 Head → no fire → NAND=0 ✓
+```
+
+**AND の正しい動作 (NAND + NOT)**:
+
+NAND(A,B,clock) の出力を NOT(nand_out, clock', clock') に通す。
+「NAND fires」= 電子が出る = NOT への input=1。
+
+```
+A=0,B=0: NAND 1 Head → fires → NOT input=1 + 2 clocks = 3 Head → no fire → AND=0 ✓
+A=1,B=0: NAND 2 Head → fires → NOT input=1 + 2 clocks = 3 Head → no fire → AND=0 ✓
+A=0,B=1: 同上 → AND=0 ✓
+A=1,B=1: NAND 3 Head → no fire → NOT input=0 + 2 clocks = 2 Head → fires → AND=1 ✓
+```
+
+diode は不要だった。NAND+NOT が正しく AND を実現する。
+
+### 2.5 DIODE パターン詳細 (4×3, Latency=3)
+
+出典: https://www.quinapalus.com/wi-diode.gif (Brian Silverman の公式 WireWorld コンピュータより)
+
+```
+.##.   y=0  アーム上
+##.#   y=1  入力(x=0) / 中間(x=1) / ギャップ(x=2=Empty!) / 出力(x=3)
+.##.   y=2  アーム下
+```
+
+**動作原理 — ギャップが非対称性を生む**:
+
+ギャップ (2,1) が存在することで、(1,1) の Head が対角の (2,0)(2,2) へ伝播し、その 2 つが次に (3,1) を対角合流で発火させる。逆方向では (2,0)(2,2) が (1,0)(1,1)(1,2) の 3 本を同時発火させ、その 3 本が (0,1) を 3 Head 近傍にして阻止する。
+
+| 方向 | t+1 | t+2 | t+3 | 結果 |
+|------|-----|-----|-----|------|
+| 順 (→) H at (0,1) | (1,0)(1,1)(1,2)=H | (2,0)(2,2)=H, (0,1)=3Heads→blocked | (3,1)=H | 通過 Latency=3 ✓ |
+| 逆 (←) H at (3,1) | (2,0)(2,2)=H | (1,0)(1,1)(1,2)=H | (0,1)=3Heads→no fire | 遮断 ✓ |
+
+**注意事項**:
+- 単一電子では t+3 以降に内部発振が生じる (ジャンクション内部でのバウンス)。
+- 同期回路でクロック周期を十分長く設定すること (期間 ≥ 8<gen> を推奨)。
+- 遮断用の代替として junc3(data=backward, clock, clock) の方がノイズレス。
 
 ### 2.4 Crossover
 

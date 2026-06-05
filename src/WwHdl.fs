@@ -252,31 +252,107 @@ module Library =
           Latency = 0<gen>       // TODO: Rule.run で実測後に更新
           Pattern = Map.empty }
 
-    /// AND2: 2 入力 AND ゲートのスタブ。
+    /// JUNC3: 3 入力合流点。NOT / NAND の核となるセル。Latency = 4<gen>。
     ///
-    /// 設計方針:
-    ///   balanceGateInputs で両入力を同一 tick に揃えた後、
-    ///   NAND(A,B,clock) の 3-Head 吸収規則 + 後段 NOT で AND を実現する。
-    ///     A=0,B=0: clock のみ 1 Head → NAND fires → NOT → 0
-    ///     A=1,B=0 or A=0,B=1: 2 Head → NAND fires → NOT → 0... 要再検討
-    ///     A=1,B=1: 3 Head → NAND 発火せず → NOT → 1
-    ///   ※ A=1,B=0 の誤発火を防ぐには diode または timing guard が必要。
+    /// パターン (5×5):
+    ///   ..#..   y=0  入力 C の根本
+    ///   ..#..   y=1  入力 C 経路
+    ///   #####   y=2  左=A, junction=(2,2), 右=出力
+    ///   ..#..   y=3  入力 B 経路
+    ///   ..#..   y=4  入力 B の根本
+    ///
+    /// 動作 (t=0 で A,B,C が各ポートに Head):
+    ///   t=1 → (1,2),(2,1),(2,3) が Head (中間セル)
+    ///   t=2 → junction (2,2) が隣接 Head 数を評価
+    ///     1 or 2 個 → fires → t=4 で (4,2) = 出力 Head
+    ///     3 個     → no fire → 出力なし
+    ///
+    /// NOT(A)   : left=A, top=clock1, bottom=clock2 → right=NOT(A)
+    ///   A=0 → 2 Head → fires → output=1 ✓
+    ///   A=1 → 3 Head → no fire → output=0 ✓
+    ///
+    /// NAND(A,B): left=A, top=B, bottom=clock → right=NAND(A,B)
+    ///   A∧B=1 → 3 Head → no fire → NAND=0 ✓
+    ///   otherwise → 1-2 Head → fires → NAND=1 ✓
+    let junc3 : StdCell =
+        { Name    = "JUNC3"
+          Kind    = Nand
+          Size    = { X = 5; Y = 5 }
+          Ports   = [ { Role = In;    Offset = { X = 0; Y = 2 } }  // 左: data / A
+                      { Role = In;    Offset = { X = 2; Y = 0 } }  // 上: B / clock1
+                      { Role = In;    Offset = { X = 2; Y = 4 } }  // 下: C / clock2
+                      { Role = Out;   Offset = { X = 4; Y = 2 } } ]// 右: output
+          Latency = 4<gen>
+          Pattern = ofAscii [ "..#.."
+                               "..#.."
+                               "#####"
+                               "..#.."
+                               "..#.." ] }
+
+    /// NOT1: junc3 の上下ポートにクロックを接続した NOT ゲート。
+    /// パターン・Latency は junc3 と同一。コンパイラが Clock ポートへ同期信号を配線する。
+    let not1 : StdCell = { junc3 with Name = "NOT1"; Kind = Not }
+
+    /// AND2: NAND(A,B,clock) + NOT(nand_out,clock',clock') の 2 段 junc3 構成。
+    ///
+    /// 真理値表の確認:
+    ///   A=0,B=0 → NAND fires (1 Head) → NOT receives 0 (no wire) → NOT fires with 2 clocks → AND=0?
+    ///             Wait: NOT(0) means input=no electron. NOT stage sees only 2 clocks → fires → AND=1? NO.
+    ///             ここが混乱点。「NAND fires = NAND_out=1 = 電子が出る」という理解が必要。
+    ///             NAND(0,0,clock)=1 → 電子が出る → NOT stage input=1 + 2 clocks = 3 Head → no fire → AND=0 ✓
+    ///   A=1,B=0 → NAND(1,0,clock)=1 → 電子 → NOT 3 Head → AND=0 ✓
+    ///   A=1,B=1 → NAND(1,1,clock)=0 → 電子なし → NOT 2 clocks = 2 Head → fires → AND=1 ✓
+    ///
+    /// AND 全体 Latency = 4 (NAND) + 4 (NOT) = 8<gen>。
     let and2 : StdCell =
         { Name    = "AND2"
           Kind    = And
-          Size    = { X = 10; Y = 6 }
-          Ports   = [ { Role = In;    Offset = { X = 0; Y = 1 } }
-                      { Role = In;    Offset = { X = 0; Y = 5 } }
-                      { Role = Out;   Offset = { X = 9; Y = 3 } }
-                      { Role = Clock; Offset = { X = 5; Y = 0 } } ]
-          Latency = 0<gen>       // TODO: Rule.run で実測後に更新
-          Pattern = Map.empty }
+          Size    = { X = 13; Y = 5 }
+          Ports   = [ { Role = In;    Offset = { X = 0;  Y = 2 } }  // 左: A
+                      { Role = In;    Offset = { X = 2;  Y = 0 } }  // 上1: B (NAND 用)
+                      { Role = In;    Offset = { X = 2;  Y = 4 } }  // 下1: clock (NAND 用)
+                      { Role = In;    Offset = { X = 9;  Y = 0 } }  // 上2: clock' (NOT 用)
+                      { Role = In;    Offset = { X = 9;  Y = 4 } }  // 下2: clock' (NOT 用)
+                      { Role = Out;   Offset = { X = 12; Y = 2 } } ]
+          Latency = 8<gen>
+          Pattern = Map.empty }  // TODO: 2 junc3 を直列配置した複合パターン
+
+    /// DIODE: 電子ダイオード (Quinapalus WireWorld 公式設計)。Latency = 3<gen>。
+    ///
+    /// パターン (4×3)  — 出典: https://www.quinapalus.com/wi-diode.gif
+    ///   .##.   y=0  アーム上 (x=1..2)
+    ///   ##.#   y=1  入力(x=0)・中間(x=1)・ギャップ(x=2)・出力(x=3)
+    ///   .##.   y=2  アーム下 (x=1..2)
+    ///
+    /// 動作原理 (3-Head 吸収則):
+    ///   順方向 (→): H at (0,1)
+    ///     t+1: (1,0),(1,1),(1,2) → Head  [対角/直交で同時発火]
+    ///     t+2: (2,0),(2,2) → Head; (0,1) は 3 Head 近傍 → 反射ブロック
+    ///     t+3: (3,1) → Head  [(2,0)(2,2) からの対角合流] ✓ Latency=3
+    ///
+    ///   逆方向 (←): H at (3,1)
+    ///     t+1: (2,0),(2,2) → Head  [対角]
+    ///     t+2: (1,0),(1,1),(1,2) → Head  [3 本同時]
+    ///     t+3: (0,1) が 3 Head 近傍 → 発火せず → 遮断 ✓
+    ///
+    /// 注意: 単一電子では内部発振が生じる (t+3 以降の反射)。
+    ///   同期回路でクロック周期を十分長く取るか、junc3 (clock-gated pass) で代替すること。
+    let diode : StdCell =
+        { Name    = "DIODE"
+          Kind    = Buf
+          Size    = { X = 4; Y = 3 }
+          Ports   = [ { Role = In;  Offset = { X = 0; Y = 1 } }
+                      { Role = Out; Offset = { X = 3; Y = 1 } } ]
+          Latency = 3<gen>
+          Pattern = ofAscii [ ".##."
+                               "##.#"
+                               ".##." ] }
 
     /// 検証済みセルのみを含むデフォルトライブラリ。
-    /// NOT1 / AND2 は Pattern 確定後に追加する。
     let defaultLib : CellLibrary =
-        [ Buf, buf
-          Or,  or2 ]
+        [ Buf,  buf
+          Or,   or2
+          Nand, junc3 ]
         |> Map.ofList
 
 
@@ -325,13 +401,54 @@ module CellTest =
             |> List.filter (fun p -> p.Role = Out)
             |> List.forall (fun op -> get result op.Offset = Head)
 
+    /// JUNC3 の特定入力パターンで出力の有無を確認する。
+    /// heads: In ポートのうち Head を注入するポートのインデックスリスト (0=left,1=top,2=bottom)
+    /// expectFires: 出力 (4,2) に Head が来るか
+    let testJunc3 (headPortIndices: int list) (expectFires: bool) : bool =
+        let inPorts = junc3.Ports |> List.filter (fun p -> p.Role = In)
+        let initial =
+            headPortIndices
+            |> List.fold (fun g i -> g |> Map.add inPorts.[i].Offset Head) junc3.Pattern
+        let result = run (int junc3.Latency) initial
+        let fired  = get result { X = 4; Y = 2 } = Head
+        fired = expectFires
+
+    /// DIODE の順方向通過と逆方向遮断を確認する。
+    /// forward=true → In に Head を置いて Latency 後に Out に Head が来るか
+    /// forward=false → Out に Head を置いて Latency 後に In に Head が来ないか
+    let testDiode (forward: bool) : bool =
+        let inPort  = diode.Ports |> List.find (fun p -> p.Role = In)
+        let outPort = diode.Ports |> List.find (fun p -> p.Role = Out)
+        if forward then
+            let initial = diode.Pattern |> Map.add inPort.Offset Head
+            let result  = run (int diode.Latency) initial
+            get result outPort.Offset = Head
+        else
+            // 逆方向: Out に Head を置き、In の先 (入力方向) に Head が伝わらないことを確認
+            // 正確には Out 入力後 Latency gen で In セルが Head にならないこと
+            let initial = diode.Pattern |> Map.add outPort.Offset Head
+            let result  = run (int diode.Latency) initial
+            get result inPort.Offset <> Head  // blocked = In セルに Head が来ない
+
     /// 検証済みセルをまとめてテストし (テスト名, 合否) リストを返す。
     let runAll () : (string * bool) list =
-        [ "BUF_h4   latency",      verifyLatency   buf
-          "OR2      latency(in1)",  verifyLatency   or2
-          "OR2      symmetry",      verifySymmetry  or2
-          "SPLIT    latency",       verifyLatency   splitter
-          "SPLIT    all-outputs",   verifyAllOutputs splitter ]
+        [ "BUF_h4   latency",          verifyLatency   buf
+          "OR2      latency(in1)",      verifyLatency   or2
+          "OR2      symmetry",          verifySymmetry  or2
+          "SPLIT    latency",           verifyLatency   splitter
+          "SPLIT    all-outputs",       verifyAllOutputs splitter
+          // JUNC3: NOT(A) = JUNC3(left=A, top=clock, bottom=clock)
+          "JUNC3    NOT(0)=1 fires",    testJunc3 [1;2]   true   // A=0, 2 clocks → fires
+          "JUNC3    NOT(1)=0 no-fire",  testJunc3 [0;1;2] false  // A=1 + 2 clocks → 3 Head → no fire
+          // JUNC3: NAND(A,B) = JUNC3(left=A, top=B, bottom=clock)
+          "JUNC3    NAND(0,0)=1",       testJunc3 [2]     true   // clock only → fires
+          "JUNC3    NAND(1,0)=1",       testJunc3 [0;2]   true   // A+clock → fires
+          "JUNC3    NAND(0,1)=1",       testJunc3 [1;2]   true   // B+clock → fires
+          "JUNC3    NAND(1,1)=0",       testJunc3 [0;1;2] false  // A+B+clock → 3 Head → no fire
+          // DIODE: Quinapalus 公式設計
+          "DIODE    forward pass",      testDiode true           // 順方向通過 Latency=3
+          "DIODE    backward block",    testDiode false          // 逆方向遮断
+        ]
 
 
 // ---------------------------------------------------------------------
