@@ -184,6 +184,155 @@ module Library =
           Latency = 6<gen>
           Pattern = Map.empty }
 
+    // -----------------------------------------------------------------------
+    // 検証済みセル (Rule.run で Latency を実測済み)
+    // -----------------------------------------------------------------------
+
+    /// OR2: 2 入力 OR ゲート。Latency = 4<gen>。
+    ///
+    /// パターン (5×3):
+    ///   ###..   y=0  入力 A  (x=0..2)
+    ///   ...##   y=1  合流+出力 (x=3..4)
+    ///   ###..   y=2  入力 B  (x=0..2)
+    ///
+    /// 動作: (2,0) または (2,2) の Head が (3,1) と対角隣接 (Δx=1,Δy=1)。
+    ///   Head 1 個 → (3,1) fires → (4,1) = 出力。
+    ///   Head 2 個 → (3,1) に 2 Head 近傍 → fires (WW 規則: 1 or 2 で発火)。
+    let or2 : StdCell =
+        { Name    = "OR2"
+          Kind    = Or
+          Size    = { X = 5; Y = 3 }
+          Ports   = [ { Role = In;  Offset = { X = 0; Y = 0 } }
+                      { Role = In;  Offset = { X = 0; Y = 2 } }
+                      { Role = Out; Offset = { X = 4; Y = 1 } } ]
+          Latency = 4<gen>
+          Pattern = ofAscii [ "###  "
+                               "   ##"
+                               "###  " ] }
+
+    /// SPLIT: 1 入力 2 出力スプリッタ。Latency = 4<gen>。
+    ///
+    /// パターン (5×3):
+    ///   ..###   y=0  出力 A 方向 (x=2..4)
+    ///   ##...   y=1  入力+折れ点 (x=0..1)
+    ///   ..###   y=2  出力 B 方向 (x=2..4)
+    ///
+    /// 動作: (0,1)→(1,1)→対角→(2,0) と (2,2) が同時発火 → (4,0),(4,2) へ到達。
+    let splitter : StdCell =
+        { Name    = "SPLIT"
+          Kind    = Buf
+          Size    = { X = 5; Y = 3 }
+          Ports   = [ { Role = In;  Offset = { X = 0; Y = 1 } }
+                      { Role = Out; Offset = { X = 4; Y = 0 } }
+                      { Role = Out; Offset = { X = 4; Y = 2 } } ]
+          Latency = 4<gen>
+          Pattern = ofAscii [ "..###"
+                               "##..."
+                               "..###" ] }
+
+    // -----------------------------------------------------------------------
+    // スタブセル (パターン未確定 — Rule.run 検証待ち)
+    // -----------------------------------------------------------------------
+
+    /// NOT1: クロック同期型 NOT ゲートのスタブ。
+    ///
+    /// 設計方針 (DESIGN.md §2.3 参照):
+    ///   period-8 クロックループの出力を data=1 の 3-Head 規則で抑制する。
+    ///     data=0 → クロック電子が出力ポートへ (output=1)
+    ///     data=1 → clock + data + 補助信号 = 3 Head → 出力セル発火せず (output=0)
+    ///
+    /// 未解決: ループ周期とデータ到達タイミングの調整。Rule.run で確認後に Pattern/Latency を確定。
+    let not1 : StdCell =
+        { Name    = "NOT1"
+          Kind    = Not
+          Size    = { X = 10; Y = 6 }
+          Ports   = [ { Role = In;    Offset = { X = 0; Y = 3 } }
+                      { Role = Out;   Offset = { X = 9; Y = 3 } }
+                      { Role = Clock; Offset = { X = 5; Y = 0 } } ]
+          Latency = 0<gen>       // TODO: Rule.run で実測後に更新
+          Pattern = Map.empty }
+
+    /// AND2: 2 入力 AND ゲートのスタブ。
+    ///
+    /// 設計方針:
+    ///   balanceGateInputs で両入力を同一 tick に揃えた後、
+    ///   NAND(A,B,clock) の 3-Head 吸収規則 + 後段 NOT で AND を実現する。
+    ///     A=0,B=0: clock のみ 1 Head → NAND fires → NOT → 0
+    ///     A=1,B=0 or A=0,B=1: 2 Head → NAND fires → NOT → 0... 要再検討
+    ///     A=1,B=1: 3 Head → NAND 発火せず → NOT → 1
+    ///   ※ A=1,B=0 の誤発火を防ぐには diode または timing guard が必要。
+    let and2 : StdCell =
+        { Name    = "AND2"
+          Kind    = And
+          Size    = { X = 10; Y = 6 }
+          Ports   = [ { Role = In;    Offset = { X = 0; Y = 1 } }
+                      { Role = In;    Offset = { X = 0; Y = 5 } }
+                      { Role = Out;   Offset = { X = 9; Y = 3 } }
+                      { Role = Clock; Offset = { X = 5; Y = 0 } } ]
+          Latency = 0<gen>       // TODO: Rule.run で実測後に更新
+          Pattern = Map.empty }
+
+    /// 検証済みセルのみを含むデフォルトライブラリ。
+    /// NOT1 / AND2 は Pattern 確定後に追加する。
+    let defaultLib : CellLibrary =
+        [ Buf, buf
+          Or,  or2 ]
+        |> Map.ofList
+
+
+// ---------------------------------------------------------------------
+// 3.5 セル単体テスト (Rule.run ベース)
+//     各 StdCell の Latency と対称性を Rule.run でチェックするハーネス。
+//     `dotnet script` や xUnit から呼び出して使う。
+// ---------------------------------------------------------------------
+module CellTest =
+    open Units
+    open Domain
+    open Netlist
+    open Library
+    open Rule
+
+    /// In ポートに Head を置いて Latency 世代後に Out ポートへ Head が
+    /// 届くか確認する。Clock ポートを持つセルはこのテストでは検証不可。
+    let verifyLatency (cell: StdCell) : bool =
+        match cell.Ports |> List.tryFind (fun p -> p.Role = In),
+              cell.Ports |> List.tryFind (fun p -> p.Role = Out) with
+        | Some inPort, Some outPort ->
+            let initial = cell.Pattern |> Map.add inPort.Offset Head
+            let result  = run (int cell.Latency) initial
+            get result outPort.Offset = Head
+        | _ -> false
+
+    /// 各入力ポートに単独で Head を入れたとき、すべて同じ Latency で
+    /// 最初の Out ポートへ届くことを確認する (OR/AND の対称性テスト)。
+    let verifySymmetry (cell: StdCell) : bool =
+        let outPort = cell.Ports |> List.find (fun p -> p.Role = Out)
+        cell.Ports
+        |> List.filter (fun p -> p.Role = In)
+        |> List.forall (fun inPort ->
+            let initial = cell.Pattern |> Map.add inPort.Offset Head
+            let result  = run (int cell.Latency) initial
+            get result outPort.Offset = Head)
+
+    /// スプリッタ専用: 単一入力から全 Out ポートへ同時到達するか確認する。
+    let verifyAllOutputs (cell: StdCell) : bool =
+        match cell.Ports |> List.tryFind (fun p -> p.Role = In) with
+        | None -> false
+        | Some inPort ->
+            let initial  = cell.Pattern |> Map.add inPort.Offset Head
+            let result   = run (int cell.Latency) initial
+            cell.Ports
+            |> List.filter (fun p -> p.Role = Out)
+            |> List.forall (fun op -> get result op.Offset = Head)
+
+    /// 検証済みセルをまとめてテストし (テスト名, 合否) リストを返す。
+    let runAll () : (string * bool) list =
+        [ "BUF_h4   latency",      verifyLatency   buf
+          "OR2      latency(in1)",  verifyLatency   or2
+          "OR2      symmetry",      verifySymmetry  or2
+          "SPLIT    latency",       verifyLatency   splitter
+          "SPLIT    all-outputs",   verifyAllOutputs splitter ]
+
 
 // ---------------------------------------------------------------------
 // 4. 配置 (Placement) と配線 (Routing)
