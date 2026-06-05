@@ -484,12 +484,43 @@ module Route =
         |> Map.ofList
 
     /// Lee 法 BFS で src から dst への最短経路を返す。到達不能なら None。
+    /// src/dst は Blocked 領域内 (セルのポート座標) でも通過できる。
+    /// 中間セルは Free (grid に存在しない) のみ通過可。
     let leePath (grid: RoutingGrid) (src: Coord) (dst: Coord) : Coord list option =
-        // TODO: BFS 実装
-        // 1. dist: Map<Coord, int> で管理、初期値 src=0
-        // 2. 上下左右の隣接セルを展開、Free (= gridに存在しない) のみ通過可
-        // 3. dst 到達後に逆追跡して Path を返す
-        if src = dst then Some [ src ] else None
+        if src = dst then Some [src]
+        else
+            let passable c =
+                c = src || c = dst ||
+                match Map.tryFind c grid with
+                | None | Some Free -> true
+                | _ -> false
+
+            let dirs = [| {X=1;Y=0}; {X= -1;Y=0}; {X=0;Y=1}; {X=0;Y= -1} |]
+            let prev  = System.Collections.Generic.Dictionary<Coord, Coord>()
+            let queue = System.Collections.Generic.Queue<Coord>()
+            prev.[src] <- src
+            queue.Enqueue src
+
+            let mutable found = false
+            while queue.Count > 0 && not found do
+                let c = queue.Dequeue()
+                if c = dst then found <- true
+                else
+                    for d in dirs do
+                        let n = { X = c.X + d.X; Y = c.Y + d.Y }
+                        if not (prev.ContainsKey n) && passable n then
+                            prev.[n] <- c
+                            queue.Enqueue n
+
+            if not found then None
+            else
+                let path = System.Collections.Generic.List<Coord>()
+                let mutable cur = dst
+                while cur <> src do
+                    path.Insert(0, cur)
+                    cur <- prev.[cur]
+                path.Insert(0, src)
+                Some (List.ofSeq path)
 
     /// Wire リストから 2 本以上の経路が共有するセルを衝突として列挙する。
     let findConflicts (wires: Wire list) : (Coord * NetId * NetId) list =
@@ -751,10 +782,62 @@ module Pipeline =
                 { Gate = g; Cell = cell; Origin = origin })
         Ok placed
 
-    /// 配線: Lee 法 (迷路探索) でネットごとに経路を引く。
-    let route (p: Placement) : Result<Wire list, CompileError> =
-        // TODO: Lee algorithm + 交差処理 (Wireworld++ ルールなら容易)
-        Error (RoutingCongestion (NetId -1))
+    /// 配線: Lee 法でゲート間ネットを配線する。
+    /// ポートは Blocked 領域内に存在するため src/dst は例外扱いで通過させる。
+    /// クロックポート (Role=Clock) および論理入力数を超える物理 In ポートは今回スキップ。
+    let route (placement: Placement) : Result<Wire list, CompileError> =
+        let baseGrid = buildGrid placement
+
+        // 出力ポート座標: NetId → Coord
+        let outCoords =
+            placement |> List.choose (fun p ->
+                p.Cell.Ports |> List.tryFind (fun port -> port.Role = Out)
+                |> Option.map (fun port -> p.Gate.Output, portCoord p port))
+            |> Map.ofList
+
+        // 入力ポート座標: (NetId, Coord) list
+        // Seq.zip で Gate.Inputs と In ポートを短い方に合わせて対応付ける
+        let inCoordPairs =
+            placement |> List.collect (fun p ->
+                let inPorts = p.Cell.Ports |> List.filter (fun port -> port.Role = In)
+                Seq.zip p.Gate.Inputs inPorts
+                |> Seq.map (fun (netId, port) -> netId, portCoord p port)
+                |> List.ofSeq)
+
+        let inCoordsMap =
+            inCoordPairs
+            |> List.groupBy fst
+            |> List.map (fun (k, vs) -> k, List.map snd vs)
+            |> Map.ofList
+
+        // src と dst がそろっている内部ネットのみ配線
+        let nets =
+            outCoords |> Map.toList
+            |> List.choose (fun (netId, src) ->
+                inCoordsMap |> Map.tryFind netId
+                |> Option.map (fun dsts -> netId, src, dsts))
+
+        let routeOne (grid: RoutingGrid) (wires: Wire list) (netId: NetId) (src: Coord) (dst: Coord)
+            : Result<RoutingGrid * Wire list, CompileError> =
+            match leePath grid src dst with
+            | None -> Error (RoutingCongestion netId)
+            | Some path ->
+                let wire = ofPath netId path
+                let grid' =
+                    path |> List.fold (fun g c ->
+                        match Map.tryFind c baseGrid with
+                        | Some Blocked -> g     // ポート座標の Blocked 領域は上書きしない
+                        | _ -> Map.add c (Routed netId) g) grid
+                Ok (grid', wire :: wires)
+
+        nets
+        |> List.fold (fun acc (netId, src, dsts) ->
+            acc |> Result.bind (fun (g, ws) ->
+                dsts |> List.fold (fun acc2 dst ->
+                    acc2 |> Result.bind (fun (g2, ws2) -> routeOne g2 ws2 netId src dst)
+                ) (Ok (g, ws))))
+            (Ok (baseGrid, []))
+        |> Result.map (fun (_, wires) -> List.rev wires)
 
     /// ★ タイミング均等化 ★ — WireWorld 設計の肝。
     /// あるゲートの全入力で「信号到達世代」が一致しないと誤動作する。
@@ -821,13 +904,11 @@ module Pipeline =
     /// トップレベル: HDL ソース → WireWorld Grid。
     /// 各段が Result を返すので、どこで落ちても CompileError で伝播する。
     let compile (lib: CellLibrary) (src: string) : Result<Grid, CompileError> =
-        frontend src
-        >>= techMap lib
-        >>= place
-        >>= (fun placement ->
-                route placement
-                >>= (fun wires ->
-                        Ok (emit placement wires)))
+        frontend src >>= fun _nl ->
+        techMap lib _nl >>= fun mapped ->
+        place mapped >>= fun placement ->
+        route placement >>= fun wires ->
+        Ok (emit placement wires)
 
 
 // ---------------------------------------------------------------------
@@ -912,5 +993,122 @@ module FrontendTest =
           "techMap succeeds with defaultLib",
             match result |> Result.bind (techMap Library.defaultLib) with
             | Ok mapped -> mapped.Length = 2
+            | _ -> false
+        ]
+
+
+// ---------------------------------------------------------------------
+// 9. ルーティング単体テスト (M3)
+//    Lee 法 BFS + route + emit のパイプラインを 4 ゲート回路で検証する。
+// ---------------------------------------------------------------------
+module RoutingTest =
+    open Domain
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Pipeline
+
+    /// 4 NOT チェーン: a → NOT → NOT → NOT → NOT → y
+    /// 内部ネット 3→4, 4→5, 5→6 の 3 本を配線することを確認する。
+    let chainJson = """
+{
+  "modules": {
+    "top": {
+      "ports": {
+        "a": { "direction": "input",  "bits": [2] },
+        "y": { "direction": "output", "bits": [6] }
+      },
+      "cells": {
+        "u0": { "type": "$_NOT_", "port_directions": {"A":"input","Y":"output"}, "connections": {"A":[2],"Y":[3]} },
+        "u1": { "type": "$_NOT_", "port_directions": {"A":"input","Y":"output"}, "connections": {"A":[3],"Y":[4]} },
+        "u2": { "type": "$_NOT_", "port_directions": {"A":"input","Y":"output"}, "connections": {"A":[4],"Y":[5]} },
+        "u3": { "type": "$_NOT_", "port_directions": {"A":"input","Y":"output"}, "connections": {"A":[5],"Y":[6]} }
+      }
+    }
+  }
+}"""
+
+    let runAll () : (string * bool) list =
+        let lib = Library.defaultLib
+
+        // leePath の単体テスト
+        let emptyGrid : RoutingGrid = Map.empty
+        // src の 4 近傍すべてをブロック → BFS が 1 歩も進めず到達不能
+        let blockedGrid : RoutingGrid =
+            [ {X=1;Y=0}; {X= -1;Y=0}; {X=0;Y=1}; {X=0;Y= -1} ]
+            |> List.map (fun c -> c, Blocked)
+            |> Map.ofList
+
+        // compile end-to-end
+        let gridResult = compile lib chainJson
+
+        // placement + wires を個別に取得してアサート
+        let detailResult =
+            frontend chainJson
+            |> Result.bind (techMap lib)
+            |> Result.bind place
+            |> Result.bind (fun pl ->
+                route pl |> Result.map (fun ws -> pl, ws))
+
+        let obstacleGrid =
+            [ for y in 0..4 -> { X=2; Y=y }, Blocked ] |> Map.ofList
+
+        [ "leePath trivial (src=dst)",
+            leePath emptyGrid {X=0;Y=0} {X=0;Y=0} = Some [{X=0;Y=0}]
+
+          "leePath straight 3 cells",
+            leePath emptyGrid {X=0;Y=0} {X=2;Y=0}
+            |> Option.map List.length = Some 3
+
+          "leePath blocked returns None",
+            leePath blockedGrid {X=0;Y=0} {X=4;Y=0} = None
+
+          "leePath goes around obstacle",
+            leePath obstacleGrid {X=0;Y=2} {X=4;Y=2} |> Option.isSome
+
+          "compile chain succeeds",
+            match gridResult with Ok _ -> true | _ -> false
+
+          "compile chain grid is non-empty",
+            match gridResult with
+            | Ok g -> not (Map.isEmpty g)
+            | _ -> false
+
+          "placement has 4 gates",
+            match detailResult with
+            | Ok (pl, _) -> pl.Length = 4
+            | _ -> false
+
+          "routing produces 3 wires (3 internal nets)",
+            match detailResult with
+            | Ok (_, ws) -> ws.Length = 3
+            | _ -> false
+
+          "wires cover nets 3,4,5",
+            match detailResult with
+            | Ok (_, ws) ->
+                let nets = ws |> List.map (fun w -> w.Net) |> List.sort
+                nets = [NetId 3; NetId 4; NetId 5]
+            | _ -> false
+
+          "wire paths are non-empty and start/end at expected coords",
+            match detailResult with
+            | Ok (_, ws) ->
+                // not1 cell: size 5×3, out=(4,1), in[0]=(0,0)
+                // gate spacing = size.X(5) + gap(4) = 9
+                // u0 origin=(0,0) out-abs=(4,1); u1 origin=(9,0) in[0]-abs=(9,0)
+                ws |> List.tryFind (fun w -> w.Net = NetId 3)
+                |> Option.exists (fun w ->
+                    List.head w.Path = {X=4;Y=1} &&
+                    List.last w.Path = {X=9;Y=0})
+            | _ -> false
+
+          "emit wire cells present in grid",
+            match gridResult with
+            | Ok g ->
+                // routing path between u0 and u1 must include some free cells
+                // (5,1) is in the gap between gate 0 (x:0-4) and gate 1 (x:9-13)
+                Map.containsKey {X=5;Y=1} g
             | _ -> false
         ]
