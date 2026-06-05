@@ -293,29 +293,11 @@ module Library =
     /// パターン・Latency は junc3 と同一。コンパイラが Clock ポートへ同期信号を配線する。
     let not1 : StdCell = { junc3 with Name = "NOT1"; Kind = Not }
 
-    /// AND2: NAND(A,B,clock) + NOT(nand_out,clock',clock') の 2 段 junc3 構成。
-    ///
-    /// 真理値表の確認:
-    ///   A=0,B=0 → NAND fires (1 Head) → NOT receives 0 (no wire) → NOT fires with 2 clocks → AND=0?
-    ///             Wait: NOT(0) means input=no electron. NOT stage sees only 2 clocks → fires → AND=1? NO.
-    ///             ここが混乱点。「NAND fires = NAND_out=1 = 電子が出る」という理解が必要。
-    ///             NAND(0,0,clock)=1 → 電子が出る → NOT stage input=1 + 2 clocks = 3 Head → no fire → AND=0 ✓
-    ///   A=1,B=0 → NAND(1,0,clock)=1 → 電子 → NOT 3 Head → AND=0 ✓
-    ///   A=1,B=1 → NAND(1,1,clock)=0 → 電子なし → NOT 2 clocks = 2 Head → fires → AND=1 ✓
-    ///
-    /// AND 全体 Latency = 4 (NAND) + 4 (NOT) = 8<gen>。
-    let and2 : StdCell =
-        { Name    = "AND2"
-          Kind    = And
-          Size    = { X = 13; Y = 5 }
-          Ports   = [ { Role = In;    Offset = { X = 0;  Y = 2 } }  // 左: A
-                      { Role = In;    Offset = { X = 2;  Y = 0 } }  // 上1: B (NAND 用)
-                      { Role = In;    Offset = { X = 2;  Y = 4 } }  // 下1: clock (NAND 用)
-                      { Role = In;    Offset = { X = 9;  Y = 0 } }  // 上2: clock' (NOT 用)
-                      { Role = In;    Offset = { X = 9;  Y = 4 } }  // 下2: clock' (NOT 用)
-                      { Role = Out;   Offset = { X = 12; Y = 2 } } ]
-          Latency = 8<gen>
-          Pattern = Map.empty }  // TODO: 2 junc3 を直列配置した複合パターン
+    // AND2 はモノリシック StdCell として実装しない。理由:
+    //   JUNC3 を同一水平導線上に直列配置すると B/clock 入力が (3,2) を対角で誤発火させ、
+    //   NAND=0 の場合に偽信号が NOT 段へ漏れる (スプリアス信号問題)。
+    //   代わりに `abc -g NAND,NOT` で $\_NAND\_ + $\_NOT\_ に分解し、
+    //   M3 ルーターが中間配線と STA が遅延補償を行う。
 
     /// DIODE: 電子ダイオード (Quinapalus WireWorld 公式設計)。Latency = 3<gen>。
     ///
@@ -348,11 +330,13 @@ module Library =
                                "##.#"
                                ".##." ] }
 
-    /// 検証済みセルのみを含むデフォルトライブラリ。
+    /// M2 ターゲット (`abc -g NAND,NOT`) 対応のデフォルトライブラリ。
+    /// AND は Yosys が NAND+NOT に分解するためモノリシック AND セルは不要。
     let defaultLib : CellLibrary =
         [ Buf,  buf
           Or,   or2
-          Nand, junc3 ]
+          Nand, junc3
+          Not,  not1 ]
         |> Map.ofList
 
 
@@ -620,16 +604,29 @@ module Pipeline =
         // JSON 構造: { "modules": { "top": { "ports": {...}, "cells": {...} } } }
         Error (ParseError "parseYosysJson not implemented")
 
+    /// Yosys type 文字列を GateKind に変換する。
+    /// `abc -g NAND,NOT` の出力は $\_NOT\_ と $\_NAND\_ のみ。
+    let private parseGateKind (t: string) : GateKind option =
+        match t with
+        | "$_NOT_"   -> Some Not
+        | "$_NAND_"  -> Some Nand
+        | "$_AND_"   -> Some And    // abc -g AND,NOT 使用時の後方互換
+        | "$_OR_"    -> Some Or
+        | "$_XOR_"   -> Some Xor
+        | "$_DFF_P_" -> Some Dff
+        | "$_BUF_"   -> Some Buf
+        | _          -> None
+
     /// YosysModule を Netlist IR へ変換する。
     let yosysToNetlist (_m: YosysModule) : Result<Netlist, CompileError> =
         // TODO:
-        //   1. cells → Gate list (Type を GateKind に、connections を NetId に変換)
+        //   1. cells → Gate list (parseGateKind で Type → GateKind、connections → NetId)
         //   2. ports → PrimaryInputs / PrimaryOutputs
         //   3. clk ポートを検出して ClockNet に設定
         Error (ParseError "yosysToNetlist not implemented")
 
     /// Frontend: Yosys JSON 文字列 → Netlist。
-    /// 呼び出し元は `yosys -p "synth -flatten; abc -g AND,NOT; write_json out.json" design.v`
+    /// 呼び出し元は `yosys -p "synth -flatten; abc -g NAND,NOT; write_json out.json" design.v`
     /// で生成した JSON ファイルの内容を渡す。
     let frontend (src: string) : Result<Netlist, CompileError> =
         parseYosysJson src |> Result.bind yosysToNetlist

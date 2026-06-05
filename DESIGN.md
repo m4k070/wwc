@@ -50,7 +50,7 @@ DELAY_9:  #####         蛇行 (4+折返1+4), Size 5×3, Latency 9<gen>
 | SPLIT | ✅ 検証済み | Y 字対角分岐 (5×3) |
 | JUNC3 | ✅ パターン確定・CellTest 通過待ち | 5×5 十字合流点 — NOT/NAND の核 |
 | NOT1 | ✅ JUNC3 エイリアス | `{ junc3 with Kind=Not }` |
-| AND2 | 🔲 設計確定、Pattern 未実装 | JUNC3×2 直列 (NAND + NOT), Latency=8 |
+| AND2 | ✅ Yosys が NAND+NOT に分解 | モノリシック不要。`abc -g NAND,NOT` で `$_NAND_`+`$_NOT_` に変換 |
 | DIODE | ✅ パターン確定・CellTest 通過待ち | Quinapalus 公式設計 4×3、Latency=3 (§2.5 参照) |
 | XOR | 🔲 未着手 | AND2 確定後に設計 |
 | DFF | 🔲 未着手 | NOT1 確定後に設計 |
@@ -167,11 +167,13 @@ diode は不要だった。NAND+NOT が正しく AND を実現する。
 ```bash
 read_verilog design.v
 synth -flatten
-abc -g AND,NOT    # AND と NOT のみに正規化 (機能的完全系)
+abc -g NAND,NOT    # NAND と NOT のみに正規化 (機能的完全系)
 write_json design.json
 ```
 
-AND と NOT の 2 種があれば全ブール関数を表現できる。M2 ではこの 2 種のみをライブラリに用意すれば十分。
+NAND と NOT の 2 種があれば全ブール関数を表現できる。AND2 をモノリシック StdCell にしない理由:
+- JUNC3 を直列に並べると入力B/clock が出力ノードを対角で誤発火させる (§2.3 スプリアス信号問題)
+- `abc -g NAND,NOT` で AND を `$_NAND_` + `$_NOT_` に分解し、ルーター (M3) が中間配線を担当する
 
 ### 3.2 JSON スキーマ (抜粋)
 
@@ -204,16 +206,22 @@ AND と NOT の 2 種があれば全ブール関数を表現できる。M2 で�
 
 ### 3.3 型マッピング
 
-| Yosys type  | GateKind |
-|-------------|----------|
-| `$_NOT_`    | `Not`    |
-| `$_AND_`    | `And`    |
-| `$_OR_`     | `Or`     |
-| `$_XOR_`    | `Xor`    |
-| `$_NAND_`   | `Nand`   |
-| `$_NOR_`    | `Nor`    |
-| `$_DFF_P_`  | `Dff`    |
-| `$_BUF_`    | `Buf`    |
+**M2 ターゲット** (`abc -g NAND,NOT` 出力):
+
+| Yosys type  | GateKind | StdCell  |
+|-------------|----------|----------|
+| `$_NOT_`    | `Not`    | `not1`   |
+| `$_NAND_`   | `Nand`   | `junc3`  |
+
+**拡張時の追加対応** (M3 以降):
+
+| Yosys type  | GateKind | StdCell        |
+|-------------|----------|----------------|
+| `$_OR_`     | `Or`     | `or2`          |
+| `$_XOR_`    | `Xor`    | 未実装          |
+| `$_AND_`    | `And`    | NAND+NOT に分解 |
+| `$_DFF_P_`  | `Dff`    | 未実装          |
+| `$_BUF_`    | `Buf`    | `buf`          |
 
 ---
 
