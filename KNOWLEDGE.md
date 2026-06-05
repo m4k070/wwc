@@ -213,6 +213,66 @@ Kahn のトポロジカルソートの代わりに「全入力が確定したゲ
 
 ---
 
+## M5 — E2E シミュレーション
+
+### `[<Struct>]` 型に `with` 構文は使えない
+
+F# の `{ x with Field = v }` はレコード型専用。`[<Struct>]` 型には使えない:
+
+```fsharp
+// NG: Coord は [<Struct>] なのでコンパイルエラー
+{ pivot with Y = pivot.Y - i }
+
+// OK: フィールドを全て明示する
+{ X = pivot.X; Y = pivot.Y - i }
+```
+
+### `extendPath` の設計
+
+- ジグザグは「パス終端直前の点 (pivot) から -Y 方向へ N/2 歩往復」
+- -Y (y<0) 空間は直線配置では常に空き (ゲートは y≥0 に配置されるため)
+- 奇数の extra delay は N+1 に切り上げ (STA の誤差として 1gen 余裕が生じる)
+- パスの連続性: down の末尾が pivot 自身 (i=0 で Y-0=pivot) → 次のセルへ自然に接続
+
+### E2E テストの設計パターン
+
+コンパイラの生成 Grid を Rule.run で検証する最小パターン:
+
+```fsharp
+// 1. compileFull で Grid + Placement を取得
+let Ok (grid, placement, _) = compileFull lib json
+
+// 2. ポート座標に直接 Head を注入
+let g = grid |> inject [clockPort1; clockPort2]   // クロック注入
+
+// 3. Rule.run で Latency 世代進める
+let result = run (int latency) g
+
+// 4. 出力ポートで Head の有無を確認
+get result outPort = Head  // true なら 1, false なら 0
+```
+
+### クロックポートの識別
+
+JUNC3/NOT1 は Clock ポートを持たず、全て In ロールで定義されている。  
+クロックポートは `Gate.Inputs.Length` 番目以降の In ポートとして識別する:
+
+```fsharp
+let clockCoords (p: Placed) =
+    let inPorts = p.Cell.Ports |> List.filter (fun port -> port.Role = In)
+    let nLogical = p.Gate.Inputs.Length
+    inPorts |> List.mapi (fun i port -> i, port)
+            |> List.choose (fun (i, port) -> if i >= nLogical then Some (portCoord p port) else None)
+```
+
+### 単一ゲート E2E はクロック接続不要
+
+単一 NOT ゲートのコンパイル結果には内部ルーティングワイヤーが存在しない  
+(primary input → gate: 内部ネットなし)。Gate のポートに直接 Head を注入できるため、  
+クロック配線インフラなしでも E2E 検証が可能。
+
+---
+
 ## 設計全般
 
 ### WireWorld の根本制約: 距離 = 遅延
