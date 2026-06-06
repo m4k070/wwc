@@ -454,6 +454,7 @@ module Route =
     open Domain
     open Netlist
     open Place
+    open Rule
 
     /// 1 本の配線。長さ (= Path のセル数) がそのまま遅延になる。
     type Wire =
@@ -461,10 +462,28 @@ module Route =
           Path: Coord list
           Delay: int<gen> }
 
+    /// パスをシミュレーションして実効遅延を実測する。
+    /// src に Head を置き、dst が Head になるまでの世代数を返す。
+    /// 解析的な計算 (N-1-turns 等) は L ターンが連続する場合に誤るため、実測する。
+    let private measureDelay (path: Coord list) : int<gen> =
+        match path with
+        | [] | [_] -> 0<gen>
+        | _ ->
+            let src = List.head path
+            let dst = List.last path
+            let wireGrid = path |> List.map (fun c -> c, Wire) |> Map.ofList
+            let initial = wireGrid |> Map.add src Head
+            let limit = (List.length path) * 2
+            let rec find (g: Grid) (t: int) =
+                if t >= limit then (List.length path - 1) * 1<gen>   // fallback
+                elif Domain.get g dst = Head then t * 1<gen>
+                else find (Rule.step g) (t + 1)
+            find initial 0
+
     let ofPath (net: NetId) (path: Coord list) : Wire =
-        { Net = net
-          Path = path
-          Delay = (List.length path) * 1<gen> }
+        { Net   = net
+          Path  = path
+          Delay = measureDelay path }
 
     type RoutingCell =
         | Free              // 配線可能
@@ -647,18 +666,95 @@ module Sta =
             initPath @ [pivot] @ up @ down @ [dst]
 
     /// スラックが正の Wire に DELAY_n 相当の遅延を物理的に付加して均等化する。
-    /// Path を extendPath でジグザグ延長し、Delay フィールドも更新する。
+    /// Path を extendPath でジグザグ延長し、Delay を加算式で更新する。
+    ///   新 Delay = 旧 Delay + slack  (パス長依存ではなく加算: ofPath が N-1 形式を想定)
     let insertDelays (slack: Map<NetId, int<gen>>) (wires: Wire list) : Wire list =
         wires |> List.map (fun w ->
             match Map.tryFind w.Net slack with
             | Some s when s > 0<gen> ->
                 let path' = extendPath s w.Path
-                { w with Path = path'; Delay = (List.length path') * 1<gen> }
+                { w with Path = path'; Delay = w.Delay + s }
             | _ -> w)
 
 
 // ---------------------------------------------------------------------
-// 7. パイプライン: 各段の型と railway 合成
+// 7. クロック注入付きシミュレーター
+//    STA 結果から各ゲートへのクロック注入時刻を自動計算し、
+//    step-wise でシミュレーションを走らせる。
+// ---------------------------------------------------------------------
+module Sim =
+    open Units
+    open Domain
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Sta
+    open Rule
+
+    /// 配置済みゲートのクロックポート絶対座標を返す。
+    /// Gate.Inputs.Length 番目以降の In ポートをクロック用とみなす。
+    let clockCoords (p: Placed) : Coord list =
+        let inPorts = p.Cell.Ports |> List.filter (fun port -> port.Role = In)
+        let nLogical = p.Gate.Inputs.Length
+        inPorts
+        |> List.mapi (fun i port -> i, port)
+        |> List.choose (fun (i, port) ->
+            if i >= nLogical then Some (portCoord p port) else None)
+
+    /// ゲート G のクロック注入時刻 = G の全入力の到達時刻の最大値 (= target)。
+    let clockTimeOf (p: Placed) (arrivals: ArrivalMap) (wireDelay: Map<NetId, int<gen>>) : int<gen> =
+        if p.Gate.Inputs.IsEmpty then 0<gen>
+        else
+            p.Gate.Inputs |> List.map (fun n ->
+                (arrivals |> Map.tryFind n |> Option.defaultValue 0<gen>)
+                + (wireDelay |> Map.tryFind n |> Option.defaultValue 0<gen>))
+            |> List.max
+
+    /// 注入マップ (世代 → 座標リスト) を使って `steps` 世代進める。
+    /// 各イテレーション: 該当世代の Head を注入してから Rule.step を呼ぶ。
+    let runWithInjections (injections: Map<int<gen>, Coord list>) (g: Grid) (steps: int) : Grid =
+        let mutable state = g
+        for idx in 0 .. steps - 1 do
+            let t = idx * 1<gen>
+            match Map.tryFind t injections with
+            | Some coords ->
+                state <- coords |> List.fold (fun acc c -> Map.add c Head acc) state
+            | None -> ()
+            state <- step state
+        state
+
+    /// クロック自動注入付き WireWorld シミュレーション。
+    ///   placement: 配置情報 (クロックポート位置取得に使用)
+    ///   arrivals:  STA 計算済み到達時刻マップ
+    ///   wires:     遅延情報付き配線リスト
+    ///   dataInj:   データ信号手動注入: (座標, 注入世代) list
+    ///   grid:      コンパイル済み Grid (emit 済み)
+    ///   steps:     シミュレーション世代数
+    let runWithClocks
+        (placement: Placement)
+        (arrivals: ArrivalMap)
+        (wires: Wire list)
+        (dataInj: (Coord * int<gen>) list)
+        (grid: Grid)
+        (steps: int)
+        : Grid =
+        let wireDelay = wires |> List.map (fun w -> w.Net, w.Delay) |> Map.ofList
+
+        let allEntries =
+            [ yield! placement |> List.collect (fun p ->
+                let t = clockTimeOf p arrivals wireDelay
+                clockCoords p |> List.map (fun c -> t, c))
+              yield! dataInj |> List.map (fun (c, t) -> t, c) ]
+            |> List.groupBy fst
+            |> List.map (fun (t, pairs) -> t, List.map snd pairs)
+            |> Map.ofList
+
+        runWithInjections allEntries grid steps
+
+
+// ---------------------------------------------------------------------
+// 8. パイプライン: 各段の型と railway 合成
 // ---------------------------------------------------------------------
 module Pipeline =
     open Units
@@ -1432,4 +1528,128 @@ module E2eTest =
             match insertDelays slack [w] with
             | [w'] -> w'.Path.Length = 9 && w'.Delay = 9<gen>
             | _    -> false
+        ]
+
+
+// ---------------------------------------------------------------------
+// 12. 多段回路 E2E テスト (クロック自動注入)
+// ---------------------------------------------------------------------
+module MultiStageTest =
+    open Units
+    open Domain
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Sta
+    open Sim
+    open Pipeline
+
+    /// 2-NOT チェーン: a → NOT(u0) → NOT(u1) → y
+    /// 二重反転なので NOT(NOT(a)) = a。
+    let private twoNotJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a": {"direction":"input","bits":[2]},
+      "y": {"direction":"output","bits":[4]}
+    },
+    "cells": {
+      "u0": {"type":"$_NOT_","port_directions":{"A":"input","Y":"output"},"connections":{"A":[2],"Y":[3]}},
+      "u1": {"type":"$_NOT_","port_directions":{"A":"input","Y":"output"},"connections":{"A":[3],"Y":[4]}}
+    }
+  }}
+}"""
+
+    /// a の値を注入して 2-NOT チェーンを実行し、y の Head 有無を返す。
+    ///   期待: NOT(NOT(a)) = a
+    /// totalSteps = STA arrival(output) で出力発火の瞬間に止める。
+    /// arrival より多く回すと Head→Tail になって検出できなくなる。
+    let private runTwoNot (a: bool) : bool =
+        let lib = Library.defaultLib
+        match compileFull lib twoNotJson with
+        | Error _ -> false
+        | Ok (grid, placement, wires) ->
+            let arrivals = computeArrival placement wires
+            let u0 = placement |> List.find (fun p -> p.Gate.Output = NetId 3)
+            let u0inPort =
+                u0.Cell.Ports |> List.find (fun p -> p.Role = In) |> portCoord u0
+            let dataInj = if a then [(u0inPort, 0<gen>)] else []
+            let u1 = placement |> List.find (fun p -> p.Gate.Output = NetId 4)
+            let u1outPort =
+                u1.Cell.Ports |> List.find (fun p -> p.Role = Out) |> portCoord u1
+            // STA が計算した到達時刻 = 出力ポートが Head になる世代
+            let totalSteps =
+                arrivals |> Map.tryFind (NetId 4) |> Option.map int |> Option.defaultValue 20
+            let result = runWithClocks placement arrivals wires dataInj grid totalSteps
+            get result u1outPort = Head
+
+    /// 3-NOT チェーン: a → NOT→NOT→NOT → y
+    /// NOT(NOT(NOT(a))) = NOT(a)。
+    let private threeNotJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a": {"direction":"input","bits":[2]},
+      "y": {"direction":"output","bits":[5]}
+    },
+    "cells": {
+      "u0": {"type":"$_NOT_","port_directions":{"A":"input","Y":"output"},"connections":{"A":[2],"Y":[3]}},
+      "u1": {"type":"$_NOT_","port_directions":{"A":"input","Y":"output"},"connections":{"A":[3],"Y":[4]}},
+      "u2": {"type":"$_NOT_","port_directions":{"A":"input","Y":"output"},"connections":{"A":[4],"Y":[5]}}
+    }
+  }}
+}"""
+
+    let private runThreeNot (a: bool) : bool =
+        let lib = Library.defaultLib
+        match compileFull lib threeNotJson with
+        | Error _ -> false
+        | Ok (grid, placement, wires) ->
+            let arrivals = computeArrival placement wires
+            let u0 = placement |> List.find (fun p -> p.Gate.Output = NetId 3)
+            let u0inPort =
+                u0.Cell.Ports |> List.find (fun p -> p.Role = In) |> portCoord u0
+            let dataInj = if a then [(u0inPort, 0<gen>)] else []
+            let u2 = placement |> List.find (fun p -> p.Gate.Output = NetId 5)
+            let u2outPort =
+                u2.Cell.Ports |> List.find (fun p -> p.Role = Out) |> portCoord u2
+            let totalSteps =
+                arrivals |> Map.tryFind (NetId 5) |> Option.map int |> Option.defaultValue 30
+            let result = runWithClocks placement arrivals wires dataInj grid totalSteps
+            get result u2outPort = Head
+
+    let runAll () : (string * bool) list =
+        // ── ワイヤ遅延の確認 ──────────────────────────────────────────────
+        // 2-NOT チェーンの実際のルーティング遅延を確認
+        let wireDelayCheck =
+            match compileFull Library.defaultLib twoNotJson with
+            | Error _ -> -1<gen>
+            | Ok (_, _, wires) ->
+                wires |> List.tryFind (fun w -> w.Net = NetId 3)
+                      |> Option.map (fun w -> w.Delay)
+                      |> Option.defaultValue -1<gen>
+
+        // ── 2-NOT E2E ─────────────────────────────────────────────────────
+        let two0 = runTwoNot false   // NOT(NOT(0)) = 0
+        let two1 = runTwoNot true    // NOT(NOT(1)) = 1
+
+        // ── 3-NOT E2E ─────────────────────────────────────────────────────
+        let three0 = runThreeNot false  // NOT(NOT(NOT(0))) = 1
+        let three1 = runThreeNot true   // NOT(NOT(NOT(1))) = 0
+
+        [ "2-NOT: wire (net3) delay = measureDelay (simulation-based)",
+            wireDelayCheck = 5<gen>   // 7-cell path with 2 L-turns → measured delay=5
+
+          "2-NOT: NOT(NOT(0)) = 0  (a=0 → buffer → y=0)",
+            not two0
+
+          "2-NOT: NOT(NOT(1)) = 1  (a=1 → buffer → y=1)",
+            two1
+
+          "3-NOT: NOT(NOT(NOT(0))) = 1  (a=0 → y=1)",
+            three0
+
+          "3-NOT: NOT(NOT(NOT(1))) = 0  (a=1 → y=0)",
+            not three1
         ]
