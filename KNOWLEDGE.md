@@ -273,6 +273,55 @@ let clockCoords (p: Placed) =
 
 ---
 
+## クロック配線 / 多段 E2E
+
+### L ターンの対角ショートカットとワイヤ遅延
+
+ルーティングパスに L ターン (水平→垂直 または 垂直→水平) があると、ターン直前のセルがターン後のセルと対角隣接する。これにより信号が経由セルをスキップして 1 ステップ早着する。
+
+例: パス `(7,1)→(8,1)→(8,0)→(9,0)` (L ターン 2 回)
+- (7,1) が Head → (8,1) と (8,0) が同時に Head (t=8)
+- (8,0), (8,1) が Head → (9,0), (9,1), (9,2) が同時に Head (t=9)
+
+L ターンが連続する場合、節約ステップ数は単純な加算にならない。**`N-1-turns` の計算式は不正確**。
+
+**正しい対処**: `measureDelay` — パスをシミュレーションして実測。
+
+```fsharp
+let private measureDelay (path: Coord list) : int<gen> =
+    // src に Head を置き dst が Head になるまでの世代数を実測
+    let initial = wireGrid |> Map.add src Head
+    let rec find g t = if get g dst = Head then t * 1<gen> else find (step g) (t+1)
+    find initial 0
+```
+
+### ルーティングターンがクロック配線を兼ねる (重要な設計知見)
+
+2-NOT チェーンで実証: ルーティングワイヤ `(8,0),(8,1)` が同時 Head になることで、
+u1 のクロックポート `(9,1),(9,2)` が自動的に信号を受け取る。
+
+- **a=0 の場合** (u0 fires): データ `(9,0)` + 自動クロック `(9,1),(9,2)` = 3 Heads → u1 ブロック
+- **a=1 の場合** (u0 blocks): データなし、手動注入クロック `(9,1),(9,2)` のみ = 2 Heads → u1 発火
+
+ルーティングワイヤの折れ曲がりが意図せずクロック分配を行う。これは **WireWorld 回路設計の本質的な性質** であり、同期設計を成立させる。
+
+### シミュレーションの totalSteps は arrival 時刻に合わせる
+
+`runWithClocks` で `totalSteps` を指定する際、出力ポートが Head になる世代 (`arrival(output)`) と一致させる必要がある。多く回すと Head→Tail になって検出できなくなる。
+
+```fsharp
+let totalSteps = arrivals |> Map.tryFind output_net |> Option.map int |> Option.defaultValue fallback
+```
+
+### クロック注入タイミング = target (データ到達時刻)
+
+`clockTimeOf(G) = max { arrival(input_i) + wireDelay(input_i) }` = STA の target。
+
+この時刻にクロックポートに Head を注入すれば、データとクロックが junction に同時到達する。
+`measureDelay` で正確な wireDelay を求めることがこの計算の前提。
+
+---
+
 ## 設計全般
 
 ### WireWorld の根本制約: 距離 = 遅延
