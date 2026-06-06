@@ -457,8 +457,11 @@ module Route =
     open Rule
 
     /// 1 本の配線。長さ (= Path のセル数) がそのまま遅延になる。
+    /// Consumer は、この Wire を消費するゲートの Output NetId。
+    /// fan-out で同一 Net を持つ複数の Wire を区別するために使う。
     type Wire =
         { Net: NetId
+          Consumer: NetId
           Path: Coord list
           Delay: int<gen> }
 
@@ -480,10 +483,11 @@ module Route =
                 else find (Rule.step g) (t + 1)
             find initial 0
 
-    let ofPath (net: NetId) (path: Coord list) : Wire =
-        { Net   = net
-          Path  = path
-          Delay = measureDelay path }
+    let ofPath (net: NetId) (consumer: NetId) (path: Coord list) : Wire =
+        { Net      = net
+          Consumer = consumer
+          Path     = path
+          Delay    = measureDelay path }
 
     type RoutingCell =
         | Free              // 配線可能
@@ -502,17 +506,34 @@ module Route =
                     yield { X = p.Origin.X + x; Y = p.Origin.Y + y }, Blocked ])
         |> Map.ofList
 
-    /// Lee 法 BFS で src から dst への最短経路を返す。到達不能なら None。
-    /// src/dst は Blocked 領域内 (セルのポート座標) でも通過できる。
-    /// 中間セルは Free (grid に存在しない) のみ通過可。
-    let leePath (grid: RoutingGrid) (src: Coord) (dst: Coord) : Coord list option =
+    /// BFS の探索範囲を src/dst から margin セル内に制限する bounding box を返す。
+    let private bboxOf (src: Coord) (dst: Coord) (margin: int) =
+        let minX = min src.X dst.X - margin
+        let maxX = max src.X dst.X + margin
+        let minY = min src.Y dst.Y - margin
+        let maxY = max src.Y dst.Y + margin
+        minX, maxX, minY, maxY
+
+    /// Lee 法 BFS の共通実装 (private)。
+    /// sameNet = Some n のとき、Routed n セルも通過可能 (fan-out 再利用)。
+    /// 探索を src/dst を囲む bounding box + margin セルに制限し、無限空間の探索を防ぐ。
+    let private leePathImpl (grid: RoutingGrid) (src: Coord) (dst: Coord) (sameNet: NetId option) : Coord list option =
         if src = dst then Some [src]
         else
+            // bounding box を設定 (マージンは dist の 1.5 倍程度で十分な迂回空間)
+            let dist = abs (src.X - dst.X) + abs (src.Y - dst.Y)
+            let margin = dist + 10
+            let minX, maxX, minY, maxY = bboxOf src dst margin
+
+            let inBounds c = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
+
             let passable c =
-                c = src || c = dst ||
-                match Map.tryFind c grid with
-                | None | Some Free -> true
-                | _ -> false
+                inBounds c && (
+                    c = src || c = dst ||
+                    match Map.tryFind c grid with
+                    | None | Some Free -> true
+                    | Some (Routed n) -> sameNet = Some n   // 同一 net の既配線は再利用可
+                    | _ -> false)
 
             let dirs = [| {X=1;Y=0}; {X= -1;Y=0}; {X=0;Y=1}; {X=0;Y= -1} |]
             let prev  = System.Collections.Generic.Dictionary<Coord, Coord>()
@@ -540,6 +561,18 @@ module Route =
                     cur <- prev.[cur]
                 path.Insert(0, src)
                 Some (List.ofSeq path)
+
+    /// Lee 法 BFS で src から dst への最短経路を返す。到達不能なら None。
+    /// src/dst は Blocked 領域内 (セルのポート座標) でも通過できる。
+    /// 中間セルは Free (grid に存在しない) のみ通過可。
+    let leePath (grid: RoutingGrid) (src: Coord) (dst: Coord) : Coord list option =
+        leePathImpl grid src dst None
+
+    /// fan-out 用 Lee 法 BFS。
+    /// 同一 netId の既配線セルを通過可能にした単始点 BFS で最短総パスを探す。
+    /// 多始点 BFS より単純で、分岐長ではなく src→dst 総パス長を最適化する。
+    let leePathFanout (grid: RoutingGrid) (netId: NetId) (src: Coord) (dst: Coord) : Coord list option =
+        leePathImpl grid src dst (Some netId)
 
     /// Wire リストから 2 本以上の経路が共有するセルを衝突として列挙する。
     let findConflicts (wires: Wire list) : (Coord * NetId * NetId) list =
@@ -578,11 +611,14 @@ module Sta =
     ///   arrival(primary_input) = 0<gen>
     ///   arrival(gate_output)   = max(arrival(input_i) + wire_i.Delay) + gate.Latency
     ///
+    /// wireDelay は (net, consumer_gate_output) → delay の per-consumer マップ。
+    /// fan-out 時に同一 net の複数 Wire が存在しても各コンシューマの遅延を正確に使う。
+    ///
     /// 実装: 全入力の到達時刻が確定したゲートを繰り返し処理する。
     ///   組合せ回路 (DAG) なら必ず収束する。
     let computeArrival (placement: Placement) (wires: Wire list) : ArrivalMap =
-        let wireDelay =
-            wires |> List.map (fun w -> w.Net, w.Delay) |> Map.ofList
+        let wireDelayByConsumer =
+            wires |> List.map (fun w -> (w.Net, w.Consumer), w.Delay) |> Map.ofList
 
         let gateDrivenNets =
             placement |> List.map (fun p -> p.Gate.Output) |> Set.ofList
@@ -610,7 +646,7 @@ module Sta =
                             let inputTimes =
                                 p.Gate.Inputs |> List.map (fun n ->
                                     (Map.tryFind n acc |> Option.defaultValue 0<gen>)
-                                    + (Map.tryFind n wireDelay |> Option.defaultValue 0<gen>))
+                                    + (Map.tryFind (n, p.Gate.Output) wireDelayByConsumer |> Option.defaultValue 0<gen>))
                             let target =
                                 if List.isEmpty inputTimes then 0<gen>
                                 else List.max inputTimes
@@ -621,26 +657,24 @@ module Sta =
 
     /// 各 Wire のスラック（余裕世代）を計算する。
     ///   target(gate)  = max { arrival(input_i) + wireDelay(input_i) }
-    ///   slack(net_i)  = target(gate) - arrival(net_i) - wireDelay(net_i)
+    ///   slack(net_i, consumer)  = target(gate) - arrival(net_i) - wireDelay(net_i, consumer)
     /// スラック > 0 のネットは target に合わせて遅延を追加する必要がある。
-    /// 同一ネットが複数ゲートを駆動する場合は最小スラックを採用する。
+    /// 戻り値は Map<NetId * NetId, int<gen>> (key = (net, consumer_gate_output))。
     let computeSlack (placement: Placement) (wires: Wire list) (arrivals: ArrivalMap)
-        : Map<NetId, int<gen>> =
-        let wireDelay =
-            wires |> List.map (fun w -> w.Net, w.Delay) |> Map.ofList
+        : Map<NetId * NetId, int<gen>> =
+        let wireDelayByConsumer =
+            wires |> List.map (fun w -> (w.Net, w.Consumer), w.Delay) |> Map.ofList
 
-        let inputArrivalAt n =
-            (Map.tryFind n arrivals   |> Option.defaultValue 0<gen>)
-            + (Map.tryFind n wireDelay |> Option.defaultValue 0<gen>)
+        let inputArrivalAt (n: NetId) (consumer: NetId) =
+            (Map.tryFind n arrivals |> Option.defaultValue 0<gen>)
+            + (Map.tryFind (n, consumer) wireDelayByConsumer |> Option.defaultValue 0<gen>)
 
         placement
         |> List.collect (fun p ->
             if List.isEmpty p.Gate.Inputs then []
             else
-                let target = p.Gate.Inputs |> List.map inputArrivalAt |> List.max
-                p.Gate.Inputs |> List.map (fun n -> n, target - inputArrivalAt n))
-        |> List.groupBy fst
-        |> List.map (fun (k, vs) -> k, vs |> List.map snd |> List.min)
+                let target = p.Gate.Inputs |> List.map (fun n -> inputArrivalAt n p.Gate.Output) |> List.max
+                p.Gate.Inputs |> List.map (fun n -> (n, p.Gate.Output), target - inputArrivalAt n p.Gate.Output))
         |> Map.ofList
 
     /// パスに extra 世代分のジグザグ迂回を物理的に挿入する。
@@ -668,9 +702,10 @@ module Sta =
     /// スラックが正の Wire に DELAY_n 相当の遅延を物理的に付加して均等化する。
     /// Path を extendPath でジグザグ延長し、Delay を加算式で更新する。
     ///   新 Delay = 旧 Delay + slack  (パス長依存ではなく加算: ofPath が N-1 形式を想定)
-    let insertDelays (slack: Map<NetId, int<gen>>) (wires: Wire list) : Wire list =
+    /// slack の key は (net, consumer_gate_output) のペア。
+    let insertDelays (slack: Map<NetId * NetId, int<gen>>) (wires: Wire list) : Wire list =
         wires |> List.map (fun w ->
-            match Map.tryFind w.Net slack with
+            match Map.tryFind (w.Net, w.Consumer) slack with
             | Some s when s > 0<gen> ->
                 let path' = extendPath s w.Path
                 { w with Path = path'; Delay = w.Delay + s }
@@ -703,12 +738,15 @@ module Sim =
             if i >= nLogical then Some (portCoord p port) else None)
 
     /// ゲート G のクロック注入時刻 = G の全入力の到達時刻の最大値 (= target)。
-    let clockTimeOf (p: Placed) (arrivals: ArrivalMap) (wireDelay: Map<NetId, int<gen>>) : int<gen> =
+    /// wires から per-consumer 遅延を参照して計算する。
+    let clockTimeOf (p: Placed) (arrivals: ArrivalMap) (wires: Wire list) : int<gen> =
         if p.Gate.Inputs.IsEmpty then 0<gen>
         else
+            let wireDelayByConsumer =
+                wires |> List.map (fun w -> (w.Net, w.Consumer), w.Delay) |> Map.ofList
             p.Gate.Inputs |> List.map (fun n ->
                 (arrivals |> Map.tryFind n |> Option.defaultValue 0<gen>)
-                + (wireDelay |> Map.tryFind n |> Option.defaultValue 0<gen>))
+                + (wireDelayByConsumer |> Map.tryFind (n, p.Gate.Output) |> Option.defaultValue 0<gen>))
             |> List.max
 
     /// 注入マップ (世代 → 座標リスト) を使って `steps` 世代進める。
@@ -739,11 +777,9 @@ module Sim =
         (grid: Grid)
         (steps: int)
         : Grid =
-        let wireDelay = wires |> List.map (fun w -> w.Net, w.Delay) |> Map.ofList
-
         let allEntries =
             [ yield! placement |> List.collect (fun p ->
-                let t = clockTimeOf p arrivals wireDelay
+                let t = clockTimeOf p arrivals wires
                 clockCoords p |> List.map (fun c -> t, c))
               yield! dataInj |> List.map (fun (c, t) -> t, c) ]
             |> List.groupBy fst
@@ -802,6 +838,31 @@ module Pipeline =
     /// Yosys write_json 出力を YosysModule へパースする。
     /// JSON 構造: { "modules": { "<top>": { "ports": {...}, "cells": {...} } } }
     /// 複数モジュールがある場合は "top" を優先し、なければ先頭を使用する。
+    let private parsePorts (m: System.Text.Json.JsonElement) =
+        m.GetProperty("ports").EnumerateObject()
+        |> Seq.map (fun p ->
+            let dir  = p.Value.GetProperty("direction").GetString()
+            let bits = parseBits (p.Value.GetProperty("bits"))
+            p.Name, { Direction = dir; Bits = bits })
+        |> Map.ofSeq
+
+    let private parseCells (m: System.Text.Json.JsonElement) =
+        m.GetProperty("cells").EnumerateObject()
+        |> Seq.map (fun c ->
+            let v = c.Value
+            let cellType = v.GetProperty("type").GetString()
+            let portDirs =
+                v.GetProperty("port_directions").EnumerateObject()
+                |> Seq.map (fun p -> p.Name, p.Value.GetString())
+                |> Map.ofSeq
+            let conns =
+                v.GetProperty("connections").EnumerateObject()
+                |> Seq.map (fun p -> p.Name, parseBits p.Value)
+                |> Map.ofSeq
+            c.Name, { Type = cellType; PortDirections = portDirs; Connections = conns })
+        |> Map.ofSeq
+
+    /// Yosys write_json をパースして YosysModule に変換する。
     let parseYosysJson (json: string) : Result<YosysModule, CompileError> =
         try
             use doc = System.Text.Json.JsonDocument.Parse(json)
@@ -814,32 +875,7 @@ module Pipeline =
                     entries |> Array.tryFind (fun e -> e.Name = "top")
                     |> Option.defaultValue entries.[0]
                 let m = topEntry.Value
-
-                let ports =
-                    m.GetProperty("ports").EnumerateObject()
-                    |> Seq.map (fun p ->
-                        let dir  = p.Value.GetProperty("direction").GetString()
-                        let bits = parseBits (p.Value.GetProperty("bits"))
-                        p.Name, { Direction = dir; Bits = bits })
-                    |> Map.ofSeq
-
-                let cells =
-                    m.GetProperty("cells").EnumerateObject()
-                    |> Seq.map (fun c ->
-                        let v = c.Value
-                        let cellType = v.GetProperty("type").GetString()
-                        let portDirs =
-                            v.GetProperty("port_directions").EnumerateObject()
-                            |> Seq.map (fun p -> p.Name, p.Value.GetString())
-                            |> Map.ofSeq
-                        let conns =
-                            v.GetProperty("connections").EnumerateObject()
-                            |> Seq.map (fun p -> p.Name, parseBits p.Value)
-                            |> Map.ofSeq
-                        c.Name, { Type = cellType; PortDirections = portDirs; Connections = conns })
-                    |> Map.ofSeq
-
-                Ok { Ports = ports; Cells = cells }
+                Ok { Ports = parsePorts m; Cells = parseCells m }
         with ex ->
             Error (ParseError ex.Message)
 
@@ -857,17 +893,18 @@ module Pipeline =
         | _          -> None
 
     /// YosysModule を Netlist IR へ変換する。
-    let yosysToNetlist (m: YosysModule) : Result<Netlist, CompileError> =
-        // ① ports → PrimaryInputs / PrimaryOutputs / ClockNet
+    let private getPrimarySignals (m: YosysModule) =
         let primaryInputs =
             m.Ports |> Map.toList
             |> List.filter (fun (_, p) -> p.Direction = "input")
             |> List.collect (fun (_, p) -> p.Bits |> List.map NetId)
+            |> List.distinct
 
         let primaryOutputs =
             m.Ports |> Map.toList
             |> List.filter (fun (_, p) -> p.Direction = "output")
             |> List.collect (fun (_, p) -> p.Bits |> List.map NetId)
+            |> List.distinct
 
         let clockNet =
             m.Ports |> Map.tryFindKey (fun name _ ->
@@ -875,48 +912,54 @@ module Pipeline =
                 n = "clk" || n = "clock" || n = "ck" || n = "clk_i")
             |> Option.bind (fun name ->
                 m.Ports.[name].Bits |> List.tryHead |> Option.map NetId)
+        
+        primaryInputs, primaryOutputs, clockNet
 
-        // ② cells → Gate list
-        let gateResults =
-            m.Cells |> Map.toList
-            |> List.mapi (fun i (name, cell) ->
-                match parseGateKind cell.Type with
-                | None -> Error (ParseError $"unknown gate type '{cell.Type}' in cell '{name}'")
-                | Some kind ->
-                    let inputs =
-                        cell.PortDirections |> Map.toList
-                        |> List.filter (fun (_, dir) -> dir = "input")
-                        |> List.sortBy fst        // 名前順: A → B → C → ...
-                        |> List.collect (fun (port, _) ->
-                            cell.Connections |> Map.tryFind port
-                            |> Option.defaultValue []
-                            |> List.map NetId)
-
-                    let outputNet =
-                        cell.PortDirections |> Map.toList
-                        |> List.filter (fun (_, dir) -> dir = "output")
-                        |> List.sortBy fst
-                        |> List.tryHead
-                        |> Option.bind (fun (port, _) ->
-                            cell.Connections |> Map.tryFind port
-                            |> Option.bind List.tryHead
-                            |> Option.map NetId)
-
-                    match outputNet with
-                    | None    -> Error (ParseError $"cell '{name}' has no output connection")
-                    | Some o  -> Ok { Id = i; Kind = kind; Inputs = inputs; Output = o })
-
-        gateResults
+    let private parseGates (m: YosysModule) =
+        m.Cells |> Map.toList
+        |> List.mapi (fun i (name, cell) ->
+            match parseGateKind cell.Type with
+            | None -> Error (ParseError $"unknown gate type '{cell.Type}' in cell '{name}'")
+            | Some kind ->
+                let inputs =
+                    cell.PortDirections |> Map.toList
+                    |> List.filter (fun (_, dir) -> dir = "input")
+                    |> List.sortBy fst
+                    |> List.collect (fun (port, _) ->
+                        cell.Connections |> Map.tryFind port
+                        |> Option.defaultValue []
+                        |> List.map NetId)
+                
+                let outputNet =
+                    cell.PortDirections |> Map.toList
+                    |> List.filter (fun (_, dir) -> dir = "output")
+                    |> List.sortBy fst
+                    |> List.tryHead
+                    |> Option.bind (fun (port, _) ->
+                        cell.Connections |> Map.tryFind port
+                        |> Option.bind List.tryHead
+                        |> Option.map NetId)
+                
+                match outputNet with
+                | None    -> Error (ParseError $"cell '{name}' has no output connection")
+                | Some o  -> Ok { Id = i; Kind = kind; Inputs = inputs; Output = o })
         |> List.fold (fun acc r ->
             match acc, r with
             | Ok xs, Ok x -> Ok (x :: xs)
             | Error e, _  -> Error e
             | _, Error e  -> Error e) (Ok [])
-        |> Result.map (fun gates ->
-            { Gates          = List.rev gates
-              PrimaryInputs  = primaryInputs
-              PrimaryOutputs = primaryOutputs
-              ClockNet       = clockNet })
+        |> Result.map List.rev
+
+    /// YosysModule を Netlist IR へ変換する。
+    let yosysToNetlist (m: YosysModule) : Result<Netlist, CompileError> =
+        let (primaryInputs, primaryOutputs, clockNet) = getPrimarySignals m
+        
+        parseGates m
+        |> Result.bind (fun gates ->
+            Ok { Gates          = gates
+                 PrimaryInputs  = primaryInputs
+                 PrimaryOutputs = primaryOutputs
+                 ClockNet       = clockNet })
 
     /// Frontend: Yosys JSON 文字列 → Netlist。
     /// 呼び出し元は `yosys -p "synth -flatten; abc -g NAND,NOT; write_json out.json" design.v`
@@ -932,21 +975,19 @@ module Pipeline =
             match Map.tryFind g.Kind lib with
             | Some cell -> Ok (g, cell)
             | None      -> Error (UnmappableGate g.Kind))
-        |> List.fold (fun acc r ->
-            match acc, r with
-            | Ok xs, Ok x   -> Ok (x :: xs)
-            | Error e, _    -> Error e
-            | _, Error e    -> Error e) (Ok [])
+        |> Result.sequence
         |> Result.map List.rev
 
     /// 配置: グリッドにセルを並べる (force-directed 等)。ここでは行優先の素朴版。
     let place (mapped: (Gate * StdCell) list) : Result<Placement, CompileError> =
-        let mutable cursorX = 0
-        let placed =
-            mapped |> List.map (fun (g, cell) ->
-                let origin = { X = cursorX; Y = 0 }
-                cursorX <- cursorX + cell.Size.X + 4   // 4 セルの間隔
-                { Gate = g; Cell = cell; Origin = origin })
+        let (placed, _) = 
+            mapped 
+            |> List.fold (fun (acc, currentX) (g, cell) ->
+                let origin = { X = currentX; Y = 0 }
+                let nextX = currentX + cell.Size.X + 8   // 8 セルの間隔 (fan-out 配線に十分な迂回空間)
+                ({ Gate = g; Cell = cell; Origin = origin } :: acc, nextX)
+            ) ([], 0)
+            |> (List.rev, _)
         Ok placed
 
     /// 配線: Lee 法でゲート間ネットを配線する。
@@ -962,34 +1003,39 @@ module Pipeline =
                 |> Option.map (fun port -> p.Gate.Output, portCoord p port))
             |> Map.ofList
 
-        // 入力ポート座標: (NetId, Coord) list
+        // 入力ポート座標: (NetId, Coord * consumer_NetId) list
         // Seq.zip で Gate.Inputs と In ポートを短い方に合わせて対応付ける
-        let inCoordPairs =
+        // consumer = この入力を持つゲートの Output NetId
+        let inCoordWithConsumer =
             placement |> List.collect (fun p ->
                 let inPorts = p.Cell.Ports |> List.filter (fun port -> port.Role = In)
                 Seq.zip p.Gate.Inputs inPorts
-                |> Seq.map (fun (netId, port) -> netId, portCoord p port)
+                |> Seq.map (fun (netId, port) -> netId, (portCoord p port, p.Gate.Output))
                 |> List.ofSeq)
 
         let inCoordsMap =
-            inCoordPairs
+            inCoordWithConsumer
             |> List.groupBy fst
             |> List.map (fun (k, vs) -> k, List.map snd vs)
             |> Map.ofList
 
-        // src と dst がそろっている内部ネットのみ配線
+        // src と dst (+ consumer) がそろっている内部ネットのみ配線
+        // fan-out 数の少ない順に配線: チェーンネットを先に通すことで
+        // fan-out パスが既存ネットに塞がれるのを防ぐ
         let nets =
             outCoords |> Map.toList
             |> List.choose (fun (netId, src) ->
                 inCoordsMap |> Map.tryFind netId
-                |> Option.map (fun dsts -> netId, src, dsts))
+                |> Option.map (fun dstConsumers -> netId, src, dstConsumers))
+            |> List.sortBy (fun (_, _, dsts) -> dsts.Length)
 
-        let routeOne (grid: RoutingGrid) (wires: Wire list) (netId: NetId) (src: Coord) (dst: Coord)
+        // fan-out 対応: leePathFanout で同一 net の既配線セルを再利用可
+        let routeOne (grid: RoutingGrid) (wires: Wire list) (netId: NetId) (src: Coord) (dst: Coord) (consumer: NetId)
             : Result<RoutingGrid * Wire list, CompileError> =
-            match leePath grid src dst with
+            match leePathFanout grid netId src dst with
             | None -> Error (RoutingCongestion netId)
             | Some path ->
-                let wire = ofPath netId path
+                let wire = ofPath netId consumer path
                 let grid' =
                     path |> List.fold (fun g c ->
                         match Map.tryFind c baseGrid with
@@ -998,10 +1044,10 @@ module Pipeline =
                 Ok (grid', wire :: wires)
 
         nets
-        |> List.fold (fun acc (netId, src, dsts) ->
+        |> List.fold (fun acc (netId, src, dstConsumers) ->
             acc |> Result.bind (fun (g, ws) ->
-                dsts |> List.fold (fun acc2 dst ->
-                    acc2 |> Result.bind (fun (g2, ws2) -> routeOne g2 ws2 netId src dst)
+                dstConsumers |> List.fold (fun acc2 (dst, consumer) ->
+                    acc2 |> Result.bind (fun (g2, ws2) -> routeOne g2 ws2 netId src dst consumer)
                 ) (Ok (g, ws))))
             (Ok (baseGrid, []))
         |> Result.map (fun (_, wires) -> List.rev wires)
@@ -1277,12 +1323,12 @@ module RoutingTest =
             match detailResult with
             | Ok (_, ws) ->
                 // not1 cell: size 5×3, out=(4,1), in[0]=(0,0)
-                // gate spacing = size.X(5) + gap(4) = 9
-                // u0 origin=(0,0) out-abs=(4,1); u1 origin=(9,0) in[0]-abs=(9,0)
+                // gate spacing = size.X(5) + gap(8) = 13
+                // u0 origin=(0,0) out-abs=(4,1); u1 origin=(13,0) in[0]-abs=(13,0)
                 ws |> List.tryFind (fun w -> w.Net = NetId 3)
                 |> Option.exists (fun w ->
                     List.head w.Path = {X=4;Y=1} &&
-                    List.last w.Path = {X=9;Y=0})
+                    List.last w.Path = {X=13;Y=0})
             | _ -> false
 
           "emit wire cells present in grid",
@@ -1324,7 +1370,7 @@ module StaTest =
           makePlaced 1 Not [3] 4 Library.not1 ]
 
     let private chain2Wires =
-        [ { Net = NetId 3; Path = [ for x in 4..10 -> {X=x;Y=1} ]; Delay = 7<gen> } ]
+        [ { Net = NetId 3; Consumer = NetId 4; Path = [ for x in 4..10 -> {X=x;Y=1} ]; Delay = 7<gen> } ]
 
     // ── テスト 2: NAND(a,b) — 入力パスの非対称スラック ──────────────────
     //   net2(pi), net3(pi)  → NAND(u0) → net4
@@ -1335,8 +1381,8 @@ module StaTest =
         [ makePlaced 0 Nand [2; 3] 4 Library.junc3 ]
 
     let private nandWires =
-        [ { Net = NetId 2; Path = [ for x in 0..4  -> {X=x;Y=0} ]; Delay = 5<gen> }
-          { Net = NetId 3; Path = [ for x in 0..2  -> {X=x;Y=0} ]; Delay = 3<gen> } ]
+        [ { Net = NetId 2; Consumer = NetId 4; Path = [ for x in 0..4  -> {X=x;Y=0} ]; Delay = 5<gen> }
+          { Net = NetId 3; Consumer = NetId 4; Path = [ for x in 0..2  -> {X=x;Y=0} ]; Delay = 3<gen> } ]
 
     let runAll () : (string * bool) list =
         let arr2    = computeArrival chain2 chain2Wires
@@ -1359,7 +1405,7 @@ module StaTest =
             Map.tryFind (NetId 4) arr2 = Some 15<gen>
 
           "chain2: slack(net3)=0 (only path, no slack)",
-            Map.tryFind (NetId 3) slk2 = Some 0<gen>
+            Map.tryFind (NetId 3, NetId 4) slk2 = Some 0<gen>
 
           "chain2: insertDelays is no-op when all slacks=0",
             wires2' = chain2Wires
@@ -1372,10 +1418,10 @@ module StaTest =
             Map.tryFind (NetId 4) arrN = Some 9<gen>
 
           "nand: slack(net2 wire)=0 (critical path)",
-            Map.tryFind (NetId 2) slkN = Some 0<gen>
+            Map.tryFind (NetId 2, NetId 4) slkN = Some 0<gen>
 
           "nand: slack(net3 wire)=2 (shorter path needs 2 gen delay)",
-            Map.tryFind (NetId 3) slkN = Some 2<gen>
+            Map.tryFind (NetId 3, NetId 4) slkN = Some 2<gen>
 
           "nand: insertDelays adds 2 to net3 wire delay (3+2=5)",
             net3DelayAfterInsert = 5<gen>
@@ -1523,8 +1569,8 @@ module E2eTest =
 
           "NOT E2E: insertDelays with slack=2 extends path length",
             let p = straightPath 6   // 7 cells, Delay=7
-            let w = { Net = NetId 1; Path = p; Delay = 7<gen> }
-            let slack = Map.ofList [ NetId 1, 2<gen> ]
+            let w = { Net = NetId 1; Consumer = NetId 0; Path = p; Delay = 7<gen> }
+            let slack = Map.ofList [ (NetId 1, NetId 0), 2<gen> ]
             match insertDelays slack [w] with
             | [w'] -> w'.Path.Length = 9 && w'.Delay = 9<gen>
             | _    -> false
@@ -1639,7 +1685,7 @@ module MultiStageTest =
         let three1 = runThreeNot true   // NOT(NOT(NOT(1))) = 0
 
         [ "2-NOT: wire (net3) delay = measureDelay (simulation-based)",
-            wireDelayCheck = 5<gen>   // 7-cell path with 2 L-turns → measured delay=5
+            wireDelayCheck = 9<gen>   // 11-cell path with 1 L-turn → measured delay=9
 
           "2-NOT: NOT(NOT(0)) = 0  (a=0 → buffer → y=0)",
             not two0
@@ -1652,4 +1698,290 @@ module MultiStageTest =
 
           "3-NOT: NOT(NOT(NOT(1))) = 0  (a=1 → y=0)",
             not three1
+        ]
+
+
+// ---------------------------------------------------------------------
+// 11. NAND / AND / OR ゲート E2E テスト
+//     compileFull + runWithClocks で真理値表を検証する。
+//     既存の MultiStageTest が NOT チェーンのみなので、
+//     junc3 を NAND モードで動かす最初の E2E 検証となる。
+// ---------------------------------------------------------------------
+module NandGateTest =
+    open Units
+    open Domain
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Sta
+    open Sim
+    open Pipeline
+
+    /// 単一 NAND ゲート: y = NAND(a, b)
+    let private nandJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a": {"direction":"input","bits":[2]},
+      "b": {"direction":"input","bits":[3]},
+      "y": {"direction":"output","bits":[4]}
+    },
+    "cells": {
+      "u0": {"type":"$_NAND_",
+             "port_directions":{"A":"input","B":"input","Y":"output"},
+             "connections":{"A":[2],"B":[3],"Y":[4]}}
+    }
+  }}
+}"""
+
+    /// AND ゲート: y = AND(a, b) = NOT(NAND(a, b))
+    let private andJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a": {"direction":"input","bits":[2]},
+      "b": {"direction":"input","bits":[3]},
+      "y": {"direction":"output","bits":[5]}
+    },
+    "cells": {
+      "u0": {"type":"$_NAND_",
+             "port_directions":{"A":"input","B":"input","Y":"output"},
+             "connections":{"A":[2],"B":[3],"Y":[4]}},
+      "u1": {"type":"$_NOT_",
+             "port_directions":{"A":"input","Y":"output"},
+             "connections":{"A":[4],"Y":[5]}}
+    }
+  }}
+}"""
+
+    /// a b を注入して単一 NAND ゲートを実行し出力 Head 有無を返す。
+    /// primary input はルーティング不要なので gate の In ポートに直接注入する。
+    let private runNand (a: bool) (b: bool) : bool =
+        let lib = Library.defaultLib
+        match compileFull lib nandJson with
+        | Error _ -> false
+        | Ok (grid, placement, wires) ->
+            let arrivals = computeArrival placement wires
+            let u0 = placement |> List.find (fun p -> p.Gate.Output = NetId 4)
+            let inPorts = u0.Cell.Ports |> List.filter (fun p -> p.Role = In)
+            let aPort = portCoord u0 inPorts.[0]
+            let bPort = portCoord u0 inPorts.[1]
+            let outPort = u0.Cell.Ports |> List.find (fun p -> p.Role = Out) |> portCoord u0
+            let dataInj =
+                [ if a then yield (aPort, 0<gen>)
+                  if b then yield (bPort, 0<gen>) ]
+            let totalSteps =
+                arrivals |> Map.tryFind (NetId 4) |> Option.map int |> Option.defaultValue 10
+            let result = runWithClocks placement arrivals wires dataInj grid totalSteps
+            get result outPort = Head
+
+    /// a b を注入して AND ゲート (NAND+NOT) を実行し出力 Head 有無を返す。
+    let private runAnd (a: bool) (b: bool) : bool =
+        let lib = Library.defaultLib
+        match compileFull lib andJson with
+        | Error _ -> false
+        | Ok (grid, placement, wires) ->
+            let arrivals = computeArrival placement wires
+            let u0 = placement |> List.find (fun p -> p.Gate.Output = NetId 4)
+            let u1 = placement |> List.find (fun p -> p.Gate.Output = NetId 5)
+            let inPorts = u0.Cell.Ports |> List.filter (fun p -> p.Role = In)
+            let aPort = portCoord u0 inPorts.[0]
+            let bPort = portCoord u0 inPorts.[1]
+            let outPort = u1.Cell.Ports |> List.find (fun p -> p.Role = Out) |> portCoord u1
+            let dataInj =
+                [ if a then yield (aPort, 0<gen>)
+                  if b then yield (bPort, 0<gen>) ]
+            let totalSteps =
+                arrivals |> Map.tryFind (NetId 5) |> Option.map int |> Option.defaultValue 20
+            let result = runWithClocks placement arrivals wires dataInj grid totalSteps
+            get result outPort = Head
+
+    let runAll () : (string * bool) list =
+        let n00 = runNand false false
+        let n10 = runNand true  false
+        let n01 = runNand false true
+        let n11 = runNand true  true
+        let a00 = runAnd false false
+        let a10 = runAnd true  false
+        let a01 = runAnd false true
+        let a11 = runAnd true  true
+        [ "NAND(0,0) = 1",  n00
+          "NAND(1,0) = 1",  n10
+          "NAND(0,1) = 1",  n01
+          "NAND(1,1) = 0",  not n11
+          "AND(0,0)  = 0",  not a00
+          "AND(1,0)  = 0",  not a10
+          "AND(0,1)  = 0",  not a01
+          "AND(1,1)  = 1",  a11 ]
+
+
+// ---------------------------------------------------------------------
+// 13. 多段回路 E2E テスト (M6)
+//     fan-out なしの 3〜4 ゲート回路を E2E 検証し、
+//     多段 NAND 合成が正しく動作することを確認する。
+//
+//   Circuit A: OR(a,b) = NAND(NOT(a), NOT(b))  ← 3 ゲート, fan-out なし
+//     u0: NOT(a)      → n4
+//     u1: NOT(b)      → n5
+//     u2: NAND(n4,n5) → y = OR(a,b)
+//
+//   Circuit B: NAND(NAND(a,b), NOT(c))  ← 3 ゲート, 3 入力, fan-out なし
+//     u0: NAND(a,b) → n4
+//     u1: NOT(c)    → n5
+//     u2: NAND(n4,n5) → y
+//
+//   NOTE: 半加算器 (fan-out=3) は現行 greedy router では routing congestion
+//   が発生する。SPLIT セルによる明示的 fan-out 分岐が今後の課題。
+// ---------------------------------------------------------------------
+module MultiGateTest =
+    open Units
+    open Domain
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Sta
+    open Sim
+    open Pipeline
+
+    // 設計原則: 各ゲートへのルーティングワイヤを 1 本のみにする。
+    // 2 本の並列ワイヤがある場合、到達時刻の差を extendPath で補正しようとするが
+    // WireWorld の配線はどの方向にも信号が漏れるため extendPath は物理的に機能しない。
+    // 1 ワイヤ + プライマリ入力の組み合わせであれば equalization 不要でタイミングが揃う。
+
+    /// Circuit A: NAND(a, NAND(b,c))  ← 2 ゲート, 3 入力, equalization 不要
+    ///   u0: NAND(b,c) → n5          [x=0]
+    ///   u1: NAND(a,n5) → y          [x=13, 入力 = プライマリ a + ワイヤ n5]
+    ///
+    /// u1 への入力: a (primary, ワイヤなし) と n5 (ワイヤ 1 本)
+    /// clockTimeOf(u1) = arrival(n5)+d_n5 = (4+4)+9 = 13 → a を t=13 に注入
+    let private nandTree2Json = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a": {"direction":"input","bits":[2]},
+      "b": {"direction":"input","bits":[3]},
+      "c": {"direction":"input","bits":[4]},
+      "y": {"direction":"output","bits":[6]}
+    },
+    "cells": {
+      "u0": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[3],"B":[4],"Y":[5]}},
+      "u1": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[2],"B":[5],"Y":[6]}}
+    }
+  }}
+}"""
+
+    /// Circuit B: NAND(a, NOT(NAND(b,c))) = NAND(a, AND(b,c))  ← 3 ゲート, 3 入力
+    ///   u0: NAND(b,c) → n5          [x=0]
+    ///   u1: NOT(n5)   → n6          [x=13, ワイヤ 1 本]
+    ///   u2: NAND(a,n6) → y          [x=26, 入力 = プライマリ a + ワイヤ n6]
+    ///
+    /// y = 0 のみ a=1 かつ b=1 かつ c=1 のとき
+    let private nandAndJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a": {"direction":"input","bits":[2]},
+      "b": {"direction":"input","bits":[3]},
+      "c": {"direction":"input","bits":[4]},
+      "y": {"direction":"output","bits":[7]}
+    },
+    "cells": {
+      "u0": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[3],"B":[4],"Y":[5]}},
+      "u1": {"type":"$_NOT_", "port_directions":{"A":"input","Y":"output"},              "connections":{"A":[5],"Y":[6]}},
+      "u2": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[2],"B":[6],"Y":[7]}}
+    }
+  }}
+}"""
+
+    /// primary input を各消費ゲートの clockTimeOf で注入する。
+    let private makePrimaryInjections
+        (placement: Placement)
+        (arrivals: ArrivalMap)
+        (wires: Wire list)
+        (primaryValues: Map<NetId, bool>)
+        : (Coord * int<gen>) list =
+        let gateDrivenNets = placement |> List.map (fun p -> p.Gate.Output) |> Set.ofList
+        placement |> List.collect (fun p ->
+            let t = clockTimeOf p arrivals wires
+            let inPorts = p.Cell.Ports |> List.filter (fun port -> port.Role = In)
+            p.Gate.Inputs
+            |> List.mapi (fun i n ->
+                if Set.contains n gateDrivenNets then []
+                else
+                    let coord = portCoord p inPorts.[i]
+                    match Map.tryFind n primaryValues with
+                    | Some true -> [(coord, t)]
+                    | _ -> [])
+            |> List.concat)
+
+    /// OR(a,b) を実行して出力 Head 有無を返す。
+    let private runOr (a: bool) (b: bool) : bool =
+        let lib = Library.defaultLib
+        match compileFull lib orJson with
+        | Error _ -> false
+        | Ok (grid, placement, wires) ->
+            let arrivals = computeArrival placement wires
+            let dataInj = makePrimaryInjections placement arrivals wires
+                            (Map.ofList [NetId 2, a; NetId 3, b])
+            let outGate = placement |> List.find (fun p -> p.Gate.Output = NetId 6)
+            let outPort = outGate.Cell.Ports |> List.find (fun p -> p.Role = Out) |> portCoord outGate
+            let steps = arrivals |> Map.tryFind (NetId 6) |> Option.map int |> Option.defaultValue 40
+            let result = runWithClocks placement arrivals wires dataInj grid steps
+            get result outPort = Head
+
+    /// NAND(NAND(a,b), NOT(c)) を実行して出力 Head 有無を返す。
+    let private runNandNot (a: bool) (b: bool) (c: bool) : bool =
+        let lib = Library.defaultLib
+        match compileFull lib nandNotJson with
+        | Error _ -> false
+        | Ok (grid, placement, wires) ->
+            let arrivals = computeArrival placement wires
+            let dataInj = makePrimaryInjections placement arrivals wires
+                            (Map.ofList [NetId 2, a; NetId 3, b; NetId 4, c])
+            let outGate = placement |> List.find (fun p -> p.Gate.Output = NetId 7)
+            let outPort = outGate.Cell.Ports |> List.find (fun p -> p.Role = Out) |> portCoord outGate
+            let steps = arrivals |> Map.tryFind (NetId 7) |> Option.map int |> Option.defaultValue 60
+            let result = runWithClocks placement arrivals wires dataInj grid steps
+            get result outPort = Head
+
+    let runAll () : (string * bool) list =
+        // OR 真理値表
+        let or00 = runOr false false
+        let or10 = runOr true  false
+        let or01 = runOr false true
+        let or11 = runOr true  true
+
+        // NAND(NAND(a,b), NOT(c)) 真理値表 (8 ケース)
+        // y = 0 iff NAND(a,b)=1 AND c=0  ←→ (NOT(a∧b)) AND (NOT c)
+        // y = 0 exactly when: (a=0 OR b=0) AND c=0
+        let nn000 = runNandNot false false false  // NAND(NAND(0,0),NOT(0))=NAND(1,1)=0
+        let nn100 = runNandNot true  false false  // NAND(NAND(1,0),NOT(0))=NAND(1,1)=0
+        let nn010 = runNandNot false true  false  // NAND(NAND(0,1),NOT(0))=NAND(1,1)=0
+        let nn110 = runNandNot true  true  false  // NAND(NAND(1,1),NOT(0))=NAND(0,1)=1
+        let nn001 = runNandNot false false true   // NAND(NAND(0,0),NOT(1))=NAND(1,0)=1
+        let nn101 = runNandNot true  false true   // NAND(NAND(1,0),NOT(1))=NAND(1,0)=1
+        let nn011 = runNandNot false true  true   // NAND(NAND(0,1),NOT(1))=NAND(1,0)=1
+        let nn111 = runNandNot true  true  true   // NAND(NAND(1,1),NOT(1))=NAND(0,0)=1
+
+        [ "OR: compileFull succeeds",
+            match compileFull Library.defaultLib orJson with Ok _ -> true | _ -> false
+
+          "OR(0,0) = 0",  not or00
+          "OR(1,0) = 1",  or10
+          "OR(0,1) = 1",  or01
+          "OR(1,1) = 1",  or11
+
+          "NAND(NAND,NOT): compileFull succeeds",
+            match compileFull Library.defaultLib nandNotJson with Ok _ -> true | _ -> false
+
+          "NAND(NAND(0,0),NOT(0)) = 0",  not nn000
+          "NAND(NAND(1,0),NOT(0)) = 0",  not nn100
+          "NAND(NAND(0,1),NOT(0)) = 0",  not nn010
+          "NAND(NAND(1,1),NOT(0)) = 1",  nn110
+          "NAND(NAND(0,0),NOT(1)) = 1",  nn001
+          "NAND(NAND(1,0),NOT(1)) = 1",  nn101
+          "NAND(NAND(0,1),NOT(1)) = 1",  nn011
+          "NAND(NAND(1,1),NOT(1)) = 1",  nn111
         ]
