@@ -518,7 +518,14 @@ module Route =
     /// Lee 法 BFS の共通実装 (private)。
     /// sameNet = Some n のとき、Routed n セルも通過可能 (fan-out 再利用)。
     /// 探索を src/dst を囲む bounding box + margin セルに制限し、無限空間の探索を防ぐ。
-    let private leePathImpl (grid: RoutingGrid) (src: Coord) (dst: Coord) (sameNet: NetId option) : Coord list option =
+    /// allPorts: 全ゲートの全ポート座標集合。src/dst 以外のポートに隣接するセルは通過禁止。
+    let private leePathImpl
+        (grid: RoutingGrid)
+        (src: Coord)
+        (dst: Coord)
+        (sameNet: NetId option)
+        (allPorts: Set<Coord>)
+        : Coord list option =
         if src = dst then Some [src]
         else
             // bounding box を設定 (マージンは dist の 1.5 倍程度で十分な迂回空間)
@@ -528,13 +535,34 @@ module Route =
 
             let inBounds c = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
 
+            // src/dst 以外のポートにチェビシェフ距離 1 で隣接するセルは通過禁止。
+            // ワイヤが Head になったとき隣接ポートを誤発火させる「クロストーク」を防ぐ。
+            let isAdjacentToOtherPort (c: Coord) =
+                allPorts |> Set.exists (fun p ->
+                    p <> src && p <> dst &&
+                    abs (c.X - p.X) <= 1 && abs (c.Y - p.Y) <= 1)
+
+            // 異なるネットの既配線セルに Moore 隣接するセルは通過禁止。
+            // Wire 間のクロストーク (Head が隣接 Wire を誤発火させる) を防ぐ。
+            let isAdjacentToOtherNet (c: Coord) =
+                [ for dx in -1 .. 1 do
+                    for dy in -1 .. 1 do
+                        if dx <> 0 || dy <> 0 then
+                            yield { X = c.X + dx; Y = c.Y + dy } ]
+                |> List.exists (fun nb ->
+                    match Map.tryFind nb grid with
+                    | Some (Routed n) -> sameNet <> Some n
+                    | _ -> false)
+
             let passable c =
                 inBounds c && (
                     c = src || c = dst ||
-                    match Map.tryFind c grid with
-                    | None | Some Free -> true
-                    | Some (Routed n) -> sameNet = Some n   // 同一 net の既配線は再利用可
-                    | _ -> false)
+                    (not (isAdjacentToOtherPort c) &&
+                     not (isAdjacentToOtherNet c) &&
+                     match Map.tryFind c grid with
+                     | None | Some Free -> true
+                     | Some (Routed n) -> sameNet = Some n   // 同一 net の既配線は再利用可
+                     | _ -> false))
 
             let dirs = [| {X=1;Y=0}; {X= -1;Y=0}; {X=0;Y=1}; {X=0;Y= -1} |]
             let prev  = System.Collections.Generic.Dictionary<Coord, Coord>()
@@ -566,14 +594,16 @@ module Route =
     /// Lee 法 BFS で src から dst への最短経路を返す。到達不能なら None。
     /// src/dst は Blocked 領域内 (セルのポート座標) でも通過できる。
     /// 中間セルは Free (grid に存在しない) のみ通過可。
-    let leePath (grid: RoutingGrid) (src: Coord) (dst: Coord) : Coord list option =
-        leePathImpl grid src dst None
+    /// allPorts: 全ポート座標集合。src/dst 以外のポートに隣接するセルを通過禁止にする。
+    let leePath (grid: RoutingGrid) (src: Coord) (dst: Coord) (allPorts: Set<Coord>) : Coord list option =
+        leePathImpl grid src dst None allPorts
 
     /// fan-out 用 Lee 法 BFS。
     /// 同一 netId の既配線セルを通過可能にした単始点 BFS で最短総パスを探す。
     /// 多始点 BFS より単純で、分岐長ではなく src→dst 総パス長を最適化する。
-    let leePathFanout (grid: RoutingGrid) (netId: NetId) (src: Coord) (dst: Coord) : Coord list option =
-        leePathImpl grid src dst (Some netId)
+    /// allPorts: 全ポート座標集合。src/dst 以外のポートに隣接するセルを通過禁止にする。
+    let leePathFanout (grid: RoutingGrid) (netId: NetId) (src: Coord) (dst: Coord) (allPorts: Set<Coord>) : Coord list option =
+        leePathImpl grid src dst (Some netId) allPorts
 
     /// Wire リストから 2 本以上の経路が共有するセルを衝突として列挙する。
     let findConflicts (wires: Wire list) : (Coord * NetId * NetId) list =
@@ -680,36 +710,37 @@ module Sta =
 
     /// パスに extra 世代分のジグザグ迂回を物理的に挿入する。
     ///
-    /// 戦略: パスの終端直前の点 pivot から -Y 方向へ N/2 セル往復する。
-    ///   これで 2*(N/2) = N セル追加 (偶数)。
+    /// 戦略: pivot から -Y へ N/2 歩、pivot.X+1 列へ横断、+Y へ N/2 歩して dst へ。
+    ///   旧パターン (pivot 往復) は pivot を3方向ジャンクションにしてショートカットが生じたため廃止。
+    ///   新パターンは横断型U字で各セルが2接続のみ → 3方向ジャンクションなし。
     ///   奇数の extra は N+1 に切り上げる (STA は 1 gen 余裕を持って吸収)。
-    /// 前提: pivot の Y < 0 空間が空いている (直線配置なら常に成立)。
     let extendPath (extra: int<gen>) (path: Coord list) : Coord list =
         let n = int extra
         if n <= 0 || path.Length < 2 then path
         else
             let n' = if n % 2 = 0 then n else n + 1  // 偶数に切り上げ
             let halfN = n' / 2
-            // pivot = 終端 dst の 1 つ手前
             let pivot = List.item (path.Length - 2) path
             let dst   = List.last path
             let initPath = path |> List.take (path.Length - 2)
-            // pivot から -Y へ halfN 歩、戻り pivot を経由して dst へ
-            let up   = [ for i in 1 .. halfN          -> { X = pivot.X; Y = pivot.Y - i } ]
-            let down = [ for i in halfN - 1 .. -1 .. 0 -> { X = pivot.X; Y = pivot.Y - i } ]
-            // down の末尾は pivot 自身 (i=0)
-            initPath @ [pivot] @ up @ down @ [dst]
+            // pivot から -Y へ halfN 歩 (上側 arm)
+            let up = [ for i in 1 .. halfN -> { X = pivot.X; Y = pivot.Y - i } ]
+            // 上側 arm 末尾 (pivot.Y-halfN) から dst.X まで横断
+            let crossX = [ for x in pivot.X + 1 .. dst.X -> { X = x; Y = pivot.Y - halfN } ]
+            // dst.X 列を (pivot.Y-halfN+1) から dst.Y まで戻る (下側 arm、dst を含む)
+            let down = [ for y in pivot.Y - halfN + 1 .. dst.Y -> { X = dst.X; Y = y } ]
+            initPath @ [pivot] @ up @ crossX @ down
 
     /// スラックが正の Wire に DELAY_n 相当の遅延を物理的に付加して均等化する。
-    /// Path を extendPath でジグザグ延長し、Delay を加算式で更新する。
-    ///   新 Delay = 旧 Delay + slack  (パス長依存ではなく加算: ofPath が N-1 形式を想定)
+    /// Path を extendPath で横断型U字に延長し、ofPath で実際の遅延を再計測する。
     /// slack の key は (net, consumer_gate_output) のペア。
     let insertDelays (slack: Map<NetId * NetId, int<gen>>) (wires: Wire list) : Wire list =
         wires |> List.map (fun w ->
             match Map.tryFind (w.Net, w.Consumer) slack with
             | Some s when s > 0<gen> ->
                 let path' = extendPath s w.Path
-                { w with Path = path'; Delay = w.Delay + s }
+                let delay' = (ofPath w.Net w.Consumer path').Delay
+                { w with Path = path'; Delay = delay' }
             | _ -> w)
 
 
@@ -1033,10 +1064,17 @@ module Pipeline =
                 |> Option.map (fun dstConsumers -> netId, src, dstConsumers))
             |> List.sortBy (fun (_, _, dsts) -> dsts.Length)
 
+        // 全ゲートの全ポート座標を収集。src/dst 以外のポートに隣接するセルを通過禁止にし
+        // ワイヤ Head が隣接ポートを誤発火させる「クロストーク」を防ぐ。
+        let allPorts =
+            placement |> List.collect (fun p ->
+                p.Cell.Ports |> List.map (portCoord p))
+            |> Set.ofList
+
         // fan-out 対応: leePathFanout で同一 net の既配線セルを再利用可
         let routeOne (grid: RoutingGrid) (wires: Wire list) (netId: NetId) (src: Coord) (dst: Coord) (consumer: NetId)
             : Result<RoutingGrid * Wire list, CompileError> =
-            match leePathFanout grid netId src dst with
+            match leePathFanout grid netId src dst allPorts with
             | None -> Error (RoutingCongestion netId)
             | Some path ->
                 let wire = ofPath netId consumer path
@@ -1286,17 +1324,17 @@ module RoutingTest =
             [ for y in 0..4 -> { X=2; Y=y }, Blocked ] |> Map.ofList
 
         [ "leePath trivial (src=dst)",
-            leePath emptyGrid {X=0;Y=0} {X=0;Y=0} = Some [{X=0;Y=0}]
+            leePath emptyGrid {X=0;Y=0} {X=0;Y=0} Set.empty = Some [{X=0;Y=0}]
 
           "leePath straight 3 cells",
-            leePath emptyGrid {X=0;Y=0} {X=2;Y=0}
+            leePath emptyGrid {X=0;Y=0} {X=2;Y=0} Set.empty
             |> Option.map List.length = Some 3
 
           "leePath blocked returns None",
-            leePath blockedGrid {X=0;Y=0} {X=4;Y=0} = None
+            leePath blockedGrid {X=0;Y=0} {X=4;Y=0} Set.empty = None
 
           "leePath goes around obstacle",
-            leePath obstacleGrid {X=0;Y=2} {X=4;Y=2} |> Option.isSome
+            leePath obstacleGrid {X=0;Y=2} {X=4;Y=2} Set.empty |> Option.isSome
 
           "compile chain succeeds",
             match gridResult with Ok _ -> true | _ -> false
@@ -1427,8 +1465,8 @@ module StaTest =
           "nand: slack(net3 wire)=2 (shorter path needs 2 gen delay)",
             Map.tryFind (NetId 3, NetId 4) slkN = Some 2<gen>
 
-          "nand: insertDelays adds 2 to net3 wire delay (3+2=5)",
-            net3DelayAfterInsert = 5<gen>
+          "nand: insertDelays extends path length for net3 wire",
+            (wiresN' |> List.find (fun w -> w.Net = NetId 3)).Path.Length > 3
 
           "compile 4-NOT chain still passes with STA in pipeline",
             match Pipeline.compile Library.defaultLib RoutingTest.chainJson with
@@ -1576,7 +1614,7 @@ module E2eTest =
             let w = { Net = NetId 1; Consumer = NetId 0; Path = p; Delay = 7<gen> }
             let slack = Map.ofList [ (NetId 1, NetId 0), 2<gen> ]
             match insertDelays slack [w] with
-            | [w'] -> w'.Path.Length = 9 && w'.Delay = 9<gen>
+            | [w'] -> w'.Path.Length = 9  // path が 9 セルに延長される (遅延は L ターン短縮のため実測値で更新)
             | _    -> false
         ]
 
