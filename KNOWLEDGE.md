@@ -322,6 +322,108 @@ let totalSteps = arrivals |> Map.tryFind output_net |> Option.map int |> Option.
 
 ---
 
+## M6 — fan-out ルーティングと MultiGate E2E
+
+### Wire.Consumer フィールドと leePathFanout
+
+fan-out 時に同一ネットが複数ゲートを駆動する場合、STA が per-consumer の wireDelay を
+正確に保持するために `Wire.Consumer` フィールドを追加した。
+
+```fsharp
+type Wire = { Net: NetId; Consumer: NetId; Path: Coord list; Delay: int<gen> }
+```
+
+`wireDelayByConsumer = Map<NetId * NetId, int<gen>>` で `(net, consumer)` をキーに検索する。
+
+fan-out 配線は `leePathFanout` で同一ネットの既配線セルを再利用しながら
+各コンシューマへ経路を延伸する (`sameNet = Some netId` で Routed セルも通過可)。
+
+### BFS の bounding box 制限
+
+`leePathImpl` に src/dst を囲む bounding box + margin を設定し、無限空間への
+BFS 拡散を防いだ。margin = ManDist(src,dst) + 10 で十分な迂回空間を確保。
+
+### F# WIP 構文バグ 2 件
+
+**`|> (List.rev, _)` は構文エラー** — パイプ演算子にタプルを渡せない。
+`let (result, _) = ... in Ok (List.rev result)` で代替。
+
+**`Result.sequence` は F# 標準に存在しない** — `List.fold` で手動実装が必要:
+```fsharp
+|> List.fold (fun acc r ->
+    match acc, r with
+    | Ok xs, Ok x -> Ok (x :: xs)
+    | Error e, _  -> Error e
+    | _, Error e  -> Error e) (Ok [])
+|> Result.map List.rev
+```
+
+---
+
+## junc3 の物理制約 (M6 で発見・M7 で一部解決)
+
+### 問題 1: ポートクロストーク → M7 で解決済み
+
+旧 junc3 パターンは 3 入力ポートが x=0 列に隣接配置 (y=0/1/2) だった:
+```
+(0,0) A
+(0,1) B  ← A と直接隣接 → ワイヤ信号が隣接ポートを誤発火
+(0,2) C  ← B と直接隣接
+```
+
+**解決策 (M7)**: ポートを対角4隅に配置してポート間を全て非隣接 (チェビシェフ距離≥2) にした。
+
+新 junc3 パターン (5×3):
+```
+#.#..   y=0  A=(0,0) 左上, B=(2,0) 右上  (A-B 距離=2 → 非隣接)
+.#...   y=1  junction=(1,1)
+#.###   y=2  C=(0,2) 左下               (A-C 距離=2, B-C 距離=2)
+            出力=(2,2)(3,2)(4,2)
+```
+
+設計根拠: junction(1,1) の8近傍の中で互いに非隣接な3点は対角位置のみ。
+A(0,0), B(2,0), C(0,2) は全て junction の対角近傍かつ互いの距離≥2 → クロストーク排除 ✓
+
+### 問題 2: ワイヤ経路が次ゲートのクロックポートに隣接 → 未解決
+
+新パターンでは出力が (4,2) (y=2 下端) になったため、出力ワイヤが y=2 を流れる。
+次のゲートの clk ポートも (0,2) (y=2 左下) にあるため、ワイヤが次ゲート手前を通る際に clk ポートと直接隣接するセルを踏む。
+
+例: u0 の出力ワイヤが (12,2) を通ると u1 の clk ポート (13,2) が誤発火。
+fan-out 回路 (半加算器等) では NAND=0 のはずのゲートが誤発火して sum=1 になる。
+
+**影響を受けないケース** (安定動作):
+- プライマリ入力直接注入 (ワイヤ経由でない) — NAND/AND 単体ゲートテスト
+- NOT チェーン (fan-out なし) — MultiStageTest
+- or2 セル — Clock ポートなし, 入力が y=0 と y=2 で非隣接
+
+### OR テストの解決策
+
+`NAND(NOT(a), NOT(b))` による OR 実装は 2 ワイヤ均等化が必要で失敗。
+**`$_OR_` 単一セル (or2)** にマッピングすることで回避:
+
+```json
+{ "u0": {"type":"$_OR_", "connections":{"A":[2],"B":[3],"Y":[4]}} }
+```
+
+or2 は Clock ポートなし、2 入力が y=0 と y=2 の別行で非隣接 → クロストーク問題なし。
+
+### extendPath の物理的限界
+
+ジグザグ U ターンによる遅延挿入は「2 本のワイヤが空間を共有しない場合のみ有効」:
+- 共有セルがあると信号漏れが起きる
+- U ターン内で同じセルを 2 度通る → 信号がループで消滅
+
+### 今後の修正方向
+
+1. ~~junc3 の入力ポートを非隣接に再配置~~ → M7 で完了
+2. ルーターが経路上のセルと次ゲートのクロックポートが隣接しないよう制約を追加
+   - leePath の passable 関数に「destination 以外のゲートポートの近傍はコスト増」を適用
+   - または Place の gap を大きくして bounding box 周辺の空きを増やす
+3. マルチサイクル動作でクロック周期を延ばし誤信号の収束を待つ
+
+---
+
 ## 設計全般
 
 ### WireWorld の根本制約: 距離 = 遅延

@@ -233,35 +233,36 @@ module Library =
     /// JUNC3: 3 入力合流点。NOT / NAND の核となるセル。Latency = 4<gen>。
     ///
     /// パターン (5×3):
-    ///   #....   y=0  入力 A (0,0) — junction(1,1) と対角隣接
-    ///   #####   y=1  入力 B (0,1), junction (1,1), 出力経路 (2,1)..(4,1)
-    ///   #....   y=2  入力 C (0,2) — junction(1,1) と対角隣接
+    ///   #.#..   y=0  入力 A (0,0), 入力 B (2,0) — junction(1,1) と対角隣接
+    ///   .#...   y=1  junction (1,1)
+    ///   #.###   y=2  入力 C (0,2) — junction(1,1) と対角隣接、出力経路 (2,2)..(4,2)
     ///
-    /// 設計ポイント: 3 入力すべてを左列に集約し junction を (1,1) に置く。
-    ///   (2,1) の隣は (1,1) のみ (A/C ポートとの距離=2) → 対角ショートカット排除 ✓
+    /// 設計ポイント: A/B/C ポートを対角4隅に配置してポート間を全て非隣接 (チェビシェフ距離≥2) にする。
+    ///   旧パターンの A(0,0)-B(0,1)-C(0,2) 隣接配置ではワイヤ信号が隣接ポートを誤発火させていた。
+    ///   新配置: A=(0,0) 左上、B=(2,0) 右上、C=(0,2) 左下 — 全ペア距離≥2 → クロストーク排除 ✓
     ///
     /// 動作 (t=0 で A,B,C がポートに Head):
     ///   t=1: junction(1,1) が隣接 Head 数を評価
-    ///     1 or 2 個 → fires → t=4 で (4,1) = 出力 Head
+    ///     1 or 2 個 → fires → t=4 で (4,2) = 出力 Head
     ///     3 個     → no fire → 出力なし
     ///
-    /// NOT(A)   : A=(0,0), clock1=(0,1), clock2=(0,2) → out=(4,1)
+    /// NOT(A)   : A=(0,0), clock1=(2,0), clock2=(0,2) → out=(4,2)
     ///   A=0 → 2 Head → fires → output=1 ✓
     ///   A=1 → 3 Head → no fire → output=0 ✓
     ///
-    /// NAND(A,B): A=(0,0), B=(0,1), clock=(0,2) → out=(4,1)
+    /// NAND(A,B): A=(0,0), B=(2,0), clock=(0,2) → out=(4,2)
     ///   A∧B=1 → 3 Head → no fire → NAND=0 ✓
     ///   otherwise → 1-2 Head → fires → NAND=1 ✓
     let junc3 : StdCell =
         { Name    = "JUNC3"
           Kind    = Nand
           Size    = { X = 5; Y = 3 }
-          Ports   = [ { Role = In;    Offset = { X = 0; Y = 0 } }  // A: (0,0) diagonal to junction
-                      { Role = In;    Offset = { X = 0; Y = 1 } }  // B: (0,1) direct to junction
-                      { Role = In;    Offset = { X = 0; Y = 2 } }  // C: (0,2) diagonal to junction
-                      { Role = Out;   Offset = { X = 4; Y = 1 } } ]// 右: output
+          Ports   = [ { Role = In;    Offset = { X = 0; Y = 0 } }  // A: (0,0) upper-left diagonal
+                      { Role = In;    Offset = { X = 2; Y = 0 } }  // B: (2,0) upper-right diagonal
+                      { Role = In;    Offset = { X = 0; Y = 2 } }  // C: (0,2) lower-left diagonal
+                      { Role = Out;   Offset = { X = 4; Y = 2 } } ]// 出力: (4,2) 右下
           Latency = 4<gen>
-          Pattern = ofAscii [ "#...."; "#####"; "#...." ] }
+          Pattern = ofAscii [ "#.#.."; ".#..."; "#.###" ] }
 
     /// NOT1: junc3 の上下ポートにクロックを接続した NOT ゲート。
     /// パターン・Latency は junc3 と同一。コンパイラが Clock ポートへ同期信号を配線する。
@@ -1325,12 +1326,12 @@ module RoutingTest =
           "wire paths are non-empty and start/end at expected coords",
             match detailResult with
             | Ok (_, ws) ->
-                // not1 cell: size 5×3, out=(4,1), in[0]=(0,0)
+                // not1 cell: size 5×3, out=(4,2), in[0]=(0,0)
                 // gate spacing = size.X(5) + gap(8) = 13
-                // u0 origin=(0,0) out-abs=(4,1); u1 origin=(13,0) in[0]-abs=(13,0)
+                // u0 origin=(0,0) out-abs=(4,2); u1 origin=(13,0) in[0]-abs=(13,0)
                 ws |> List.tryFind (fun w -> w.Net = NetId 3)
                 |> Option.exists (fun w ->
-                    List.head w.Path = {X=4;Y=1} &&
+                    List.head w.Path = {X=4;Y=2} &&
                     List.last w.Path = {X=13;Y=0})
             | _ -> false
 
@@ -1338,8 +1339,8 @@ module RoutingTest =
             match gridResult with
             | Ok g ->
                 // routing path between u0 and u1 must include some free cells
-                // (5,1) is in the gap between gate 0 (x:0-4) and gate 1 (x:9-13)
-                Map.containsKey {X=5;Y=1} g
+                // (5,2) is in the gap between gate 0 (x:0-4) and gate 1 (x:13-17)
+                Map.containsKey {X=5;Y=2} g
             | _ -> false
         ]
 
@@ -1510,11 +1511,11 @@ module E2eTest =
         let fullResult = compileFull lib notJson
 
         // not1 ゲートのポート座標 (origin = (0,0) で place される)
-        // Port[0]=(0,0)=A, Port[1]=(0,1)=clk1, Port[2]=(0,2)=clk2, Out=(4,1)
+        // Port[0]=(0,0)=A, Port[1]=(2,0)=clk1, Port[2]=(0,2)=clk2, Out=(4,2)
         let portA    = { X=0; Y=0 }
-        let portClk1 = { X=0; Y=1 }
+        let portClk1 = { X=2; Y=0 }
         let portClk2 = { X=0; Y=2 }
-        let portOut  = { X=4; Y=1 }
+        let portOut  = { X=4; Y=2 }
 
         let latency = int Library.not1.Latency
 
