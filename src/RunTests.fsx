@@ -14,7 +14,8 @@ let m5 = run "M5 E2eTest"      (WwHdl.E2eTest.runAll ())
 let ms = run "Multi-stage E2E" (WwHdl.MultiStageTest.runAll ())
 let ng = run "NAND/AND Gate"   (WwHdl.NandGateTest.runAll ())
 let ha = run "MultiGate E2E"  (WwHdl.MultiGateTest.runAll ())
+let ha2= run "HalfAdder E2E" (WwHdl.HalfAdderTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length

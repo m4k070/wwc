@@ -121,6 +121,8 @@ module Library =
           Ports: Port list
           /// 入力到達 → 出力放出 の世代差。P&R が配線遅延を補償する基準値。
           Latency: int<gen>
+          /// 各 In ポートの内部遅延 (ポート→junction)。省略時は Latency と同一。
+          PortDelays: int<gen> list
           Pattern: Grid }             // 原点基準の conductor 配置
 
     type CellLibrary = Map<GateKind, StdCell>
@@ -153,6 +155,7 @@ module Library =
           Ports = [ { Role = In;  Offset = { X = 0; Y = 0 } }
                     { Role = Out; Offset = { X = 4; Y = 0 } } ]
           Latency = 4<gen>
+          PortDelays = [4<gen>]
           Pattern = ofAscii [ "#####" ] }
 
     // NOT / AND / OR などはクロックループや合流構造が必要で、手書きは
@@ -169,19 +172,21 @@ module Library =
           Ports   = [ { Role = In;  Offset = { X = 0;  Y = 0 } }
                       { Role = Out; Offset = { X = n'; Y = 0 } } ]
           Latency = n
+          PortDelays = [n]
           Pattern = ofAscii [ String.replicate (n' + 1) "#" ] }
 
     /// Crossover StdCell のスタブ。水平・垂直 2 信号を交差させる 7×7 パターン。
     /// Pattern は Rule.run で検証後に埋める。ポートは水平(In/Out) + 垂直(In/Out) の 4 本。
     let crossover : StdCell =
         { Name    = "CROSSOVER"
-          Kind    = Buf        // 専用 GateKind への変更は交差処理実装時に検討
+          Kind    = Buf        // 専用 GateKind の変更は交差処理実装時に検討
           Size    = { X = 7; Y = 7 }
           Ports   = [ { Role = In;  Offset = { X = 0; Y = 3 } }   // 水平入力
                       { Role = Out; Offset = { X = 6; Y = 3 } }   // 水平出力
                       { Role = In;  Offset = { X = 3; Y = 0 } }   // 垂直入力
                       { Role = Out; Offset = { X = 3; Y = 6 } } ] // 垂直出力
           Latency = 6<gen>
+          PortDelays = [6<gen>; 6<gen>]
           Pattern = Map.empty }
 
     // -----------------------------------------------------------------------
@@ -206,6 +211,7 @@ module Library =
                       { Role = In;  Offset = { X = 0; Y = 2 } }
                       { Role = Out; Offset = { X = 4; Y = 1 } } ]
           Latency = 4<gen>
+          PortDelays = [4<gen>; 4<gen>]
           Pattern = ofAscii [ "###  "; "   ##"; "###  " ] }
 
     /// SPLIT: 1 入力 2 出力スプリッタ。Latency = 4<gen>。
@@ -224,6 +230,7 @@ module Library =
                       { Role = Out; Offset = { X = 4; Y = 0 } }
                       { Role = Out; Offset = { X = 4; Y = 2 } } ]
           Latency = 4<gen>
+          PortDelays = [4<gen>]
           Pattern = ofAscii [ "..###"; "##..."; "..###" ] }
 
     // -----------------------------------------------------------------------
@@ -238,21 +245,6 @@ module Library =
     ///   #.###   y=2  入力 C (0,2) — junction(1,1) と対角隣接、出力経路 (2,2)..(4,2)
     ///
     /// 設計ポイント: A/B/C ポートを対角4隅に配置してポート間を全て非隣接 (チェビシェフ距離≥2) にする。
-    ///   旧パターンの A(0,0)-B(0,1)-C(0,2) 隣接配置ではワイヤ信号が隣接ポートを誤発火させていた。
-    ///   新配置: A=(0,0) 左上、B=(2,0) 右上、C=(0,2) 左下 — 全ペア距離≥2 → クロストーク排除 ✓
-    ///
-    /// 動作 (t=0 で A,B,C がポートに Head):
-    ///   t=1: junction(1,1) が隣接 Head 数を評価
-    ///     1 or 2 個 → fires → t=4 で (4,2) = 出力 Head
-    ///     3 個     → no fire → 出力なし
-    ///
-    /// NOT(A)   : A=(0,0), clock1=(2,0), clock2=(0,2) → out=(4,2)
-    ///   A=0 → 2 Head → fires → output=1 ✓
-    ///   A=1 → 3 Head → no fire → output=0 ✓
-    ///
-    /// NAND(A,B): A=(0,0), B=(2,0), clock=(0,2) → out=(4,2)
-    ///   A∧B=1 → 3 Head → no fire → NAND=0 ✓
-    ///   otherwise → 1-2 Head → fires → NAND=1 ✓
     let junc3 : StdCell =
         { Name    = "JUNC3"
           Kind    = Nand
@@ -262,11 +254,107 @@ module Library =
                       { Role = In;    Offset = { X = 0; Y = 2 } }  // C: (0,2) lower-left diagonal
                       { Role = Out;   Offset = { X = 4; Y = 2 } } ]// 出力: (4,2) 右下
           Latency = 4<gen>
+          PortDelays = [1<gen>; 1<gen>; 1<gen>]
           Pattern = ofAscii [ "#.#.."; ".#..."; "#.###" ] }
 
     /// NOT1: junc3 の上下ポートにクロックを接続した NOT ゲート。
     /// パターン・Latency は junc3 と同一。コンパイラが Clock ポートへ同期信号を配線する。
-    let not1 : StdCell = { junc3 with Name = "NOT1"; Kind = Not }
+    let not1 : StdCell = { junc3 with Name = "NOT1"; Kind = Not; PortDelays = [1<gen>; 1<gen>; 1<gen>] }
+
+    /// JUNC3_Ab3: A 入力に 3gen 内蔵バッファを持つ NAND バリアント (9×3)。
+    ///
+    /// 設計: A=(0,0)→(1,0)→(2,0)→(3,0)→junction(4,1)、B=(5,0)、C=(3,2)、Out=(8,2)
+    ///
+    ///   A ポート基準遅延 (junction到達):
+    ///     (0,0)→(1,0)→(2,0)→(3,0): 3 セル水平 + 対角 (3,0)→(4,1) = 計 4 gen
+    ///   B ポート基準遅延:
+    ///     (5,0)→(4,1): 対角 1 gen
+    ///   C ポート基準遅延:
+    ///     (3,2)→(4,1): 対角 1 gen
+    ///
+    ///   同期条件: T_A + 4 = T_B + 1 → T_A = T_B - 3
+    ///     すなわち A が B より 3 gen 早く到着した場合に junction で同時評価。
+    ///
+    ///   Latency (B/C 基準): junction 評価 (t=1) + 出力経路 3 hop (t=4) = 4? → 実測で確認。
+    ///   実際には B が clockTimeOf=62 で注入されたとき出力は t=67 で到達 → Latency = 5<gen>。
+    ///
+    ///   注意: Latency は B/C 入力基準 (STA target からの差)。
+    ///     A 入力は 3 gen 早く到達することが前提 (insertDelays で保証するか、
+    ///     または STA スラックが 3<gen> の NAND ゲートにこのセルを選択する)。
+    ///
+    /// パターン (9×3):
+    ///   y=0: ####.#...  (0..3)=A バッファ、(4)=空、(5)=B ポート
+    ///   y=1: ....#....  (4)=junction
+    ///   y=2: ...#.####  (3)=C ポート、(4)=空、(5..8)=出力経路
+    let junc3_Ab3 : StdCell =
+        { Name    = "JUNC3_Ab3"
+          Kind    = Nand
+          Size    = { X = 9; Y = 3 }
+          Ports   = [ { Role = In;  Offset = { X = 0; Y = 0 } }   // A (3gen 内蔵バッファ後 junction)
+                      { Role = In;  Offset = { X = 5; Y = 0 } }   // B
+                      { Role = In;  Offset = { X = 3; Y = 2 } }   // C (clock)
+                      { Role = Out; Offset = { X = 8; Y = 2 } } ]
+          Latency = 5<gen>   // B/C 基準: junction 評価 1gen + 出力 4hop = 5gen
+          PortDelays = [4<gen>; 1<gen>; 1<gen>]   // A=4gen, B=1gen, C=1gen (junction到達)
+          Pattern = ofAscii [ "####.#..."; "....#...."; "...#.####" ] }
+
+    /// JUNC3_Ab7: A 入力に 7gen 内蔵バッファを持つ NAND バリアント (13×3)。
+    ///
+    /// 設計: A=(0,0)→...→(7,0)→junction(8,1)、B=(9,0)、C=(7,2)、Out=(12,2)
+    ///
+    ///   A ポート基準遅延 (junction到達): 8 gen  (7セル水平 + 対角)
+    ///   B ポート基準遅延:                1 gen  (対角)
+    ///   C ポート基準遅延:                1 gen  (対角)
+    ///
+    ///   同期条件: T_A + 8 = T_B + 1 → T_A = T_B - 7
+    ///     すなわち A が B より 7 gen 早く到着した場合に junction で同時評価。
+    ///
+    ///   Latency (B/C 基準): junction 評価 1gen + 出力 4hop = 5gen
+    ///
+    /// パターン (13×3):
+    ///   y=0: ########.#...  (0..7)=A バッファ、(8)=空、(9)=B ポート
+    ///   y=1: ........#....  (8)=junction
+    ///   y=2: .......#.####  (7)=C ポート、(8)=空、(9..12)=出力経路
+    let junc3_Ab7 : StdCell =
+        { Name    = "JUNC3_Ab7"
+          Kind    = Nand
+          Size    = { X = 13; Y = 3 }
+          Ports   = [ { Role = In;  Offset = { X = 0; Y = 0 } }   // A (7gen 内蔵バッファ後 junction)
+                      { Role = In;  Offset = { X = 9; Y = 0 } }   // B
+                      { Role = In;  Offset = { X = 7; Y = 2 } }   // C (clock)
+                      { Role = Out; Offset = { X = 12; Y = 2 } } ]
+          Latency = 5<gen>   // B/C 基準: junction 評価 1gen + 出力 4hop = 5gen
+          PortDelays = [8<gen>; 1<gen>; 1<gen>]   // A=8gen, B=1gen, C=1gen (junction到達)
+          Pattern = ofAscii [ "########.#..."; "........#...."; ".......#.####" ] }
+
+    /// JUNC3_Ab5: A 入力に 5gen 内蔵バッファを持つ NAND バリアント (11×3)。
+    ///
+    /// 設計: A=(0,0)→...→(5,0)→junction(6,1)、B=(7,0)、C=(5,2)、Out=(10,2)
+    ///
+    ///   A ポート基準遅延 (junction到達): 6 gen  (5セル水平 + 対角)
+    ///   B ポート基準遅延:                1 gen  (対角)
+    ///   C ポート基準遅延:                1 gen  (対角)
+    ///
+    ///   同期条件: T_A + 6 = T_B + 1 → T_A = T_B - 5
+    ///     すなわち A が B より 5 gen 早く到着した場合に junction で同時評価。
+    ///
+    ///   Latency (B/C 基準): junction 評価 1gen + 出力 4hop = 5gen
+    ///
+    /// パターン (11×3):
+    ///   y=0: ######.#...  (0..5)=A バッファ、(6)=空、(7)=B ポート
+    ///   y=1: ......#....  (6)=junction
+    ///   y=2: .....#.####  (5)=C ポート、(6)=空、(7..10)=出力経路
+    let junc3_Ab5 : StdCell =
+        { Name    = "JUNC3_Ab5"
+          Kind    = Nand
+          Size    = { X = 11; Y = 3 }
+          Ports   = [ { Role = In;  Offset = { X = 0; Y = 0 } }   // A (5gen 内蔵バッファ後 junction)
+                      { Role = In;  Offset = { X = 7; Y = 0 } }   // B
+                      { Role = In;  Offset = { X = 5; Y = 2 } }   // C (clock)
+                      { Role = Out; Offset = { X = 10; Y = 2 } } ]
+          Latency = 5<gen>   // B/C 基準: junction 評価 1gen + 出力 4hop = 5gen
+          PortDelays = [6<gen>; 1<gen>; 1<gen>]   // A=6gen, B=1gen, C=1gen (junction到達)
+          Pattern = ofAscii [ "######.#..."; "......#...."; ".....#.####" ] }
 
     // AND2 はモノリシック StdCell として実装しない。理由:
     //   JUNC3 を同一水平導線上に直列配置すると B/clock 入力が (3,2) を対角で誤発火させ、
@@ -301,6 +389,7 @@ module Library =
           Ports   = [ { Role = In;  Offset = { X = 0; Y = 1 } }
                       { Role = Out; Offset = { X = 3; Y = 1 } } ]
           Latency = 3<gen>
+          PortDelays = [3<gen>]
           Pattern = ofAscii [ ".##."; "##.#"; ".##." ] }
 
     /// DFF: クロックゲート型 D フリップフロップのスタブ。
@@ -320,6 +409,7 @@ module Library =
                       { Role = Clock; Offset = { X = 5;  Y = 0 } }   // CLK
                       { Role = Out;   Offset = { X = 11; Y = 5 } } ] // Q 出力
           Latency = 10<gen>     // TODO: Rule.run で実測後に更新
+          PortDelays = [10<gen>]
           Pattern = Map.empty }
 
     /// M2 ターゲット (`abc -g NAND,NOT`) 対応のデフォルトライブラリ。
@@ -484,11 +574,67 @@ module Route =
                 else find (Rule.step g) (t + 1)
             find initial 0
 
+    /// コンテキスト付き遅延計測: ソースゲートのパターンを利用して対角ショートカットを検出する。
+    ///
+    /// JUNC3 など一部ゲートでは、出力ポート (path[0]) が Head になる 1 ステップ前に
+    /// 出力ポートに隣接するゲート内部セル (例: local (3,2)) が Head になる。
+    /// このセルが wire の 2 セル目 (path[1]) とも対角隣接していると、
+    /// path[1] は path[0] と同一ステップで Head になる「対角ショートカット」が生じる。
+    ///
+    /// このショートカットを検出した場合、初期状態に path[0] と path[1] の両方を Head として
+    /// 測定することで実効遅延を正確に計算する。
+    let private measureDelayInContext (path: Coord list) (gateGrid: Grid) : int<gen> =
+        match path with
+        | [] | [_] -> 0<gen>
+        | [_; _] -> measureDelay path
+        | _ ->
+            let src = path.[0]
+            let secondCell = path.[1]
+            let dst = List.last path
+
+            // path[0] (= ゲート出力ポート) に隣接するゲート内部 Wire セルを収集する。
+            let gateNeighbors =
+                gateGrid |> Map.toList
+                |> List.filter (fun (gateCoord, _) ->
+                    gateCoord <> src &&
+                    abs (gateCoord.X - src.X) <= 1 &&
+                    abs (gateCoord.Y - src.Y) <= 1)
+                |> List.map fst
+
+            // いずれかのゲート内部隣接セルが path[1] とも隣接 (対角含む) していれば
+            // ショートカットが発生する。
+            let hasShortcut =
+                gateNeighbors |> List.exists (fun gn ->
+                    abs (gn.X - secondCell.X) <= 1 &&
+                    abs (gn.Y - secondCell.Y) <= 1)
+
+            let wireGrid = path |> List.map (fun c -> c, Wire) |> Map.ofList
+            // ショートカットがある場合は path[0] と path[1] の両方を Head で開始する。
+            let initial =
+                if hasShortcut then
+                    wireGrid |> Map.add src Head |> Map.add secondCell Head
+                else
+                    wireGrid |> Map.add src Head
+            let limit = (List.length path) * 2
+            let rec find (g: Grid) (t: int) =
+                if t >= limit then (List.length path - 1) * 1<gen>   // fallback
+                elif Domain.get g dst = Head then t * 1<gen>
+                else find (Rule.step g) (t + 1)
+            find initial 0
+
     let ofPath (net: NetId) (consumer: NetId) (path: Coord list) : Wire =
         { Net      = net
           Consumer = consumer
           Path     = path
           Delay    = measureDelay path }
+
+    /// ソースゲートのパターンを考慮したコンテキスト付き Wire 生成。
+    /// gateGrid はソースゲートの Wire パターンの絶対座標グリッド。
+    let ofPathInContext (net: NetId) (consumer: NetId) (path: Coord list) (gateGrid: Grid) : Wire =
+        { Net      = net
+          Consumer = consumer
+          Path     = path
+          Delay    = measureDelayInContext path gateGrid }
 
     type RoutingCell =
         | Free              // 配線可能
@@ -537,10 +683,20 @@ module Route =
 
             // src/dst 以外のポートにチェビシェフ距離 1 で隣接するセルは通過禁止。
             // ワイヤが Head になったとき隣接ポートを誤発火させる「クロストーク」を防ぐ。
+            // 強化: dst に隣接するセルが、dst 以外のポートにも隣接する場合も禁止。
             let isAdjacentToOtherPort (c: Coord) =
-                allPorts |> Set.exists (fun p ->
-                    p <> src && p <> dst &&
-                    abs (c.X - p.X) <= 1 && abs (c.Y - p.Y) <= 1)
+                // c が dst に隣接する場合、dst 以外のポートにも隣接するかチェック
+                let isAdjacentToDst = abs (c.X - dst.X) <= 1 && abs (c.Y - dst.Y) <= 1
+                if isAdjacentToDst then
+                    // dst に隣接するセルが、他のポートにも隣接するか
+                    allPorts |> Set.exists (fun p ->
+                        p <> dst &&
+                        abs (c.X - p.X) <= 1 && abs (c.Y - p.Y) <= 1)
+                else
+                    // dst に隣接しない場合、src/dst 以外のポートに隣接するか
+                    allPorts |> Set.exists (fun p ->
+                        p <> src && p <> dst &&
+                        abs (c.X - p.X) <= 1 && abs (c.Y - p.Y) <= 1)
 
             // 異なるネットの既配線セルに Moore 隣接するセルは通過禁止。
             // Wire 間のクロストーク (Head が隣接 Wire を誤発火させる) を防ぐ。
@@ -640,10 +796,10 @@ module Sta =
 
     /// トポロジカル順で各ネットの到達時刻を計算する。
     ///   arrival(primary_input) = 0<gen>
-    ///   arrival(gate_output)   = max(arrival(input_i) + wire_i.Delay) + gate.Latency
+    ///   arrival(gate_output)   = max(arrival(input_i) + wire_i.Delay + portDelay_i) + Latency - maxPortDelay
     ///
-    /// wireDelay は (net, consumer_gate_output) → delay の per-consumer マップ。
-    /// fan-out 時に同一 net の複数 Wire が存在しても各コンシューマの遅延を正確に使う。
+    /// portDelay は各 In ポートの内部遅延 (ポート→junction)。
+    /// junc3_Ab3 のようにポートごとに遅延が異なるセルを正しく扱う。
     ///
     /// 実装: 全入力の到達時刻が確定したゲートを繰り返し処理する。
     ///   組合せ回路 (DAG) なら必ず収束する。
@@ -674,21 +830,31 @@ module Sta =
                 else
                     let arr' =
                         ready |> List.fold (fun acc p ->
+                            let inPortDelays =
+                                p.Cell.PortDelays
+                                |> List.truncate p.Gate.Inputs.Length
+                            let padCount = p.Gate.Inputs.Length - inPortDelays.Length
+                            let portDelays =
+                                inPortDelays @ List.replicate padCount p.Cell.Latency
+                            let maxPortDelay =
+                                if portDelays.IsEmpty then p.Cell.Latency
+                                else List.max portDelays
                             let inputTimes =
-                                p.Gate.Inputs |> List.map (fun n ->
+                                p.Gate.Inputs |> List.mapi (fun i n ->
                                     (Map.tryFind n acc |> Option.defaultValue 0<gen>)
-                                    + (Map.tryFind (n, p.Gate.Output) wireDelayByConsumer |> Option.defaultValue 0<gen>))
-                            let target =
+                                    + (Map.tryFind (n, p.Gate.Output) wireDelayByConsumer |> Option.defaultValue 0<gen>)
+                                    + portDelays.[i])
+                            let junctionTime =
                                 if List.isEmpty inputTimes then 0<gen>
                                 else List.max inputTimes
-                            Map.add p.Gate.Output (target + p.Cell.Latency) acc) arr
+                            Map.add p.Gate.Output (junctionTime + p.Cell.Latency - maxPortDelay) acc) arr
                     propagate arr' notReady
 
         propagate primaryArrivals placement
 
     /// 各 Wire のスラック（余裕世代）を計算する。
-    ///   target(gate)  = max { arrival(input_i) + wireDelay(input_i) }
-    ///   slack(net_i, consumer)  = target(gate) - arrival(net_i) - wireDelay(net_i, consumer)
+    ///   target(gate)  = max { arrival(input_i) + wireDelay(input_i) + portDelay(input_i) }
+    ///   slack(net_i, consumer)  = target(gate) - arrival(net_i) - wireDelay(net_i) - portDelay(input_i)
     /// スラック > 0 のネットは target に合わせて遅延を追加する必要がある。
     /// 戻り値は Map<NetId * NetId, int<gen>> (key = (net, consumer_gate_output))。
     let computeSlack (placement: Placement) (wires: Wire list) (arrivals: ArrivalMap)
@@ -696,16 +862,26 @@ module Sta =
         let wireDelayByConsumer =
             wires |> List.map (fun w -> (w.Net, w.Consumer), w.Delay) |> Map.ofList
 
-        let inputArrivalAt (n: NetId) (consumer: NetId) =
+        let inputArrivalAt (n: NetId) (consumer: NetId) (portDelay: int<gen>) =
             (Map.tryFind n arrivals |> Option.defaultValue 0<gen>)
             + (Map.tryFind (n, consumer) wireDelayByConsumer |> Option.defaultValue 0<gen>)
+            + portDelay
 
         placement
         |> List.collect (fun p ->
             if List.isEmpty p.Gate.Inputs then []
             else
-                let target = p.Gate.Inputs |> List.map (fun n -> inputArrivalAt n p.Gate.Output) |> List.max
-                p.Gate.Inputs |> List.map (fun n -> (n, p.Gate.Output), target - inputArrivalAt n p.Gate.Output))
+                let inPortDelays =
+                    p.Cell.PortDelays
+                    |> List.truncate p.Gate.Inputs.Length
+                let padCount = p.Gate.Inputs.Length - inPortDelays.Length
+                let portDelays =
+                    inPortDelays @ List.replicate padCount p.Cell.Latency
+                let target =
+                    p.Gate.Inputs |> List.mapi (fun i n -> inputArrivalAt n p.Gate.Output portDelays.[i])
+                    |> List.max
+                p.Gate.Inputs |> List.mapi (fun i n ->
+                    (n, p.Gate.Output), target - inputArrivalAt n p.Gate.Output portDelays.[i]))
         |> Map.ofList
 
     /// パスに extra 世代分のジグザグ迂回を物理的に挿入する。
@@ -731,17 +907,163 @@ module Sta =
             let down = [ for y in pivot.Y - halfN + 1 .. dst.Y -> { X = dst.X; Y = y } ]
             initPath @ [pivot] @ up @ crossX @ down
 
-    /// スラックが正の Wire に DELAY_n 相当の遅延を物理的に付加して均等化する。
-    /// Path を extendPath で横断型U字に延長し、ofPath で実際の遅延を再計測する。
-    /// slack の key は (net, consumer_gate_output) のペア。
-    let insertDelays (slack: Map<NetId * NetId, int<gen>>) (wires: Wire list) : Wire list =
+    /// スラックが正の Wire に遅延を物理的に付加して均等化する。
+    ///
+    /// 戦略 (優先順):
+    ///   ① ウェイポイントルーティング: src から K セル直線延長 (K=2..15, +Y/-Y) 後、
+    ///      leePathFanout で dst まで再ルーティング。measureDelay が目標一致したら採用。
+    ///      理由: U 字末端は pivot-dst 隣接ショートカットで遅延増加不可。
+    ///      src からの直線 K セルは L ターン 1 個分だけのショートカットが起き、
+    ///      K-1 gen の追加遅延を確実に実現できる。
+    ///   ② U 字末端延長 (halfN=1..20, ±Y): 目標一致 → 最小オーバーシュート →
+    ///      最短衝突なし候補の順で採用。
+    ///   ③ 候補なし: 元パスを保持し遅延を実測値に更新する。
+    ///
+    /// placement は allPorts と baseGrid の生成に使用する。不要な場合は [] を渡す。
+    let insertDelays (placement: Placement) (slack: Map<NetId * NetId, int<gen>>) (wires: Wire list) : Wire list =
+        let allPorts =
+            placement |> List.collect (fun p ->
+                p.Cell.Ports |> List.map (portCoord p))
+            |> Set.ofList
+
+        // 各ゲートの絶対座標パターングリッド (コンテキスト付き遅延計測に使用)。
+        // 各ゲートの絶対座標パターングリッド (コンテキスト付き遅延計測と対角ショートカット検出に使用)。
+        let gateGridByNet : Map<NetId, Grid> =
+            placement |> List.map (fun p ->
+                let gateGrid =
+                    p.Cell.Pattern
+                    |> Map.toList
+                    |> List.map (fun (localCoord, state) ->
+                        { X = p.Origin.X + localCoord.X; Y = p.Origin.Y + localCoord.Y }, state)
+                    |> Map.ofList
+                p.Gate.Output, gateGrid)
+            |> Map.ofList
+
+        let baseGrid = buildGrid placement
+
+        let addWire (w: Wire) (g: RoutingGrid) =
+            w.Path |> List.fold (fun g2 c ->
+                match Map.tryFind c baseGrid with
+                | Some Blocked -> g2
+                | _ -> Map.add c (Routed w.Net) g2) g
+
+        let removeWire (w: Wire) (g: RoutingGrid) =
+            w.Path |> List.fold (fun g2 c ->
+                match Map.tryFind c baseGrid with
+                | Some Blocked -> g2
+                | _ -> Map.remove c g2) g
+
+        let mutable routingGrid =
+            wires |> List.fold (fun g w -> addWire w g) baseGrid
+
+        // src から yDir へ K セル直進後 dst まで BFS、目標遅延一致のパスを返す。
+        let tryWaypoint (w: Wire) (K: int) (yDir: int) (target: int<gen>) =
+            let src = List.head w.Path
+            let dst = List.last w.Path
+            let straight = [ for i in 1..K -> { X = src.X; Y = src.Y + yDir * i } ]
+            let waypoint = List.last straight
+            let ok = straight |> List.forall (fun c ->
+                match Map.tryFind c routingGrid with
+                | None | Some Free -> true
+                | Some (Routed n) -> n = w.Net
+                | _ -> false)
+            if not ok then None
+            else
+                // leePathFanout は同一ネットの既配線セルを再利用するため、
+                // 迂回路がオリジナル経路に合流して遅延が増えない場合がある。
+                // leePath を使い同一ネット再利用を禁止して独立した迂回路を探す。
+                match leePath routingGrid waypoint dst allPorts with
+                | None -> None
+                | Some wptPath ->
+                    let full = (src :: straight) @ List.tail wptPath
+                    let gateGrid = gateGridByNet |> Map.tryFind w.Net |> Option.defaultValue Map.empty
+                    let d = (ofPathInContext w.Net w.Consumer full gateGrid).Delay
+                    if d = target then Some (full, d) else None
+
         wires |> List.map (fun w ->
-            match Map.tryFind (w.Net, w.Consumer) slack with
-            | Some s when s > 0<gen> ->
-                let path' = extendPath s w.Path
-                let delay' = (ofPath w.Net w.Consumer path').Delay
-                { w with Path = path'; Delay = delay' }
-            | _ -> w)
+            routingGrid <- removeWire w routingGrid
+
+            let result =
+                match Map.tryFind (w.Net, w.Consumer) slack with
+                | Some s when s > 0<gen> ->
+                    let target = w.Delay + s
+
+                    // ① ウェイポイントルーティング
+                    let waypointBest =
+                        [ for K in 2..15 do
+                            for yDir in [1; -1] do
+                                match tryWaypoint w K yDir target with
+                                | Some r -> yield r
+                                | None -> () ]
+                        |> List.tryHead
+
+                    // ② U 字末端延長 (フォールバック)
+                    // pivotBack: 末尾から何番目の要素を pivot にするか (2=second-to-last, 3=third-to-last, ...)
+                    // path が短い場合や standard pivot で目標遅延に達しない場合は deeper pivot を試みる。
+                    let uShapeCandidates (pivotBack: int) =
+                        if w.Path.Length < pivotBack + 1 then []
+                        else
+                            let pivot    = List.item (w.Path.Length - pivotBack) w.Path
+                            let dst      = List.last w.Path
+                            let initPath = w.Path |> List.take (w.Path.Length - pivotBack)
+                            [ for halfN in 1..20 do
+                                for yDir in [-1; 1] do
+                                    let midY     = pivot.Y + yDir * halfN
+                                    let upArm    = [ for i in 1..halfN -> { X = pivot.X; Y = pivot.Y + yDir * i } ]
+                                    let crossArm = [ for x in pivot.X + 1 .. dst.X -> { X = x; Y = midY } ]
+                                    let downArm  =
+                                        if yDir = -1 then
+                                            [ for y in midY + 1 .. dst.Y -> { X = dst.X; Y = y } ]
+                                        else
+                                            [ for y in midY - 1 .. -1 .. dst.Y -> { X = dst.X; Y = y } ]
+                                    let newCells = upArm @ crossArm @ downArm
+                                    if not newCells.IsEmpty then
+                                        // 既存パスとの重複セルを除く (deeper pivot では initPath が短くなるため)
+                                        let initSet = initPath |> Set.ofList
+                                        let hasDupe = newCells |> List.exists (fun c -> Set.contains c initSet)
+                                        let path' = initPath @ [pivot] @ newCells
+                                        if not hasDupe then
+                                            let collides =
+                                                newCells |> List.exists (fun c ->
+                                                    c <> dst &&
+                                                    match Map.tryFind c routingGrid with
+                                                    | None | Some Free -> false
+                                                    | Some (Routed n) -> n <> w.Net
+                                                    | _ -> true)
+                                            if not collides then
+                                                let gateGrid = gateGridByNet |> Map.tryFind w.Net |> Option.defaultValue Map.empty
+                                                let d = (ofPathInContext w.Net w.Consumer path' gateGrid).Delay
+                                                yield path', d ]
+
+                    let uShapeBest () =
+                        if w.Path.Length < 2 then None
+                        else
+                            // pivotBack=2 (standard) → 3 (one step deeper) → 4 の順で候補を収集。
+                            // Deeper pivot は standard pivot が目標に届かない場合のフォールバック。
+                            let allCandidates =
+                                [ for back in 2..4 do yield! uShapeCandidates back ]
+                            allCandidates |> List.tryFind (fun (_, d) -> d = target)
+                            |> Option.orElse (
+                                allCandidates
+                                |> List.filter (fun (_, d) -> d > target)
+                                |> List.sortBy (fun (_, d) -> int d)
+                                |> List.tryHead)
+                            |> Option.orElse (
+                                allCandidates
+                                |> List.sortBy (fun (p, _) -> p.Length)
+                                |> List.tryHead)
+
+                    let best = waypointBest |> Option.orElse (uShapeBest ())
+
+                    match best with
+                    | Some (path', delay') -> { w with Path = path'; Delay = delay' }
+                    | None ->
+                        let gateGrid = gateGridByNet |> Map.tryFind w.Net |> Option.defaultValue Map.empty
+                        { w with Delay = (ofPathInContext w.Net w.Consumer w.Path gateGrid).Delay }
+                | _ -> w
+
+            routingGrid <- addWire result routingGrid
+            result)
 
 
 // ---------------------------------------------------------------------
@@ -769,17 +1091,35 @@ module Sim =
         |> List.choose (fun (i, port) ->
             if i >= nLogical then Some (portCoord p port) else None)
 
-    /// ゲート G のクロック注入時刻 = G の全入力の到達時刻の最大値 (= target)。
-    /// wires から per-consumer 遅延を参照して計算する。
+    /// ゲート G のクロック注入時刻。
+    /// クロックはデータ信号と同じタイミングでポートに注入される必要がある。
+    /// ただし、ポート間の内部遅延差がある場合（junc3_Ab3等）は、
+    /// クロックポートの遅延に合わせて注入時刻を調整する。
+    ///
+    /// clockTime = max(arrival_i + wireDelay_i + portDelay_i) - clockPortDelay
     let clockTimeOf (p: Placed) (arrivals: ArrivalMap) (wires: Wire list) : int<gen> =
         if p.Gate.Inputs.IsEmpty then 0<gen>
         else
             let wireDelayByConsumer =
                 wires |> List.map (fun w -> (w.Net, w.Consumer), w.Delay) |> Map.ofList
-            p.Gate.Inputs |> List.map (fun n ->
-                (arrivals |> Map.tryFind n |> Option.defaultValue 0<gen>)
-                + (wireDelayByConsumer |> Map.tryFind (n, p.Gate.Output) |> Option.defaultValue 0<gen>))
-            |> List.max
+            let inPortDelays =
+                p.Cell.PortDelays
+                |> List.truncate p.Gate.Inputs.Length
+            let padCount = p.Gate.Inputs.Length - inPortDelays.Length
+            let portDelays =
+                inPortDelays @ List.replicate padCount p.Cell.Latency
+            let clockPortDelay =
+                let clockIdx = p.Gate.Inputs.Length
+                if clockIdx < p.Cell.PortDelays.Length
+                then p.Cell.PortDelays.[clockIdx]
+                else p.Cell.Latency
+            let junctionTime =
+                p.Gate.Inputs |> List.mapi (fun i n ->
+                    (arrivals |> Map.tryFind n |> Option.defaultValue 0<gen>)
+                    + (wireDelayByConsumer |> Map.tryFind (n, p.Gate.Output) |> Option.defaultValue 0<gen>)
+                    + portDelays.[i])
+                |> List.max
+            junctionTime - clockPortDelay
 
     /// 注入マップ (世代 → 座標リスト) を使って `steps` 世代進める。
     /// 各イテレーション: 該当世代の Head を注入してから Rule.step を呼ぶ。
@@ -1014,15 +1354,54 @@ module Pipeline =
             | _, Error e    -> Error e) (Ok [])
         |> Result.map List.rev
 
-    /// 配置: グリッドにセルを並べる (force-directed 等)。ここでは行優先の素朴版。
+    /// セル変形: 水平反転
+    let flipH (cell: StdCell) : StdCell =
+        let newPattern = 
+            cell.Pattern |> Map.toList
+            |> List.map (fun (c, s) -> { X = cell.Size.X - 1 - c.X; Y = c.Y }, s)
+            |> Map.ofList
+        let newPorts = 
+            cell.Ports |> List.map (fun p -> 
+                { p with Offset = { X = cell.Size.X - 1 - p.Offset.X; Y = p.Offset.Y } })
+        { cell with Pattern = newPattern; Ports = newPorts }
+
+    /// セル変形: 垂直反転
+    let flipV (cell: StdCell) : StdCell =
+        let newPattern = 
+            cell.Pattern |> Map.toList
+            |> List.map (fun (c, s) -> { X = c.X; Y = cell.Size.Y - 1 - c.Y }, s)
+            |> Map.ofList
+        let newPorts = 
+            cell.Ports |> List.map (fun p -> 
+                { p with Offset = { X = p.Offset.X; Y = cell.Size.Y - 1 - p.Offset.Y } })
+        { cell with Pattern = newPattern; Ports = newPorts }
+
+    /// セル変形: 180度回転
+    let rotate180 (cell: StdCell) : StdCell =
+        cell |> flipH |> flipV
+
+    /// 配置: 2次元配置
+    /// 交互の行に配置することで、出力ポートと次のゲートのクロックポートのY座標をずらし、
+    /// クロストークを回避する。
     let place (mapped: (Gate * StdCell) list) : Result<Placement, CompileError> =
-        let (placed, _) =
+        let cellHeight = 3
+        let vGap = 8      // 垂直ギャップを拡大 (4→8)
+        let rowHeight = cellHeight + vGap
+        let hGap = 16     // 水平ギャップを拡大 (8→16)
+
+        let (placed, _, _) =
             mapped
-            |> List.fold (fun (acc, currentX) (g, cell) ->
-                let origin = { X = currentX; Y = 0 }
-                let nextX = currentX + cell.Size.X + 8   // 8 セルの間隔 (fan-out 配線に十分な迂回空間)
-                ({ Gate = g; Cell = cell; Origin = origin } :: acc, nextX)
-            ) ([], 0)
+            |> List.fold (fun (acc, currentX, rowIndex) (g, cell) ->
+                let y = (rowIndex % 2) * rowHeight
+                let origin = { X = currentX; Y = y }
+                let nextX = currentX + cell.Size.X + hGap
+                let maxWidth = 100
+                let (nextX', nextRow) =
+                    if nextX > maxWidth then (0, rowIndex + 2)
+                    else (nextX, rowIndex + 1)
+
+                ({ Gate = g; Cell = cell; Origin = origin } :: acc, nextX', nextRow)
+            ) ([], 0, 0)
         Ok (List.rev placed)
 
     /// 配線: Lee 法でゲート間ネットを配線する。
@@ -1071,12 +1450,82 @@ module Pipeline =
                 p.Cell.Ports |> List.map (portCoord p))
             |> Set.ofList
 
+        // 各ゲートの絶対座標パターングリッド (コンテキスト付き遅延計測に使用)。
+        // netId (= gate output) → Gate の Wire セルグリッド
+        let gateGridByNet : Map<NetId, Grid> =
+            placement |> List.map (fun p ->
+                let gateGrid =
+                    p.Cell.Pattern
+                    |> Map.toList
+                    |> List.map (fun (localCoord, state) ->
+                        { X = p.Origin.X + localCoord.X; Y = p.Origin.Y + localCoord.Y }, state)
+                    |> Map.ofList
+                p.Gate.Output, gateGrid)
+            |> Map.ofList
+
+        // 対角ショートカットが検出されたパスに "修正セル" を挿入して遅延を 1 増やす。
+        //
+        // JUNC3 などゲートの出力ポート直前セル (前段セル) が出力と対角隣接する wire[1]
+        // を同時に発火させる「対角ショートカット」が生じると、実効遅延が 1 ステップ短くなる。
+        //
+        // 対処: wire[0]→wire[1] の間に「修正セル」を挿入する。
+        //   修正セル条件: wire[0] に隣接、前段セルに非隣接 (Chebyshev距離≥2)、wire[1] に隣接。
+        // これにより対角ショートカットが除去され実効遅延が +1 される。
+        let fixShortcutPath (path: Coord list) (gateGrid: Grid) (grid: RoutingGrid) =
+            match path with
+            | src :: secondCell :: _ ->
+                // src (ゲート出力ポート) に隣接するゲート内部 Wire セル
+                let gateNeighbors =
+                    gateGrid |> Map.toList
+                    |> List.filter (fun (gateCoord, _) ->
+                        gateCoord <> src &&
+                        abs (gateCoord.X - src.X) <= 1 &&
+                        abs (gateCoord.Y - src.Y) <= 1)
+                    |> List.map fst
+                // ショートカットの有無: いずれかのゲート隣接セルが wire[1] にも隣接
+                let hasShortcut =
+                    gateNeighbors |> List.exists (fun gn ->
+                        abs (gn.X - secondCell.X) <= 1 &&
+                        abs (gn.Y - secondCell.Y) <= 1)
+                if not hasShortcut then path
+                else
+                    // 修正セルを探す: src の 4 方向隣接で
+                    //   - ゲート内部セル (前段セル含む) に非隣接
+                    //   - wire[1] に隣接 (チェビシェフ距離 1)
+                    //   - 配線グリッドで通行可能
+                    let dirs = [| {X=1;Y=0}; {X= -1;Y=0}; {X=0;Y=1}; {X=0;Y= -1} |]
+                    let fixCell =
+                        dirs |> Array.tryFind (fun d ->
+                            let c = { X = src.X + d.X; Y = src.Y + d.Y }
+                            c <> secondCell &&
+                            // ゲート内部セルに非隣接 (前段セル含む全ゲートセル)
+                            (gateGrid |> Map.toList |> List.forall (fun (gateCoord, _) ->
+                                abs (c.X - gateCoord.X) > 1 || abs (c.Y - gateCoord.Y) > 1)) &&
+                            // wire[1] に隣接
+                            abs (c.X - secondCell.X) <= 1 &&
+                            abs (c.Y - secondCell.Y) <= 1 &&
+                            // 配線グリッドで通行可能
+                            (match Map.tryFind c grid with
+                             | None | Some Free -> true
+                             | _ -> false))
+                        |> Option.map (fun d -> { X = src.X + d.X; Y = src.Y + d.Y })
+                    match fixCell with
+                    | Some fc -> src :: fc :: secondCell :: List.tail (List.tail path)
+                    | None -> path
+            | _ -> path
+
         // fan-out 対応: leePathFanout で同一 net の既配線セルを再利用可
         let routeOne (grid: RoutingGrid) (wires: Wire list) (netId: NetId) (src: Coord) (dst: Coord) (consumer: NetId)
             : Result<RoutingGrid * Wire list, CompileError> =
             match leePathFanout grid netId src dst allPorts with
             | None -> Error (RoutingCongestion netId)
-            | Some path ->
+            | Some rawPath ->
+                // 対角ショートカットがある場合は修正セルを挿入して実効遅延を補正する。
+                // 修正後のパスに対して孤立遅延計測 (ofPath) を使用する。
+                // fixShortcutPath によりコンテキストショートカットが除去されるため、
+                // 孤立計測が実効遅延と一致する。
+                let gateGrid = gateGridByNet |> Map.tryFind netId |> Option.defaultValue Map.empty
+                let path = fixShortcutPath rawPath gateGrid grid
                 let wire = ofPath netId consumer path
                 let grid' =
                     path |> List.fold (fun g c ->
@@ -1156,6 +1605,138 @@ module Pipeline =
     // --- railway 演算子 ---
     let (>>=) m f = Result.bind f m
 
+    /// STA スラックに基づいて NAND ゲートのセルバリアントを選択し、
+    /// 影響を受けるワイヤを再ルーティングする。
+    ///
+    /// 対応:
+    ///   - スラック 3<gen>: junc3 → junc3_Ab3 (A に 3gen 内蔵バッファ)
+    ///   - スラック 5<gen>: junc3 → junc3_Ab5 (A に 5gen 内蔵バッファ)
+    ///   - スラック 7<gen>: junc3 → junc3_Ab7 (A に 7gen 内蔵バッファ)
+    ///
+    /// 差し替え後に B・Clock ポートの絶対座標が変わるため、
+    /// 対応するワイヤを再ルーティングして返す。
+    let applyVariants
+        (placement: Placement)
+        (wires: Wire list)
+        (slack: Map<NetId * NetId, int<gen>>)
+        : Result<Placement * Wire list, CompileError> =
+
+        // スラック 3<gen>, 5<gen>, または 7<gen> の NAND ゲートを探す。
+        // 注意: applyVariants 後のワイヤ再ルーティングでタイミングがずれるため、
+        // より大きな遅延を持つセルを選択する必要がある。
+        let getVariant (p: Placed) =
+            if p.Cell.Kind <> Nand then None
+            else
+                match p.Gate.Inputs with
+                | aNet :: _ ->
+                    match Map.tryFind (aNet, p.Gate.Output) slack with
+                    | Some 3<gen> -> Some Library.junc3_Ab7  // slack=3 → junc3_Ab7 (7gen delay)
+                    | Some 5<gen> -> Some Library.junc3_Ab7
+                    | Some 7<gen> -> Some Library.junc3_Ab7
+                    | _ -> None
+                | [] -> None
+
+        if not (placement |> List.exists (fun p -> getVariant p |> Option.isSome)) then
+            Ok (placement, wires)
+        else
+            // バリアント差し替え: junc3 → junc3_Ab3, junc3_Ab5, or junc3_Ab7
+            let newPlacement =
+                placement |> List.map (fun p ->
+                    match getVariant p with
+                    | Some variant -> { p with Cell = variant }
+                    | None -> p)
+
+            // ポート位置が変わった Placed を特定し、影響ワイヤを再ルーティング。
+            // 影響ワイヤ = 変更されたゲートを Consumer とするワイヤのうち、
+            //   B ポート (インデックス 1) へのワイヤ。
+            // A ポートは junc3_Ab1/junc3_Ab3 でも同じ位置 (0,0) なので A ワイヤは変更不要。
+            // Clock ワイヤはルーティングされないため変更不要 (Sim が直接注入)。
+            let changedGateOutputs =
+                placement
+                |> List.choose (fun p ->
+                    if getVariant p |> Option.isSome then Some p.Gate.Output else None)
+                |> Set.ofList
+
+            // B ポート (インデックス 1) への影響ワイヤを特定: Consumer = 変更されたゲートの Output
+            // かつ Net が B 入力 (Gate.Inputs.[1])。
+            let affectedBNets =
+                newPlacement
+                |> List.choose (fun p ->
+                    if Set.contains p.Gate.Output changedGateOutputs then
+                        match p.Gate.Inputs with
+                        | _ :: bNet :: _ -> Some (bNet, p.Gate.Output)
+                        | _ -> None
+                    else None)
+                |> Set.ofList
+
+            // 影響ワイヤ以外はそのまま保持する。
+            let unchangedWires =
+                wires |> List.filter (fun w ->
+                    not (Set.contains (w.Net, w.Consumer) affectedBNets))
+
+            // 影響ワイヤを再ルーティング。
+            // buildGrid は新しい placement (junc3_Ab3 のサイズ含む) を使う。
+            let newBase = Route.buildGrid newPlacement
+
+            let allPorts =
+                newPlacement |> List.collect (fun p ->
+                    p.Cell.Ports |> List.map (Place.portCoord p))
+                |> Set.ofList
+
+            // outCoords: 出力ポート座標
+            let outCoords =
+                newPlacement |> List.choose (fun p ->
+                    p.Cell.Ports |> List.tryFind (fun port -> port.Role = Out)
+                    |> Option.map (fun port -> p.Gate.Output, Place.portCoord p port))
+                |> Map.ofList
+
+            // 新しい B ポートの絶対座標
+            let newBPortCoords =
+                newPlacement
+                |> List.choose (fun p ->
+                    if Set.contains p.Gate.Output changedGateOutputs then
+                        let inPorts = p.Cell.Ports |> List.filter (fun pp -> pp.Role = In)
+                        match inPorts, p.Gate.Inputs with
+                        | _ :: bPort :: _, _ :: bNet :: _ ->
+                            Some (bNet, p.Gate.Output, Place.portCoord p bPort)
+                        | _ -> None
+                    else None)
+
+            // 変更ワイヤのルーティング
+            let routingGrid0 =
+                unchangedWires |> List.fold (fun g w ->
+                    w.Path |> List.fold (fun g2 c ->
+                        match Map.tryFind c newBase with
+                        | Some Route.Blocked -> g2
+                        | _ -> Map.add c (Route.Routed w.Net) g2) g) newBase
+
+            // 変更された B ポートを1本ずつ再ルーティングする。
+            let routeOneBWire
+                (acc: Result<Route.RoutingGrid * Wire list, CompileError>)
+                (bNet: NetId, consumer: NetId, bDst: Coord)
+                =
+                acc |> Result.bind (fun (g, ws) ->
+                    match Map.tryFind bNet outCoords with
+                    | None -> Ok (g, ws)   // B が PI → routing 不要
+                    | Some bSrc ->
+                        match Route.leePathFanout g bNet bSrc bDst allPorts with
+                        | None -> Error (RoutingCongestion bNet)
+                        | Some path ->
+                            let wire = Route.ofPath bNet consumer path
+                            let g' =
+                                path |> List.fold (fun g2 c ->
+                                    match Map.tryFind c newBase with
+                                    | Some Route.Blocked -> g2
+                                    | _ -> Map.add c (Route.Routed bNet) g2) g
+                            Ok (g', wire :: ws))
+
+            let routeResult =
+                newBPortCoords
+                |> List.fold routeOneBWire (Ok (routingGrid0, unchangedWires))
+
+            routeResult |> Result.map (fun (_, newWires) ->
+                newPlacement, List.rev newWires)
+
     /// トップレベル: HDL ソース → WireWorld Grid。
     let compile (lib: CellLibrary) (src: string) : Result<Grid, CompileError> =
         frontend src >>= fun nl ->
@@ -1164,7 +1745,7 @@ module Pipeline =
         route placement >>= fun wires ->
         let arrivals = Sta.computeArrival placement wires
         let slack    = Sta.computeSlack   placement wires arrivals
-        let wires'   = Sta.insertDelays   slack wires
+        let wires'   = Sta.insertDelays   placement slack wires
         Ok (emit placement wires')
 
     /// Grid + Placement + Wire list を返す詳細版 (テスト・デバッグ用)。
@@ -1176,7 +1757,7 @@ module Pipeline =
         route placement >>= fun wires ->
         let arrivals = Sta.computeArrival placement wires
         let slack    = Sta.computeSlack   placement wires arrivals
-        let wires'   = Sta.insertDelays   slack wires
+        let wires'   = Sta.insertDelays   placement slack wires
         Ok (emit placement wires', placement, wires')
 
 
@@ -1364,13 +1945,12 @@ module RoutingTest =
           "wire paths are non-empty and start/end at expected coords",
             match detailResult with
             | Ok (_, ws) ->
-                // not1 cell: size 5×3, out=(4,2), in[0]=(0,0)
-                // gate spacing = size.X(5) + gap(8) = 13
-                // u0 origin=(0,0) out-abs=(4,2); u1 origin=(13,0) in[0]-abs=(13,0)
+                // 2D配置 (vGap=8, hGap=16): u0 origin=(0,0) out-abs=(4,2); u1 origin=(21,11) in[0]-abs=(21,11)
+                // gate spacing = size.X(5) + gap(16) = 21
                 ws |> List.tryFind (fun w -> w.Net = NetId 3)
                 |> Option.exists (fun w ->
                     List.head w.Path = {X=4;Y=2} &&
-                    List.last w.Path = {X=13;Y=0})
+                    List.last w.Path = {X=21;Y=11})
             | _ -> false
 
           "emit wire cells present in grid",
@@ -1429,11 +2009,11 @@ module StaTest =
     let runAll () : (string * bool) list =
         let arr2    = computeArrival chain2 chain2Wires
         let slk2    = computeSlack   chain2 chain2Wires arr2
-        let wires2' = insertDelays   slk2  chain2Wires
+        let wires2' = insertDelays   [] slk2  chain2Wires
 
         let arrN    = computeArrival nandPlaced nandWires
         let slkN    = computeSlack   nandPlaced nandWires arrN
-        let wiresN' = insertDelays   slkN  nandWires
+        let wiresN' = insertDelays   [] slkN  nandWires
         let net3DelayAfterInsert =
             wiresN' |> List.find (fun w -> w.Net = NetId 3) |> fun w -> w.Delay
 
@@ -1609,12 +2189,12 @@ module E2eTest =
           "NOT E2E: NOT(A=1)=0  (A + clocks → output blocked)",
             not (not1Result)
 
-          "NOT E2E: insertDelays with slack=2 extends path length",
-            let p = straightPath 6   // 7 cells, Delay=7
-            let w = { Net = NetId 1; Consumer = NetId 0; Path = p; Delay = 7<gen> }
+          "NOT E2E: insertDelays with slack=2 extends delay toward target",
+            let p = straightPath 6   // 7 cells, Delay=6
+            let w = { Net = NetId 1; Consumer = NetId 0; Path = p; Delay = 6<gen> }
             let slack = Map.ofList [ (NetId 1, NetId 0), 2<gen> ]
-            match insertDelays slack [w] with
-            | [w'] -> w'.Path.Length = 9  // path が 9 セルに延長される (遅延は L ターン短縮のため実測値で更新)
+            match insertDelays [] slack [w] with
+            | [w'] -> w'.Delay >= 8<gen> && w'.Path.Length > 7  // 遅延が増加しパスが延長される
             | _    -> false
         ]
 
@@ -1727,7 +2307,7 @@ module MultiStageTest =
         let three1 = runThreeNot true   // NOT(NOT(NOT(1))) = 0
 
         [ "2-NOT: wire (net3) delay = measureDelay (simulation-based)",
-            wireDelayCheck = 9<gen>   // 11-cell path with 1 L-turn → measured delay=9
+            wireDelayCheck = 25<gen>   // 2D配置 (vGap=8, hGap=16): 27-cell path → measured delay=25
 
           "2-NOT: NOT(NOT(0)) = 0  (a=0 → buffer → y=0)",
             not two0
@@ -2053,4 +2633,109 @@ module MultiGateTest =
           "OR(1,0) = 1",  or10
           "OR(0,1) = 1",  or01
           "OR(1,1) = 1",  or11
+        ]
+
+
+// ---------------------------------------------------------------------
+// 14. 半加算器 E2E テスト (M8)
+//     sum = XOR(a,b)、carry = AND(a,b)
+//     最終 NAND(n2,n3) は 2 本のルーティングワイヤを均等化する。
+// ---------------------------------------------------------------------
+module HalfAdderTest =
+    open Units
+    open Domain
+    open Netlist
+    open Library
+    open Place
+    open Route
+    open Sta
+    open Sim
+    open Pipeline
+
+    /// 半加算器 NAND/NOT 分解:
+    ///   n1     = NAND(a,b)        [u0]
+    ///   carry  = NOT(n1)          [u1]
+    ///   n2     = NAND(a, n1)      [u2]
+    ///   n3     = NAND(b, n1)      [u3]
+    ///   sum    = NAND(n2, n3)     [u4]  ← 2 ワイヤ均等化が必要
+    let private halfAdderJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a":     {"direction":"input", "bits":[2]},
+      "b":     {"direction":"input", "bits":[3]},
+      "carry": {"direction":"output","bits":[5]},
+      "sum":   {"direction":"output","bits":[8]}
+    },
+    "cells": {
+      "u0": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[2],"B":[3],"Y":[4]}},
+      "u1": {"type":"$_NOT_", "port_directions":{"A":"input","Y":"output"},            "connections":{"A":[4],"Y":[5]}},
+      "u2": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[2],"B":[4],"Y":[6]}},
+      "u3": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[3],"B":[4],"Y":[7]}},
+      "u4": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[6],"B":[7],"Y":[8]}}
+    }
+  }}
+}"""
+
+    let private makePrimaryInjections
+        (placement: Placement)
+        (arrivals: ArrivalMap)
+        (wires: Wire list)
+        (primaryValues: Map<NetId, bool>)
+        : (Coord * int<gen>) list =
+        let gateDrivenNets = placement |> List.map (fun p -> p.Gate.Output) |> Set.ofList
+        placement |> List.collect (fun p ->
+            let t = clockTimeOf p arrivals wires
+            let inPorts = p.Cell.Ports |> List.filter (fun port -> port.Role = In)
+            p.Gate.Inputs
+            |> List.mapi (fun i n ->
+                if Set.contains n gateDrivenNets then []
+                else
+                    let coord = portCoord p inPorts.[i]
+                    match Map.tryFind n primaryValues with
+                    | Some true -> [(coord, t)]
+                    | _ -> [])
+            |> List.concat)
+
+    /// (sum, carry) を返す。コンパイル失敗時は (false, false)。
+    let private runHalfAdder (a: bool) (b: bool) : bool * bool =
+        match compileFull Library.defaultLib halfAdderJson with
+        | Error _ -> false, false
+        | Ok (grid, placement, wires) ->
+            let arrivals = computeArrival placement wires
+            let primaryMap = Map.ofList [NetId 2, a; NetId 3, b]
+            let dataInj = makePrimaryInjections placement arrivals wires primaryMap
+            let findOutPort (netId: int) =
+                placement
+                |> List.tryFind (fun p -> p.Gate.Output = NetId netId)
+                |> Option.map (fun p ->
+                    p.Cell.Ports |> List.find (fun pt -> pt.Role = Out) |> portCoord p)
+            let runAt (netId: int) =
+                match findOutPort netId with
+                | None -> false
+                | Some outCoord ->
+                    let steps = arrivals |> Map.tryFind (NetId netId) |> Option.map int |> Option.defaultValue 80
+                    let result = runWithClocks placement arrivals wires dataInj grid steps
+                    get result outCoord = Head
+            runAt 8, runAt 5   // sum=net8, carry=net5
+
+    let runAll () : (string * bool) list =
+        let compileOk =
+            match compileFull Library.defaultLib halfAdderJson with
+            | Ok _ -> true | _ -> false
+
+        let (s00, c00) = runHalfAdder false false
+        let (s10, c10) = runHalfAdder true  false
+        let (s01, c01) = runHalfAdder false true
+        let (s11, c11) = runHalfAdder true  true
+
+        [ "half-adder: compileFull succeeds", compileOk
+          "carry(0,0) = 0", not c00
+          "carry(1,0) = 0", not c10
+          "carry(0,1) = 0", not c01
+          "carry(1,1) = 1", c11
+          "sum(0,0)   = 0", not s00
+          "sum(1,0)   = 1", s10
+          "sum(0,1)   = 1", s01
+          "sum(1,1)   = 0", not s11
         ]
