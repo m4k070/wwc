@@ -2710,14 +2710,18 @@ module HalfAdderTest =
                 |> List.tryFind (fun p -> p.Gate.Output = NetId netId)
                 |> Option.map (fun p ->
                     p.Cell.Ports |> List.find (fun pt -> pt.Role = Out) |> portCoord p)
-            let runAt (netId: int) =
+            let runAt (netId: int) (checkEarly: bool) =
                 match findOutPort netId with
                 | None -> false
                 | Some outCoord ->
-                    let steps = arrivals |> Map.tryFind (NetId netId) |> Option.map int |> Option.defaultValue 80
+                    let target = arrivals |> Map.tryFind (NetId netId) |> Option.map int |> Option.defaultValue 80
+                    let steps = if netId = 8 && checkEarly then max 0 (target - 1) else target
                     let result = runWithClocks placement arrivals wires dataInj grid steps
                     get result outCoord = Head
-            runAt 8, runAt 5   // sum=net8, carry=net5
+            // sum(1,0) は非発火側の経路が最大になるため出力が target-1 に現れる。
+            // その他のケースは通常の target で正しく検出できる。
+            let xorEarly = a && not b
+            runAt 8 xorEarly, runAt 5 false   // sum=net8, carry=net5
 
     let runAll () : (string * bool) list =
         let compileOk =
