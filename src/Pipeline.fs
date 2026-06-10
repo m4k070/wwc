@@ -25,7 +25,7 @@ module Pipeline =
 
     type YosysModule =
         { Ports: Map<string, YosysPort>
-          Cells: Map<string, YosysCell> }
+          Cells: (string * YosysCell) list }  // 宣言順を保持するため list (Map はキー昇順になる)
 
     // CompileError は Route モジュールで定義
 
@@ -66,7 +66,7 @@ module Pipeline =
                 |> Seq.map (fun p -> p.Name, parseBits p.Value)
                 |> Map.ofSeq
             c.Name, { Type = cellType; PortDirections = portDirs; Connections = conns })
-        |> Map.ofSeq
+        |> List.ofSeq  // 宣言順を保持 (Map はキー昇順になるため)
 
     /// Yosys write_json をパースして YosysModule に変換する。
     let parseYosysJson (json: string) : Result<YosysModule, CompileError> =
@@ -122,7 +122,7 @@ module Pipeline =
         primaryInputs, primaryOutputs, clockNet
 
     let private parseGates (m: YosysModule) =
-        m.Cells |> Map.toList
+        m.Cells  // 宣言順を保持 (Map.toList はキー昇順になるため使わない)
         |> List.mapi (fun i (name, cell) ->
             match parseGateKind cell.Type with
             | None -> Error (ParseError $"unknown gate type '{cell.Type}' in cell '{name}'")
@@ -347,7 +347,7 @@ module Pipeline =
                 p.Cell.Ports |> List.map (portCoord p))
             |> Set.ofList
 
-        // 各ゲートの絶対座標パターングリッド (コンテキスト付き遅延計測に使用)。
+            // 各ゲートの絶対座標パターングリッド (コンテキスト付き遅延計測に使用)。
         // netId (= gate output) → Gate の Wire セルグリッド
         // 対角ショートカットが検出されたパスに "修正セル" を挿入して遅延を 1 増やす。
         let gateGridByNet : Map<NetId, Grid> =

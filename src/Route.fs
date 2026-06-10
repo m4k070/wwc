@@ -153,19 +153,30 @@ module Route =
 
             let inBounds c = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
 
-            // 密集配置時のみクロストーク対策: src/dst 以外のポートに隣接するセルと
-            // 異種ネット配線に隣接するセルを通過禁止にする。
-            // 広い間隔の配置では不要 (隣接リスクが低いため)。
+            // 事前計算: Grid を Dictionary に変換して O(1) ルックアップ
+            let gridDict = System.Collections.Generic.Dictionary<Coord, RoutingCell>(grid.Count)
+            for kv in grid do gridDict.Add(kv.Key, kv.Value)
+
+            // ポート隣接マップ: 毎回 allPorts を走査する O(|allPorts|) → O(1) に削減
+            let portAdjSet = System.Collections.Generic.Dictionary<Coord, Set<Coord>>()
+            for p in allPorts do
+                for dx in -1..1 do
+                    for dy in -1..1 do
+                        if dx <> 0 || dy <> 0 then
+                            let c = { X = p.X + dx; Y = p.Y + dy }
+                            match portAdjSet.TryGetValue c with
+                            | true, ports -> portAdjSet.[c] <- Set.add p ports
+                            | false, _ -> portAdjSet.[c] <- Set.singleton p
+
             let isAdjacentToOtherPort (c: Coord) =
-                let isAdjacentToDst = abs (c.X - dst.X) <= 1 && abs (c.Y - dst.Y) <= 1
-                if isAdjacentToDst then
-                    allPorts |> Set.exists (fun p ->
-                        p <> dst &&
-                        abs (c.X - p.X) <= 1 && abs (c.Y - p.Y) <= 1)
-                else
-                    allPorts |> Set.exists (fun p ->
-                        p <> src && p <> dst &&
-                        abs (c.X - p.X) <= 1 && abs (c.Y - p.Y) <= 1)
+                match portAdjSet.TryGetValue c with
+                | false, _ -> false
+                | true, ports ->
+                    let isAdjacentToDst = abs (c.X - dst.X) <= 1 && abs (c.Y - dst.Y) <= 1
+                    if isAdjacentToDst then
+                        Set.exists (fun p -> p <> dst) ports
+                    else
+                        Set.exists (fun p -> p <> src && p <> dst) ports
 
             let isAdjacentToOtherNet (c: Coord) =
                 tight && (  // 広い配置ではクロストークリスク低いのでスキップ
@@ -174,8 +185,8 @@ module Route =
                         if dx <> 0 || dy <> 0 then
                             yield { X = c.X + dx; Y = c.Y + dy } ]
                 |> List.exists (fun nb ->
-                    match Map.tryFind nb grid with
-                    | Some (Routed n) -> sameNet <> Some n
+                    match gridDict.TryGetValue nb with
+                    | true, Routed n -> sameNet <> Some n
                     | _ -> false))
 
             let passable c =
@@ -184,9 +195,9 @@ module Route =
                     c = src || c = dst ||
                     (not (isAdjacentToOtherPort c) &&
                      (isNearDst || not (isAdjacentToOtherNet c)) &&
-                     match Map.tryFind c grid with
-                     | None | Some Free -> true
-                     | Some (Routed n) -> sameNet = Some n || allowOtherNets
+                     match gridDict.TryGetValue c with
+                     | false, _ | true, Free -> true
+                     | true, Routed n -> sameNet = Some n || allowOtherNets
                      | _ -> false))
 
             let tightDirs = [| {X=1;Y=0}; {X= -1;Y=0}; {X=0;Y=1}; {X=0;Y= -1} |]
@@ -194,21 +205,35 @@ module Route =
             let dirs =
                 if tight then tightDirs
                 else wideDirs
+            // A*: PriorityQueue + マンハッタン距離ヒューリスティック
+            // BFS よりはるかに少ない探索セル数で経路を発見する。
+            // 上限: 経路が存在しない場合の全探索を防止 (100万セル or バウンディングボックスの面積)
+            let maxExplore = min ((maxX - minX + 1) * (maxY - minY + 1)) 500000
             let prev  = System.Collections.Generic.Dictionary<Coord, Coord>()
-            let queue = System.Collections.Generic.Queue<Coord>()
+            let gScore = System.Collections.Generic.Dictionary<Coord, int>()
+            let closed = System.Collections.Generic.HashSet<Coord>()
+            let queue = System.Collections.Generic.PriorityQueue<Coord, int>()
             prev.[src] <- src
-            queue.Enqueue src
+            gScore.[src] <- 0
+            queue.Enqueue(src, abs (src.X - dst.X) + abs (src.Y - dst.Y))
 
             let mutable found = false
-            while queue.Count > 0 && not found do
+            let mutable explored = 0
+            while queue.Count > 0 && not found && explored < maxExplore do
                 let c = queue.Dequeue()
-                if c = dst then found <- true
+                if not (closed.Add c) then ()  // stale entry
+                elif c = dst then found <- true
                 else
+                    explored <- explored + 1
+                    let g = gScore.[c]
                     for d in dirs do
                         let n = { X = c.X + d.X; Y = c.Y + d.Y }
-                        if not (prev.ContainsKey n) && passable n then
-                            prev.[n] <- c
-                            queue.Enqueue n
+                        let tentativeG = g + 1
+                        if passable n && not (closed.Contains n) then
+                            if not (gScore.ContainsKey n) || tentativeG < gScore.[n] then
+                                gScore.[n] <- tentativeG
+                                prev.[n] <- c
+                                queue.Enqueue(n, tentativeG + abs (n.X - dst.X) + abs (n.Y - dst.Y))
 
             if not found then
                 None

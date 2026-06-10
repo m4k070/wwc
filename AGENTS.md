@@ -4,7 +4,7 @@
 
 ```bash
 dotnet build src/WwHdl.fsproj          # build (required before tests)
-dotnet fsi src/RunTests.fsx            # run all 59+ E2E tests (references bin/Debug/net8.0/WwHdl.dll)
+dotnet fsi src/RunTests.fsx            # run all 92 E2E tests (references bin/Debug/net8.0/WwHdl.dll)
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
@@ -46,94 +46,36 @@ Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx c
 
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
 
-**Total tests**: 103 (81 original + 22 new 9-gate tests). Current pass rate: **103/103** (LargeCircuitTest excluded due to BFS timeout on 50+/100-gate circuits).
+**Total tests**: 92 (timing-issue tests除去). Current pass rate: **89/92**.
 
-## Routing strategy
+### Known failures
 
-### Placement modes
+| Test | Cause |
+|------|-------|
+| `2-NOT: wire (net3) delay = measureDelay` | シミュレーション実効遅延とSTA遅延が一致しない |
+| `sum(1,0) = 1` (FullAdder) | タイミング問題（クロックシミュレーション） |
+| `fa-like-9: compileFull succeeds` | 4列×狭ピッチ配置で配線チャネル不足 (RoutingCongestion) |
 
-**Tight layout** (`place`):
-- 8 gates or fewer: 2-row layout, vGap=8, hGap=16, maxWidth=100
-- 9+ gates: 4-column layout (x=0, x=13, x=26, x=39), vGap=25
-- BFS direction order: `[R;L;D;U]`
-
-**Wide layout** (`placeWide`):
-- Dynamic column layout based on gate count:
-  - 1-10 gates: 4 columns (x=0, 13, 26, 39)
-  - 11-50 gates: 8 columns (x=0, 13, ..., 91)
-  - 51-200 gates: 16 columns (x=0, 13, ..., 195)
-  - 200+ gates: 32 columns (x=0, 13, ..., 403)
-- vGap=25, rowHeight=28
-- BFS direction order: `[D;U;L;R]`
-- Net ordering: descending by fan-out, then descending by src.Y
-- Used for 9+ gate circuits
-
-### Overlap fallback (depth-limited)
-
-When routing fails, the router attempts to re-route with overlap allowed:
-
-```fsharp
-let rec routeOne (netId, src, dsts) depth =
-    match leePathImpl ... false with  // normal routing
-    | Ok path -> ...
-    | Error _ when depth <= 3 ->
-        // Create freeGrid: other nets' Routed cells → Free
-        let freeGrid = ...
-        match leePathImpl ... true with  // allowOtherNets=true
-        | Ok path ->
-            // Remove overlapping cells, re-route at depth+1
-            ...
-        | Error e -> Error e
-    | Error e -> Error e
-```
-
-**Current limit**: `depth <= 3` (re-routing up to depth 3 allows overlap).
-
-### Key routing constraints
-
-- `isAdjacentToOtherPort`: blocked if cell is adjacent to another net's port (tight only)
-- `isAdjacentToOtherNet`: blocked if cell is adjacent to another net's routed cell (tight only)
-- `isNearDst`: cells within Chebyshev distance 1 of dst skip `isAdjacentToOtherNet` check
-- Margin: `max(dist + 10) 30` for BFS bounding box
-
-### Interference-aware delay calculation
-
-After routing all nets, the router recalculates wire delays considering interference from other wires:
-- For each wire cell, check if other wires are adjacent (8-neighborhood)
-- Every 4 interference cells add 1 generation of delay
-- This improves STA accuracy for dense layouts
-
-### Known issues (FullAdder E2E)
-
-FullAdder E2E tests have timing issues with 4-column placement.
-4 tests are marked as "(timing issue)" and always pass:
-- a=0,b=0,cin=0: sum=0
-- a=0,b=0,cin=1: sum=1, cout=0
-- a=1,b=1,cin=1: sum=1
-
-The circuit itself compiles correctly; the issue is STA calculation vs actual simulation timing mismatch.
-
-## F# gotchas (verified from KNOWLEDGE.md)
-
-- `[<Struct>]` records cannot use `{ x with Field = v }` syntax — must construct explicitly
-- `|>` has lower precedence than `+` — always parenthesize: `(a |> f) + (b |> g)`
-- Cannot put `let` bindings inside list literals — define bindings outside the list
-- Yosys JSON `connections` values can be strings `"0"`/`"1"` for constants — check `JsonValueKind.Number` before `GetInt32()`
-
-## WireWorld-specific
-
-- 1 cell of wire = 1 gen delay. This is the foundation of STA.
-- L-turns in routing paths cause diagonal shortcutting (signal skips cells). Use `measureDelay` (simulate the path) rather than calculating `N-1-turns`.
-- JUNC3 is the core junction cell (5x3, latency=4). NOT is a JUNC3 alias. NAND uses JUNC3 with clock inputs.
-- DIODE has internal oscillation with single electrons — clock period must be >= 8 gen.
-
-## Clock routing (routeClocks)
-
-- `Sim.routeClocks` implemented: routes from clock source (-20, 0) to each gate's clock port
-- Currently **disabled** in pipeline because clock wires added to simulation grid change timing of existing tests
-- Key fixes: `Set.empty` for allPorts (port adjacency check was blocking paths), `allowOtherNets=true` (data wire cells must be passable), single `computeArrival` call outside loop
-- Clock port = last In port of each gate (`clockCoords` returns `[]` for gates without extra In ports)
+**4列配置（9-10ゲート）の限界**: 4列×ピッチ13の配置は、fan-out≧3のネットが複数存在する回路で配線輻輳が発生する。11ゲート以上は8列以上になるためこの問題は起きにくい。
 
 ## External dependency
 
 Yosys is needed to synthesize Verilog to JSON. Not bundled — must be installed separately.
+
+## 2026-06-10: LargeCircuit BFS timeout resolved
+
+**Root cause**: `YosysModule.Cells` used `Map<string, YosysCell>`, and `Map.toList` sorts alphabetically by key name. For 50 NAND gates, `u10` (index 2, row 2) came before `u2` (index 12, row 12), scattering consecutive chain gates across 49 rows. NetId 9's output (gate u9, row 49) needed to reach consumer u10 (row 2) — Manhattan distance 1327 cells.
+
+**Fix**: Changed `parseCells` from `Map.ofSeq` to `List.ofSeq`, and `parseGates` from `m.Cells |> Map.toList` to `m.Cells` directly. This preserves JSON declaration order (numeric order: u0, u1, u2, ..., u49) instead of string-sorted order.
+
+50-gate and 100-gate NAND chains now compile successfully.
+
+---
+
+詳細な技術情報はスキルファイルを参照:
+- **fsharp-wireworld**: F#イディオム, Units of Measure, Struct gotchas, Yosys JSONパース, Map疎グリッド
+- **compiler-pipeline**: パイプライン各段の実装詳細 (Frontend/TechMap/Place/Route/STA/Emit)
+- **routing-placement**: 配置モード, Lee法BFS, passable判定, オーバーラップフォールバック
+- **fsharp-testing**: テストアーキテクチャ, 8つのテストパターン, ヘルパー関数
+- **sta-simulation**: 到達時刻/スラック, 遅延挿入 (waypoint/U字), クロックシミュレーション
+- **wireworld-domain**: StdCell全定義, JUNC3/NAND/NOT/DIODE/SPLIT/OR2設計, 遷移規則
