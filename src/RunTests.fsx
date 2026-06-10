@@ -15,7 +15,11 @@ let ms = run "Multi-stage E2E" (WwHdl.MultiStageTest.runAll ())
 let ng = run "NAND/AND Gate"   (WwHdl.NandGateTest.runAll ())
 let ha = run "MultiGate E2E"  (WwHdl.MultiGateTest.runAll ())
 let ha2= run "HalfAdder E2E" (WwHdl.HalfAdderTest.runAll ())
+let fa = run "FullAdder E2E" (WwHdl.FullAdderTest.runAll ())
+let nc = run "NAND Chain 9" (WwHdl.NandChain9Test.runAll ())
+let lc = run "Large Circuit 100" (WwHdl.LargeCircuitTest.runAll ())
+let fb = run "Feedback"      (WwHdl.FeedbackTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length

@@ -24,6 +24,9 @@
             # Python (セルライブラリ検証スクリプト)
             python3
 
+            # Verilog 合成 (HDL → NAND+NOT)
+            yosys
+
             # ユーティリティ
             git
           ];
@@ -32,12 +35,14 @@
             echo "wwc dev shell"
             echo "  dotnet $(dotnet --version)"
             echo "  python $(python3 --version)"
+            echo "  yosys $(yosys -V 2>&1)"
             echo ""
             echo "Commands:"
-            echo "  dotnet fsi src/RunTests.fsx      # F# 全テスト"
-            echo "  dotnet fsi src/ExportRLE.fsx     # Golly RLE 生成 → golly/"
-            echo "  python3 scripts/verify_cells.py  # セルライブラリ検証"
-            echo "  golly golly/cell_junc3.rle       # Golly GUI で確認"
+            echo "  yosys -s scripts/synth_counter.ys    # Verilog を NAND+NOT に合成"
+            echo "  dotnet fsi src/RunTests.fsx          # F# 全テスト"
+            echo "  dotnet fsi src/ExportRLE.fsx         # Golly RLE 生成 → golly/"
+            echo "  python3 scripts/verify_cells.py      # セルライブラリ検証"
+            echo "  golly golly/cell_junc3.rle           # Golly GUI で確認"
           '';
         };
       });

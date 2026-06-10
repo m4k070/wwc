@@ -4,6 +4,13 @@
     <TargetFramework>net8.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="WwHdl.fs" />
+    <Compile Include="Domain.fs" />
+    <Compile Include="Library.fs" />
+    <Compile Include="Place.fs" />
+    <Compile Include="Route.fs" />
+    <Compile Include="Sta.fs" />
+    <Compile Include="Sim.fs" />
+    <Compile Include="Pipeline.fs" />
+    <Compile Include="E2eTests.fs" />
   </ItemGroup>
 </Project>
