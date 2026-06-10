@@ -12,6 +12,7 @@
     <Compile Include="Sta.fs" />
     <Compile Include="Sim.fs" />
     <Compile Include="Pipeline.fs" />
+    <Compile Include="PipelineWL.fs" />
     <Compile Include="E2eTests.fs" />
   </ItemGroup>
 </Project>

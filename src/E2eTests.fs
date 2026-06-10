@@ -1335,3 +1335,91 @@ module WireLevelTest =
           "WL toggle FF: 4 cycles -> 1,0,1,0",    toggleFF ()
           "WL counter2: ripple count mod 4",      counter2 ()
         ]
+
+
+// ---------------------------------------------------------------------
+// 15. PipelineWL E2E テスト
+//     yosys JSON → WireLevel コンパイル → settle/クロック駆動で検証。
+//     WireWorld 版で未解決だった半加算器 sum(1,0) を含む真理値表 4/4 と、
+//     $_DFF_P_ 経由の順序回路 (トグル FF) を確認する。
+// ---------------------------------------------------------------------
+module WlPipelineTest =
+    open Domain
+    open Netlist
+    open WireLevel
+    open PipelineWL
+
+    let private haJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "a":     {"direction":"input", "bits":[2]},
+      "b":     {"direction":"input", "bits":[3]},
+      "carry": {"direction":"output","bits":[5]},
+      "sum":   {"direction":"output","bits":[8]}
+    },
+    "cells": {
+      "u0": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[2],"B":[3],"Y":[4]}},
+      "u1": {"type":"$_NOT_", "port_directions":{"A":"input","Y":"output"},            "connections":{"A":[4],"Y":[5]}},
+      "u2": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[2],"B":[4],"Y":[6]}},
+      "u3": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[3],"B":[4],"Y":[7]}},
+      "u4": {"type":"$_NAND_","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[6],"B":[7],"Y":[8]}}
+    }
+  }}
+}"""
+
+    let private toggleJson = """
+{
+  "modules": { "top": {
+    "ports": {
+      "clk": {"direction":"input","bits":[2]},
+      "q":   {"direction":"output","bits":[3]}
+    },
+    "cells": {
+      "u0": {"type":"$_NOT_","port_directions":{"A":"input","Y":"output"},"connections":{"A":[3],"Y":[4]}},
+      "u1": {"type":"$_DFF_P_","port_directions":{"C":"input","D":"input","Q":"output"},"connections":{"C":[2],"D":[4],"Q":[3]}}
+    }
+  }}
+}"""
+
+    /// ネット n の駆動ゲートセル座標 (出力観測点)
+    let private outOf (placed: WlPlaced list) (n: int) =
+        placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
+
+    let runAll () : (string * bool) list =
+        let haResults =
+            match compileWL haJson with
+            | Error e ->
+                printfn "  WL_HA_ERR: %A" e
+                [ "WL-HA: compile succeeds", false ]
+            | Ok (grid, placed, pins) ->
+                let pinA, pinB = pins.[NetId 2], pins.[NetId 3]
+                let sumC, carryC = outOf placed 8, outOf placed 5
+                let case a b =
+                    let g, _ = grid |> setPin pinA a |> setPin pinB b |> settle 1000
+                    levelOf g sumC = (a <> b) && levelOf g carryC = (a && b)
+                [ "WL-HA: compile succeeds", true
+                  "WL-HA: sum/carry (0,0)",  case false false
+                  "WL-HA: sum/carry (1,0)",  case true  false
+                  "WL-HA: sum/carry (0,1)",  case false true
+                  "WL-HA: sum/carry (1,1)",  case true  true ]
+
+        let toggleResults =
+            match compileWL toggleJson with
+            | Error e ->
+                printfn "  WL_TOGGLE_ERR: %A" e
+                [ "WL-DFF: toggle compile succeeds", false ]
+            | Ok (grid, placed, pins) ->
+                let qC = outOf placed 3
+                let clkPin = pins.[NetId 2]
+                let halfP = 64
+                let mutable g = grid |> stepN halfP   // 初期収束 (clk=0)
+                let mutable ok = true
+                for k in 1 .. 4 do
+                    g <- g |> setPin clkPin true  |> stepN halfP
+                    g <- g |> setPin clkPin false |> stepN halfP
+                    if levelOf g qC <> (k % 2 = 1) then ok <- false
+                [ "WL-DFF: toggle compile succeeds", true
+                  "WL-DFF: yosys toggle FF 4 cycles", ok ]
+
+        haResults @ toggleResults

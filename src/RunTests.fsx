@@ -20,7 +20,8 @@ let nc = run "NAND Chain 9" (WwHdl.NandChain9Test.runAll ())
 let lc = run "Large Circuit 100" (WwHdl.LargeCircuitTest.runAll ())
 let fb = run "Feedback"      (WwHdl.FeedbackTest.runAll ())
 let wl = run "WireLevel CA"  (WwHdl.WireLevelTest.runAll ())
+let wp = run "WL Pipeline"   (WwHdl.WlPipelineTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length
