@@ -1190,3 +1190,112 @@ module NandChain9Test =
           "fa-like-9: compileFull succeeds",    faLikeTight
           "fa-like-9: compileFullWide succeeds", faLikeWide
           "simple3: compileFullWide succeeds",   simpleWide ]
+
+
+// ---------------------------------------------------------------------
+// 14. WireLevel CA ルールテスト
+//     独自 CA ルール (レベル駆動・pull 型有向配線) のプリミティブ検証。
+//     toggle FF テストが順序回路マイルストーン:
+//     WireWorld では不可能だった「複数サイクルの安定動作」を実証する。
+// ---------------------------------------------------------------------
+module WireLevelTest =
+    open Domain
+    open WireLevel
+
+    let private c x y = { X = x; Y = y }
+
+    let private settled (g: LGrid) = fst (settle 200 g)
+
+    /// ピン値が配線を伝播する (true/false 両方)
+    let private wireProp () =
+        let grid = ofAsciiL [ "1>>>>>" ]
+        let g1 = settled grid
+        let g2 = settled (setPin (c 0 0) false g1)
+        levelOf g1 (c 5 0) && not (levelOf g2 (c 5 0))
+
+    /// NAND 真理値表 4 通り
+    let private nandTT () =
+        let grid = ofAsciiL [ "0>>."; "..E>"; "0>>." ]
+        [ for a in [false; true] do
+            for b in [false; true] ->
+                let g = grid |> setPin (c 0 0) a |> setPin (c 0 2) b |> settled
+                levelOf g (c 3 1) = not (a && b) ]
+        |> List.forall id
+
+    /// 単入力 NAND = NOT
+    let private notTest () =
+        let grid = ofAsciiL [ "0>E>" ]
+        [ for a in [false; true] ->
+            let g = grid |> setPin (c 0 0) a |> settled
+            levelOf g (c 3 0) = not a ]
+        |> List.forall id
+
+    /// Cross: 水平・垂直チャネルが独立に通る
+    let private crossTest () =
+        let grid = ofAsciiL [ "..0."; "..v."; "0>+>"; "..v." ]
+        [ for h in [false; true] do
+            for v in [false; true] ->
+                let g = grid |> setPin (c 0 2) h |> setPin (c 2 0) v |> settled
+                levelOf g (c 3 2) = h && levelOf g (c 2 3) = v ]
+        |> List.forall id
+
+    /// ファンアウト: 1 ソースを 3 セルが読む
+    let private fanoutTest () =
+        let grid = ofAsciiL [ "..^>"; "0>>>"; "..v>" ]
+        let g1 = grid |> setPin (c 0 1) true |> settled
+        let g0 = grid |> setPin (c 0 1) false |> settled
+        let allAt v g =
+            [c 3 0; c 3 1; c 3 2] |> List.forall (fun p -> levelOf g p = v)
+        allAt true g1 && allAt false g0
+
+    /// DFF: 立ち上がりエッジでロード、それ以外は保持
+    let private dffEdge () =
+        let grid = ofAsciiL [ "..0..."; "..v..."; "0>F>.." ]
+        let dPin, clkPin, dff = c 0 2, c 2 0, c 2 2
+        // d=1, clk=0 → エッジなし、q=0 のまま
+        let g0 = grid |> setPin dPin true |> stepN 10
+        let hold0 = not (levelOf g0 dff)
+        // clk 立ち上がり → q := 1
+        let g1 = g0 |> setPin clkPin true |> stepN 5
+        let load1 = levelOf g1 dff
+        // clk 高のまま d=0 → q は保持
+        let g2 = g1 |> setPin dPin false |> stepN 10
+        let hold1 = levelOf g2 dff
+        // clk 低 → 再度立ち上がり → q := 0
+        let g3 = g2 |> setPin clkPin false |> stepN 5 |> setPin clkPin true |> stepN 5
+        let load0 = not (levelOf g3 dff)
+        hold0 && load1 && hold1 && load0
+
+    /// ★順序回路マイルストーン★ toggle FF: DFF + NOT のフィードバックループ。
+    /// クロックを 4 回叩いて q = 1,0,1,0 を観測する。
+    /// WireWorld ではバックファイアと厳密タイミング制約により実現不能だった。
+    let private toggleFF () =
+        let grid = ofAsciiL [
+            "..........."
+            "..........."
+            ".....<<W<^."
+            ".....v...^."
+            ".....v>>F>."
+            "........^.."
+            "........^.."
+            "........0.." ]
+        let clkPin = c 8 7
+        let dff = c 8 4
+        let halfP = 16
+        let mutable g = grid
+        let mutable qs = []
+        for _ in 1 .. 4 do
+            g <- g |> setPin clkPin false |> stepN halfP
+            g <- g |> setPin clkPin true  |> stepN halfP
+            qs <- qs @ [ levelOf g dff ]
+        qs = [true; false; true; false]
+
+    let runAll () : (string * bool) list =
+        [ "WL wire: pin value propagates",        wireProp ()
+          "WL NAND: truth table (4 cases)",       nandTT ()
+          "WL NOT: single-input NAND",            notTest ()
+          "WL CROSS: independent H/V channels",   crossTest ()
+          "WL fanout: 1 source, 3 readers",       fanoutTest ()
+          "WL DFF: edge-trigger and hold",        dffEdge ()
+          "WL toggle FF: 4 cycles -> 1,0,1,0",    toggleFF ()
+        ]

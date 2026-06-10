@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Domain.fs" />
+    <Compile Include="WireLevel.fs" />
     <Compile Include="Library.fs" />
     <Compile Include="Place.fs" />
     <Compile Include="Route.fs" />

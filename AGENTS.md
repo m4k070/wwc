@@ -11,17 +11,18 @@ No separate lint or typecheck step — the F# compiler covers both. No formatter
 
 ## Architecture
 
-Multi-file F# project (~3353 lines across 8 files in `src/`). Files are compiled in dependency order:
+Multi-file F# project (9 files in `src/`). Files are compiled in dependency order:
 
 ```
 Domain.fs      # Units, Domain, Rule, Netlist            ( 98 lines)
+WireLevel.fs   # 独自CAルール (レベル駆動・pull型有向配線) — 新ターゲット
 Library.fs     # StdCell definitions, CellTest            (516 lines)
 Place.fs       # Placement algorithm                       (23 lines)
 Route.fs       # Lee/BFS routing algorithm                (255 lines)
 Sta.fs         # Static timing analysis                   (290 lines)
 Sim.fs         # Clock-gated simulation                   (189 lines)
 Pipeline.fs    # Compilation pipeline (frontend→RLE)      (765 lines)
-E2eTests.fs    # All test modules                         (1242 lines)
+E2eTests.fs    # All test modules                         (~1350 lines)
 ```
 
 Module dependency order (within and across files):
@@ -46,7 +47,7 @@ Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx c
 
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
 
-**Total tests**: 92 (timing-issue tests除去). Current pass rate: **89/92**.
+**Total tests**: 99. Current pass rate: **96/99** (WireLevel 7/7 含む)。
 
 ### Known failures
 
@@ -70,7 +71,29 @@ Yosys is needed to synthesize Verilog to JSON. Not bundled — must be installed
 
 50-gate and 100-gate NAND chains now compile successfully.
 
-## DFF (D flip-flop) design status
+## 2026-06-11: WireLevel への戦略ピボット (DESIGN-CA2.md)
+
+**WireWorld は順序回路でスケールしない**ことが実証された:
+
+1. **バックファイア** (`src/RunBackfire.fsx` で実証): junc3 発火時に電子が
+   全入力配線へ逆流する。ワンショットテストでは無害だが、周期クロックの
+   順序回路ではサイクル毎に上流ゲートを誤発火させる。対策は全入力への DIODE 挿入。
+2. **厳密タイミング**: パルス方式は全ゲート入力の 1gen 精度整合が必須。
+   5 ゲートの半加算器ですら sum(1,0) が未解決のまま。
+
+→ 独自 CA ルール **WireLevel** (`src/WireLevel.fs`) を新ターゲットに採用。
+レベル駆動・pull 型有向配線・専用 Cross/DFF セル。von Neumann 近傍・51 状態。
+toggle FF (DFF+NOT ループ) の複数サイクル動作を検証済み — WireWorld で
+不可能だった順序回路が動く。詳細は **DESIGN-CA2.md** 参照。
+
+GPU 実行は WebGPU (ブラウザ + WGSL compute、ping-pong バッファ) を推奨。
+F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte
+エンコーディングが GPU 側と共有される。
+
+WireWorld 系パイプライン (junc3/STA/クロック注入 Sim) は組合せ回路デモとして
+維持。新規開発は WireLevel 上で行う。
+
+## DFF (D flip-flop) design status — WireWorld (歴史的経緯)
 
 `$_DFF_P_` → `GateKind.Dff` is parsed by the pipeline, and `Library.buildDLatch()` produces a 5×JUNC3 + DIODE-based level-sensitive D-latch pattern (37×7, 109 cells). However, DFF is **not yet functional** due to a fundamental WireWorld limitation:
 
