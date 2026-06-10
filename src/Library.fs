@@ -296,34 +296,122 @@ module Library =
           PortDelays = [3<gen>]
           Pattern = ofAscii [ ".##."; "##.#"; ".##." ] }
 
-    /// DFF: クロックゲート型 D フリップフロップのスタブ。
-    ///
-    /// 設計方針 (DESIGN.md §2.7 参照):
-    ///   AND(D, CLK) = NAND(NAND(D,CLK)) で実現するクロックセンシティブ D ラッチ。
-    ///   junc3 2 個 (NAND + NOT) を配線して構成する。
-    ///   Ports: In=D(x=0,y=5), Clock=CLK(x=5,y=0), Out=Q(x=11,y=5)
-    ///   Latency ≈ 10<gen> (NAND 4 + NOT 4 + 配線 2)。
-    ///
-    /// 未解決: NAND と NOT の間の Clock 配線タイミング調整。Rule.run 検証後に Pattern/Latency を確定。
+    // -----------------------------------------------------------------------
+    // DFF 構築ヘルパー — 5つの JUNC3 を合成して D ラッチを形成する
+    // -----------------------------------------------------------------------
+
+    /// セルのパターンを指定オフセットに配置する。
+    let private placePattern (pattern: Grid) (offset: Coord) : Grid =
+        pattern |> Map.toList
+        |> List.map (fun (c, s) -> { X = c.X + offset.X; Y = c.Y + offset.Y }, s)
+        |> Map.ofList
+
+    /// 2点間を水平・垂直の導線で結ぶ。delta 方向に L 字配線。
+    let private routeWire (grid: Grid) (a: Coord) (b: Coord) : Grid =
+        let route = System.Collections.Generic.List<Coord>()
+        let mutable cur = a
+        // 水平優先
+        while cur.X <> b.X do
+            cur <- { X = cur.X + (if b.X > cur.X then 1 else -1); Y = cur.Y }
+            if cur <> a then route.Add cur
+        while cur.Y <> b.Y do
+            cur <- { X = cur.X; Y = cur.Y + (if b.Y > cur.Y then 1 else -1) }
+            if cur <> a && cur <> b then route.Add cur
+        route |> Seq.fold (fun g c -> Map.add c Wire g) grid
+
+    /// 5-JUNC3 構成の D ラッチ (レベルセンシティブ) パターンを生成する。
+    /// 内部構造:
+    ///   J1=NOT(D)=JUNC3(D,Vdd,Vdd), J2=NAND(D,CLK)=JUNC3(D,CLK,Vdd)
+    ///   J3=NAND(nD,CLK)=JUNC3(nD,CLK,Vdd)
+    ///   J4=SR-Q=JUNC3(S',Qb,Vdd), J5=SR-Qb=JUNC3(R',Q,Vdd)
+    /// CLK/Vdd は全 JUNC3 の C ポート(0,2)および J1 の B ポート(2,0)へ分配。
+    let buildDLatch () : StdCell =
+        // 5つの JUNC3 を水平1行に配置 (y=4)。D バス(y=0)と CLK バス(y=2)が上を平行に走る。
+        // 各 JUNC3 までの D→A, CLK→B, CLK→C の遅延が自然一致する。
+        // Ports は [In(D); In(CLK_B); In(CLK_C); Out(Q)] の4本。
+        // CLK_B・CLK_C とも y=2 のバスから供給 (遅延一致のため)。
+        let pJ1 = { X=0;  Y=4 }    // NOT D
+        let pJ2 = { X=8;  Y=4 }    // NAND(D,CLK)
+        let pJ3 = { X=16; Y=4 }    // NAND(nD,CLK)
+        let pJ4 = { X=24; Y=4 }    // SR-Q
+        let pJ5 = { X=32; Y=4 }    // SR-Qb
+
+        let portA  (p: Coord) = { X = p.X + 0; Y = p.Y + 0 }
+        let portB  (p: Coord) = { X = p.X + 2; Y = p.Y + 0 }
+        let portC  (p: Coord) = { X = p.X + 0; Y = p.Y + 2 }
+        let portOut(p: Coord) = { X = p.X + 4; Y = p.Y + 2 }
+
+        // 全 JUNC3 パターンを配置
+        let g0 = [pJ1; pJ2; pJ3; pJ4; pJ5]
+                |> List.fold (fun acc p ->
+                    placePattern junc3.Pattern p
+                    |> Map.fold (fun a k v -> Map.add k v a) acc) Map.empty
+
+        // --- JUNC3 間接続 ---
+        // nD: J1出力(4,6) → J3 A(16,4)
+        let g = routeWire g0 (portOut pJ1) (portA pJ3)
+        // S: J2出力(12,6) → J4 A(24,4)
+        let g = routeWire g  (portOut pJ2) (portA pJ4)
+        // R: J3出力(20,6) → J5 A(32,4)
+        let g = routeWire g  (portOut pJ3) (portA pJ5)
+        // Q → J5 B / Qb → J4 B (SR フィードバック)
+        let g = routeWire g  (portOut pJ4) (portB pJ5)
+        let g = routeWire g  (portOut pJ5) (portB pJ4)
+
+        // --- D バス: y=0 → J1_A(0,4), J2_A(8,4) ---
+        let dIn = { X = 0; Y = 0 }
+        let g = routeWire g dIn (portA pJ1)
+        let g = routeWire g dIn (portA pJ2)
+
+        // --- CLK バス: y=2 → J1_B (NOT data), および全 C/B ポート (Vdd/CLK 供給) ---
+        // J1 の B ポートには CLK_B と CLK_C の両方が y=2 から供給され、遅延が一致する。
+        let clkIn = { X = 0; Y = 2 }
+        let g = routeWire g clkIn (portB pJ1)   // CLK_B: J1 NOT の B 入力
+        let clkTargets =
+            [ portC pJ1              // J1 C
+              portB pJ2; portC pJ2   // J2 B+C
+              portB pJ3; portC pJ3   // J3 B+C
+              portC pJ4              // J4 C
+              portC pJ5 ]            // J5 C
+        let g = clkTargets |> List.fold (fun acc t -> routeWire acc clkIn t) g
+
+        let pattern = g
+        let maxX = pattern |> Map.toList |> List.map (fun (c,_) -> c.X) |> List.max
+        let maxY = pattern |> Map.toList |> List.map (fun (c,_) -> c.Y) |> List.max
+
+        // ポート定義: [In(D); In(CLK_B); In(CLK_C); Out(Q)]
+        //   D(0,0) → J1_A/J2_A。CLK_B/C(0,2) → y=2 バスから全対象へ。
+        //   CLK_B はルーターが配線 (NOT D の B 入力)、CLK_C はクロックツリーが分配。
+        let ports : Port list =
+            [ { Role = In;  Offset = { X = 0; Y = 0 } }   // D 入力
+              { Role = In;  Offset = { X = 0; Y = 2 } }   // CLK_B (NOT D の B 入力用データ配線)
+              { Role = In;  Offset = { X = 0; Y = 2 } }   // CLK_C (クロックツリー分配)
+              { Role = Out; Offset = { X = 28; Y = 6 } } ]// Q = J4 出力
+
+        // PortDelays: [D; CLK_B; CLK_C]
+        //   D: (0,0)→J1_A(0,4)=4→junction=1=5, (0,0)→J2_A(8,4)=12→junction=1=13 → worst=13
+        //   CLK_B: (0,2)→J1_B(2,4)=4→junction=1=5 → 5
+        //   CLK_C: (0,2)→J5_C(32,6)=36→junction=1=37 → worst=37
+        { Name      = "DLATCH"
+          Kind      = Dff
+          Size      = { X = maxX + 1; Y = maxY + 1 }
+          Ports     = ports
+          Latency   = 40<gen>    // 全経路通して出力が確定する最悪世代
+          PortDelays = [13<gen>; 5<gen>; 37<gen>]
+          Pattern   = pattern }
+
+    /// DFF: D-Latch 版。検証中につき defaultLib には未登録。
     let dff : StdCell =
-        { Name    = "DFF"
-          Kind    = Dff
-          Size    = { X = 12; Y = 10 }
-          Ports   = [ { Role = In;    Offset = { X = 0;  Y = 5 } }   // D 入力
-                      { Role = Clock; Offset = { X = 5;  Y = 0 } }   // CLK
-                      { Role = Out;   Offset = { X = 11; Y = 5 } } ] // Q 出力
-          Latency = 10<gen>     // TODO: Rule.run で実測後に更新
-          PortDelays = [10<gen>]
-          Pattern = Map.empty }
+        buildDLatch ()
 
     /// M2 ターゲット (`abc -g NAND,NOT`) 対応のデフォルトライブラリ。
     /// AND/XOR は Yosys が NAND+NOT に分解するためモノリシックセルは不要。
+    /// DFF は設計検証中のため除外。
     let defaultLib : CellLibrary =
         [ Buf,  buf
           Or,   or2
           Nand, junc3
-          Not,  not1
-          Dff,  dff ]
+          Not,  not1 ]
         |> Map.ofList
 
 

@@ -11,11 +11,11 @@ No separate lint or typecheck step — the F# compiler covers both. No formatter
 
 ## Architecture
 
-Multi-file F# project (~3290 lines across 8 files in `src/`). Files are compiled in dependency order:
+Multi-file F# project (~3353 lines across 8 files in `src/`). Files are compiled in dependency order:
 
 ```
 Domain.fs      # Units, Domain, Rule, Netlist            ( 98 lines)
-Library.fs     # StdCell definitions, CellTest            (428 lines)
+Library.fs     # StdCell definitions, CellTest            (516 lines)
 Place.fs       # Placement algorithm                       (23 lines)
 Route.fs       # Lee/BFS routing algorithm                (255 lines)
 Sta.fs         # Static timing analysis                   (290 lines)
@@ -69,6 +69,19 @@ Yosys is needed to synthesize Verilog to JSON. Not bundled — must be installed
 **Fix**: Changed `parseCells` from `Map.ofSeq` to `List.ofSeq`, and `parseGates` from `m.Cells |> Map.toList` to `m.Cells` directly. This preserves JSON declaration order (numeric order: u0, u1, u2, ..., u49) instead of string-sorted order.
 
 50-gate and 100-gate NAND chains now compile successfully.
+
+## DFF (D flip-flop) design status
+
+`$_DFF_P_` → `GateKind.Dff` is parsed by the pipeline, and `Library.buildDLatch()` produces a 5×JUNC3 + DIODE-based level-sensitive D-latch pattern (37×7, 109 cells). However, DFF is **not yet functional** due to a fundamental WireWorld limitation:
+
+- **JUNC3 fires on any 1-2 Head inputs**; there is no way to create a CLK-gated AND gate that requires 2 specific inputs without firing on Vdd alone
+- The SR-latch (J4/J5) oscillates because the Vdd (=CLK) alone fires the junction regardless of S/R inputs
+- Feedback loop delays exceed the Head lifetime (1 gen Head → 1 gen Tail → Wire), preventing stable state retention
+- True CLK-gated storage requires system-level timing (clock period < loop delay) or a different storage mechanism (DIODE-based ring oscillator)
+
+**Next approach**: Ring-oscillator-based storage: DIODE + delay loop with JUNC3 write gate (AND(D,CLK) via NAND+NOT). The ring maintains Head circulation without requiring continuous Vdd. Write gate uses 3-Head absorption to inject/clear Head based on D.
+
+Currently DFF is excluded from `defaultLib`. `buildDLatch()` and `dff` remain in Library.fs for future development.
 
 ---
 
