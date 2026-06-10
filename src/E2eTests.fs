@@ -1290,6 +1290,41 @@ module WireLevelTest =
             qs <- qs @ [ levelOf g dff ]
         qs = [true; false; true; false]
 
+    /// 2bit リップルカウンタ: FF0 はピンクロックのトグル FF、
+    /// FF1 は NOT(q0) をクロックとするトグル FF (q0 の立ち下がりで反転)。
+    /// マルチ DFF + 「DFF 由来の派生信号で別の DFF をクロックする」検証。
+    /// 起動時に NOT(q0) の初期化波で FF1 に 1 回スプリアスエッジが入るため、
+    /// 初期値からの相対インクリメント (mod 4) を検証する。
+    let private counter2 () =
+        let grid = ofAsciiL [
+            "..........."
+            "..........."
+            ".....<<W<^."
+            ".....v...^."
+            ".....v>>F>>"
+            "........^.v"
+            "........^.v"
+            "........0.v"
+            ".....<<W<^v"
+            ".....v...^v"
+            ".....v>>F>v"
+            "........^.v"
+            "........N<v"
+            "..........." ]
+        let clkPin = c 8 7
+        let ff0, ff1 = c 8 4, c 8 10
+        let halfP = 24
+        let value g =
+            (if levelOf g ff1 then 2 else 0) + (if levelOf g ff0 then 1 else 0)
+        let mutable g = grid |> stepN (halfP * 2)   // 初期収束 (clk=0)
+        let v0 = value g
+        let mutable ok = true
+        for k in 1 .. 4 do
+            g <- g |> setPin clkPin true  |> stepN halfP
+            g <- g |> setPin clkPin false |> stepN halfP
+            if value g <> (v0 + k) % 4 then ok <- false
+        ok
+
     let runAll () : (string * bool) list =
         [ "WL wire: pin value propagates",        wireProp ()
           "WL NAND: truth table (4 cases)",       nandTT ()
@@ -1298,4 +1333,5 @@ module WireLevelTest =
           "WL fanout: 1 source, 3 readers",       fanoutTest ()
           "WL DFF: edge-trigger and hold",        dffEdge ()
           "WL toggle FF: 4 cycles -> 1,0,1,0",    toggleFF ()
+          "WL counter2: ripple count mod 4",      counter2 ()
         ]
