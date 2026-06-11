@@ -19,6 +19,18 @@ const TEST_CASES = [
     steps: 1000,
     expectedFile: 'ha_11.bin',
   },
+  {
+    name: 'mincpu-clk1',
+    initFile: 'mincpu_clk1_init.bin',
+    steps: 3500,
+    expectedFile: 'mincpu_clk1.bin',
+  },
+  {
+    name: 'mincpu-clk0',
+    initFile: 'mincpu_clk0_init.bin',
+    steps: 800,
+    expectedFile: 'mincpu_clk0.bin',
+  },
 ];
 
 function readBin(file: string): Uint8Array {
@@ -51,16 +63,10 @@ async function runGPUSimulation(page: any, initBin: Uint8Array, steps: number): 
     return (window as any).cells !== null && (window as any).width > 0;
   }, { timeout: 10000 });
 
-  // Run N steps
-  for (let i = 0; i < steps; i++) {
-    await page.evaluate(async () => {
-      await (window as any).stepGPU();
-    });
-    // Periodically read back to check progress
-    if (i % 100 === 0 || i === steps - 1) {
-      await page.waitForFunction(() => !(window as any).running, { timeout: 30000 });
-    }
-  }
+  // Run N steps (batched in one evaluate to avoid IPC overhead)
+  await page.evaluate(async (n: number) => {
+    await (window as any).stepN(n);
+  }, steps);
 
   // Download result
   const result = await page.evaluate(async () => {
@@ -72,6 +78,9 @@ async function runGPUSimulation(page: any, initBin: Uint8Array, steps: number): 
 
 for (const tc of TEST_CASES) {
   test(`GPU Golden Test: ${tc.name}`, async ({ page }) => {
+    // 大規模回路はシミュレーションに時間がかかる
+    test.setTimeout(tc.steps > 2000 ? 120000 : 60000);
+
     // Launch with WebGPU enabled
     await page.goto('file://' + join(WEB_DIR, 'index.html'), {
       waitUntil: 'networkidle',

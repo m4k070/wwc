@@ -56,19 +56,6 @@ You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script 
 
 **Total tests**: 147. Current pass rate: **147/147** (WL Mincpu 3/3 含む、WL ALU4 13/13 含む)。
 
-WireLevel のテストは settle (収束待ち) でクロックを駆動する。固定半周期を使う場合は
-「半周期 > 組合せ収束時間」を守ること (counter4 は halfP=128 で誤動作、512 で完動)。
-
-### Known failures
-
-| Test | Cause |
-|------|-------|
-| `2-NOT: wire (net3) delay = measureDelay` | シミュレーション実効遅延とSTA遅延が一致しない |
-| `sum(1,0) = 1` (FullAdder) | タイミング問題（クロックシミュレーション） |
-| `fa-like-9: compileFull succeeds` | 4列×狭ピッチ配置で配線チャネル不足 (RoutingCongestion) |
-
-**4列配置（9-10ゲート）の限界**: 4列×ピッチ13の配置は、fan-out≧3のネットが複数存在する回路で配線輻輳が発生する。11ゲート以上は8列以上になるためこの問題は起きにくい。
-
 ## Clock balance
 
 `PipelineWL.balanceClockNet` はクロックツリーの経路長を均等化する。小規模回路 (counter4, reg8) では skew=0 に調整可能。
@@ -104,9 +91,14 @@ Yosys is needed to synthesize Verilog to JSON. Not bundled — must be installed
 toggle FF (DFF+NOT ループ) の複数サイクル動作を検証済み — WireWorld で
 不可能だった順序回路が動く。詳細は **DESIGN-CA2.md** 参照。
 
-GPU 実行は WebGPU (ブラウザ + WGSL compute、ping-pong バッファ) を推奨。
+GPU 実行は WebGPU (ブラウザ + WGSL compute、ping-pong バッファ) で実現済み。
 F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte
 エンコーディングが GPU 側と共有される。
+
+WebGPU golden tests: **4/4 パス** (toggleFF, halfAdder, mincpu-clk1(3500steps), mincpu-clk0(800steps))。
+GPU 結果は F# `settle` と byte-exact 一致。mincpu (46k cells) の 3500 ステップを
+SwiftShader (CPU) で 43s、F# リファレンスは約 93s と約 2 倍高速。
+実 GPU では大幅な高速化が期待できる。
 
 WireWorld 系パイプライン (junc3/STA/クロック注入 Sim) は組合せ回路デモとして
 維持。新規開発は WireLevel 上で行う。

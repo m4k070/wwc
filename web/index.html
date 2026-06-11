@@ -396,6 +396,12 @@ async function runN(n) {
   running = false;
 }
 
+async function stepN(n) {
+  for (let i = 0; i < n; i++) {
+    await stepGPU();
+  }
+}
+
 async function readAndRender() {
   const buf = ping ? srcBuf : dstBuf;
   const u32Count = width * height;
@@ -560,6 +566,7 @@ try {
 // Expose for headless test automation (puppeteer/playwright)
 window._wwcReady = true;
 window.stepGPU = stepGPU;
+window.stepN = stepN;
 window.runN = runN;
 window.downloadResult = downloadResult;
 window.exportResultBin = exportResultBin;
