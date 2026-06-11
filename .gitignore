@@ -1,2 +1,6 @@
 /src/bin
 /src/obj
+/.serena
+/node_modules
+/test-results
+/verilog

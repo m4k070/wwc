@@ -1,6 +1,6 @@
 # WireWorld/WireLevel コンパイラ TODO
 
-## 現在のテスト結果: 115/115 passed (WireLevel 13/13, 8bit レジスタ, Golden 5/5 🎉)
+## 現在のテスト結果: 128/128 passed (WireLevel 13/13, 8bit レジスタ, Golden 5/5, ALU 13/13 🎉)
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
 
@@ -27,7 +27,7 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 - [x] yosys $_DFF_P_ → LDff 経路の E2E (toggle FF、q=1,0,1,0)
 - [x] 4bit カウンタ (verilog/counter4.v → yosys → 21 ゲート → 0..15 ラップ確認)
 - [x] 8bit レジスタ
-- [ ] ALU (加算器)
+- [x] ALU (2bit ADD/AND/OR/XOR, 13 tests)
 - [ ] クロックスキュー均等化 (hold 対策)。counter4 では顕在化していないが、
       回路規模が大きくなると最短データパス < スキューで壊れうる。
       WireLevel は遅延 = パス長そのものなので、クロック枝の長さを揃えるだけでよい

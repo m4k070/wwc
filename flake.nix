@@ -27,6 +27,24 @@
             # Verilog 合成 (HDL → NAND+NOT)
             yosys
 
+            # Node.js (Playwright + WebGPU テスト用)
+            nodejs_22
+            # Playwright Chromium 依存ライブラリ
+            glib
+            nss
+            nspr
+            dbus
+            at-spi2-core
+            cups
+            libxkbfile
+            libxcomposite
+            libxdamage
+            libxfixes
+            libxrandr
+            libgbm
+            alsa-lib
+            pulseaudio
+
             # ユーティリティ
             git
           ];

@@ -1622,3 +1622,71 @@ module WlGoldenTest =
           "WL-GOLD: binary size correct",            sizeOk
           "WL-GOLD: export after stepN matches",     exportStepOk
           "WL-GOLD: toggle q=1 after 1 cycle",       toggleOk ]
+
+// ---------------------------------------------------------------------
+// WL-ALU: 2bit ALU (ADD/AND/OR/XOR) の E2E テスト
+//   Verilog → yosys → WireLevel → 真理値表検証
+// ---------------------------------------------------------------------
+module WlAluTest =
+    open Domain
+    open WireLevel
+    open PipelineWL
+    open Netlist
+
+    let private alu2Json = System.IO.File.ReadAllText("verilog/alu2.json")
+
+    let private testResults =
+        match compileWL alu2Json with
+        | Error e -> [ "WL-ALU: compile succeeds", false ]
+        | Ok (grid, placed, pins) ->
+            //座標オフセットを計算して export→import
+            let coords = grid |> Map.toList |> List.map fst
+            let minX = coords |> List.map (fun c -> c.X) |> List.min
+            let minY = coords |> List.map (fun c -> c.Y) |> List.min
+            let offset = { X = minX; Y = minY }
+            let bin = exportGrid grid
+            let grid0 = importGridWithOffset offset bin
+
+            // ピン座標
+            let pinA0 = pins.[NetId 2]   // A[0]
+            let pinA1 = pins.[NetId 3]   // A[1]
+            let pinB0 = pins.[NetId 4]   // B[0]
+            let pinB1 = pins.[NetId 5]   // B[1]
+            let pinOp0 = pins.[NetId 6]  // op[0]
+            let pinOp1 = pins.[NetId 7]  // op[1]
+            // 出力座標 (yosys のポート定義から NetId 8=Y[0], NetId 9=Y[1])
+            let outY0 = placed |> List.find (fun p -> p.Gate.Output = NetId 8) |> fun p -> p.Coord
+            let outY1 = placed |> List.find (fun p -> p.Gate.Output = NetId 9) |> fun p -> p.Coord
+
+            let setInputs (a0, a1, b0, b1, op0, op1) g =
+                g |> setPin pinA0 a0 |> setPin pinA1 a1
+                  |> setPin pinB0 b0 |> setPin pinB1 b1
+                  |> setPin pinOp0 op0 |> setPin pinOp1 op1
+
+            let test (a0, a1, b0, b1, op0, op1) expected =
+                let g = setInputs (a0, a1, b0, b1, op0, op1) grid0 |> settle 1000 |> fst
+                let y0 = levelOf g outY0
+                let y1 = levelOf g outY1
+                let result = (if y1 then 2 else 0) + (if y0 then 1 else 0)
+                let a = (if a1 then 2 else 0) + (if a0 then 1 else 0)
+                let b = (if b1 then 2 else 0) + (if b0 then 1 else 0)
+                let op = (if op1 then 2 else 0) + (if op0 then 1 else 0)
+                let desc = sprintf "A=%d B=%d op=%d -> %d (exp %d)" a b op result expected
+                desc, result = expected
+
+            [ "WL-ALU: compile succeeds",          true
+              yield test (false,false,false,false,false,false) 0  // ADD 0+0=0
+              yield test (true, false,false,false,false,false) 1  // ADD 1+0=1
+              yield test (false,false,true, false,false,false) 1  // ADD 0+1=1
+              yield test (true, false,true, false,false,false) 2  // ADD 1+1=2
+              yield test (false,true, true, false,false,false) 3  // ADD 2+1=3
+              yield test (true, true, true, false,false,false) 0  // ADD 3+1=0
+              yield test (true, false,true, false,true, false) 1  // AND 1&1=1
+              yield test (true, true, true, false,true, false) 1  // AND 3&1=1
+              yield test (false,true, true, false,true, false) 0  // AND 2&1=0
+              yield test (false,true, true, false,false,true) 3   // OR  2|1=3
+              yield test (false,false,false,false,false,true) 0   // OR  0|0=0
+              yield test (true, true, true, false,true, true) 2   // XOR 3^1=2
+              yield test (true, false,true, false,true, true) 0 ] // XOR 1^1=0
+
+    let runAll () : (string * bool) list = testResults

@@ -52,7 +52,7 @@ Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx c
 
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
 
-**Total tests**: 110. Current pass rate: **107/110** (WireLevel 8/8, WL Pipeline 7/7, WL Counter4 3/3 含む)。
+**Total tests**: 128. Current pass rate: **128/128** (WireLevel 8/8, WL Pipeline 7/7, WL Counter4 3/3, WL ALU 13/13 含む)。
 
 WireLevel のテストは settle (収束待ち) でクロックを駆動する。固定半周期を使う場合は
 「半周期 > 組合せ収束時間」を守ること (counter4 は halfP=128 で誤動作、512 で完動)。

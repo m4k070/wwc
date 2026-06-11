@@ -1,0 +1,26 @@
+{
+  "name": "wwc",
+  "version": "1.0.0",
+  "description": "任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン **WireWorld** 上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。",
+  "main": "index.js",
+  "scripts": {
+    "test": "npx playwright test -c web/playwright.config.ts",
+    "test:headed": "npx playwright test -c web/playwright.config.ts --headed"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m4k070/wwc.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/m4k070/wwc/issues"
+  },
+  "homepage": "https://github.com/m4k070/wwc#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "playwright": "^1.60.0",
+    "puppeteer-core": "^25.1.0"
+  }
+}

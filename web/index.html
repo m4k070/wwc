@@ -14,7 +14,7 @@
   .controls button:hover { background: #00d4ff; color: #1a1a2e; }
   .controls button:disabled { opacity: 0.4; cursor: not-allowed; }
   .status { font-size: 12px; margin-bottom: 8px; color: #888; }
-  canvas { border: 1px solid #0f3460; image-rendering: pixelated; width: 512px; height: 512px; max-width: 100%; }
+  canvas { border: 1px solid #0f3460; image-rendering: pixelated; max-width: 100%; max-height: 80vh; }
   #log { font-size: 11px; margin-top: 8px; max-height: 200px; overflow-y: auto; background: #16213e; padding: 8px; }
   #log div { padding: 1px 0; }
   .err { color: #ff6b6b; }
@@ -73,8 +73,151 @@ const COLORS_ON = [
   '#e599f7',
 ];
 
-// WGSL shader source
-const shaderCode = await (await fetch('sim.wgsl')).text();
+// WGSL shader source — embedded inline to support file:// access (fetch is CORS-blocked)
+const shaderCode = `// WireLevel WGSL compute shader
+// Cell encoding (matches WireLevel.encodeCell):
+//   bit 7-5: kind (0=Empty 1=Pin 2=Wire 3=Nand 4=Cross 5=Dff)
+//   bit 4-3: dir (E=0 W=1 N=2 S=3)
+//     Cross: bit4=hDir(E=0,W=1), bit3=vDir(N=0,S=1)
+//   bit 1-0: levels
+//     Wire/Nand/Pin: bit0=level
+//     Cross: bit1=vv, bit0=hv
+//     Dff:   bit1=prevClk, bit0=q
+
+// Directions
+const E: u32 = 0u;
+const W: u32 = 1u;
+const N: u32 = 2u;
+const S: u32 = 3u;
+
+// Kind constants
+const K_EMPTY: u32 = 0u;
+const K_PIN:   u32 = 1u;
+const K_WIRE:  u32 = 2u;
+const K_NAND:  u32 = 3u;
+const K_CROSS: u32 = 4u;
+const K_DFF:   u32 = 5u;
+
+struct Params {
+    width: u32,
+    height: u32,
+    flags: u32,
+}
+
+@group(0) @binding(0) var<storage, read>     src  : array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst  : array<u32>;
+@group(0) @binding(2) var<uniform>           dims : Params;
+
+fn cellAtStorage(src: ptr<storage, array<u32>>, i: u32) -> u32 {
+    return (*src)[i];
+}
+
+fn setCell(dst: ptr<storage, array<u32>, read_write>, i: u32, val: u32) {
+    (*dst)[i] = val;
+}
+
+fn kind(c: u32) -> u32 { return (c >> 5u) & 7u; }
+fn dir(c: u32) -> u32 { return (c >> 3u) & 3u; }
+fn level(c: u32) -> u32 { return c & 1u; }
+
+fn opposite(d: u32) -> u32 {
+    switch (d) {
+        case E: { return W; }
+        case W: { return E; }
+        case N: { return S; }
+        default: { return N; }
+    }
+}
+
+fn delta(d: u32) -> vec2<i32> {
+    switch (d) {
+        case E: { return vec2( 1,  0); }
+        case W: { return vec2(-1,  0); }
+        case N: { return vec2( 0, -1); }
+        default: { return vec2( 0,  1); }
+    }
+}
+
+fn presentedTo(c: u32, toward: u32) -> u32 {
+    let k = kind(c);
+    if (k == K_EMPTY) { return 0xFFFFFFFFu; }
+    if (k == K_PIN || k == K_WIRE || k == K_NAND) { return level(c); }
+    if (k == K_DFF) { return c & 1u; }
+    if (k == K_CROSS) {
+        let hDir = select(E, W, ((c >> 4u) & 1u) == 1u);
+        let vDir = select(N, S, ((c >> 3u) & 1u) == 1u);
+        let hLevel = c & 1u;
+        let vLevel = (c >> 1u) & 1u;
+        if (toward == hDir) { return hLevel; }
+        if (toward == vDir) { return vLevel; }
+        return 0xFFFFFFFFu;
+    }
+    return 0xFFFFFFFFu;
+}
+
+fn pullFrom(src: ptr<storage, array<u32>>, x: i32, y: i32, side: u32) -> u32 {
+    let d = delta(side);
+    let nx = x + d.x;
+    let ny = y + d.y;
+    if (nx < 0 || ny < 0 || nx >= i32(dims.width) || ny >= i32(dims.height)) { return 0xFFFFFFFFu; }
+    let ni = u32(ny) * dims.width + u32(nx);
+    let nb = cellAtStorage(src, ni);
+    return presentedTo(nb, opposite(side));
+}
+
+fn stepCell(src: ptr<storage, array<u32>>, x: i32, y: i32) -> u32 {
+    let i = u32(y) * dims.width + u32(x);
+    let cell = cellAtStorage(src, i);
+    let k = kind(cell);
+    if (k == K_EMPTY || k == K_PIN) { return cell; }
+    if (k == K_WIRE) {
+        let d = dir(cell);
+        let v = pullFrom(src, x, y, opposite(d));
+        return (cell & 0xF8u) | select(0u, 1u, v == 1u);
+    }
+    if (k == K_NAND) {
+        let d = dir(cell);
+        var allTrue: bool = true;
+        var anyInput: bool = false;
+        for (var s: u32 = 0u; s < 4u; s = s + 1u) {
+            if (s != d) {
+                let v = pullFrom(src, x, y, s);
+                if (v != 0xFFFFFFFFu) { anyInput = true; if (v == 0u) { allTrue = false; } }
+            }
+        }
+        return (cell & 0xF8u) | select(0u, 1u, anyInput && !allTrue);
+    }
+    if (k == K_CROSS) {
+        let hd = select(E, W, ((cell >> 4u) & 1u) == 1u);
+        let vd = select(N, S, ((cell >> 3u) & 1u) == 1u);
+        let hv = pullFrom(src, x, y, opposite(hd));
+        let vv = pullFrom(src, x, y, opposite(vd));
+        return (cell & 0xF8u) | (select(0u, 1u, vv == 1u) << 1u) | select(0u, 1u, hv == 1u);
+    }
+    if (k == K_DFF) {
+        let d = dir(cell);
+        let dVal = select(0u, 1u, pullFrom(src, x, y, opposite(d)) == 1u);
+        var clk: bool = false;
+        for (var s: u32 = 0u; s < 4u; s = s + 1u) {
+            let isPerp = ((d == E || d == W) && (s == N || s == S)) || ((d == N || d == S) && (s == E || s == W));
+            if (isPerp) { if (pullFrom(src, x, y, s) == 1u) { clk = true; } }
+        }
+        let prevClk = (cell >> 1u) & 1u;
+        let q = select(cell & 1u, dVal, clk && prevClk == 0u);
+        return (cell & 0xF8u) | (select(0u, 1u, clk) << 1u) | q;
+    }
+    return cell;
+}
+
+@compute @workgroup_size(16, 16)
+fn step(@builtin(global_invocation_id) gid: vec3u) {
+    let x = i32(gid.x);
+    let y = i32(gid.y);
+    if (x >= i32(dims.width) || y >= i32(dims.height)) { return; }
+    let i = u32(y) * dims.width + u32(x);
+    let newCell = stepCell(&src, x, y);
+    setCell(&dst, i, newCell);
+}`;
 
 // ---- WebGPU init ----
 let device, queue, pipeline, bindGroup, srcBuf, dstBuf, paramsBuf;
@@ -90,8 +233,22 @@ async function initWebGPU() {
   device = await adapter.requestDevice();
   queue = device.queue;
 
+  // Capture GPU errors for debugging
+  let gpuErrors = [];
+  device.addEventListener('uncapturederror', (e) => {
+    gpuErrors.push(e.error.message);
+    logMsg('GPU error: ' + e.error.message, 'err');
+  });
   const shader = device.createShaderModule({ code: shaderCode });
-  pipeline = device.createComputePipeline({
+
+  // WGSL compilation doesn't throw — check explicitly
+  const compInfo = await shader.getCompilationInfo();
+  const errors = compInfo.messages.filter(m => m.type === 'error');
+  if (errors.length > 0) {
+    throw new Error('WGSL errors:\n' + errors.map(e => e.message + ' (line ' + e.lineNum + ')').join('\n'));
+  }
+
+  pipeline = await device.createComputePipelineAsync({
     layout: 'auto',
     compute: { module: shader, entryPoint: 'step' },
   });
@@ -105,7 +262,7 @@ function ensureBuffers(w, h) {
   width = w; height = h;
 
   const cellCount = w * h;
-  const u32Count = Math.ceil(cellCount / 4);
+  const u32Count = w * h;
   const bufSize = u32Count * 4;
 
   if (oldW !== w || oldH !== h || !srcBuf || srcBuf.size !== bufSize) {
@@ -145,26 +302,19 @@ function updateParams() {
 }
 
 function packCells(w, h, cellData) {
-  const cellCount = w * h;
-  const u32Count = Math.ceil(cellCount / 4);
-  const buf = new Uint32Array(u32Count);
-  for (let i = 0; i < cellCount; i++) {
-    const wordIdx = i >> 2;
-    const shift = (i & 3) * 8;
-    buf[wordIdx] |= (cellData[i] & 0xFF) << shift;
+  const packed = new Uint32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    packed[i] = cellData[i];
   }
-  return buf;
+  return packed;
 }
 
 function unpackCells(w, h, packed) {
-  const cellCount = w * h;
-  const out = new Uint8Array(cellCount);
-  for (let i = 0; i < cellCount; i++) {
-    const wordIdx = i >> 2;
-    const shift = (i & 3) * 8;
-    out[i] = (packed[wordIdx] >> shift) & 0xFF;
+  const cells = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    cells[i] = packed[i] & 0xFF;
   }
-  return out;
+  return cells;
 }
 
 function uploadGrid(w, h, cellData) {
@@ -180,8 +330,7 @@ function uploadGrid(w, h, cellData) {
 }
 
 function downloadResult() {
-  const cellCount = width * height;
-  const u32Count = Math.ceil(cellCount / 4);
+  const u32Count = width * height;
   const buf = ping ? srcBuf : dstBuf;
 
   const readBuf = device.createBuffer({
@@ -249,8 +398,7 @@ async function runN(n) {
 
 async function readAndRender() {
   const buf = ping ? srcBuf : dstBuf;
-  const cellCount = width * height;
-  const u32Count = Math.ceil(cellCount / 4);
+  const u32Count = width * height;
 
   const readBuf = device.createBuffer({
     size: u32Count * 4,
@@ -408,6 +556,27 @@ try {
   statusEl.textContent = 'Error: ' + e.message;
   logMsg(e.message, 'err');
 }
+
+// Expose for headless test automation (puppeteer/playwright)
+window._wwcReady = true;
+window.stepGPU = stepGPU;
+window.runN = runN;
+window.downloadResult = downloadResult;
+window.exportResultBin = exportResultBin;
+window.loadGridBin = loadGridBin;
+window.uploadGrid = uploadGrid;
+window.ensureBuffers = ensureBuffers;
+window.setCellLevel = (x, y, level) => {
+  const idx = y * width + x;
+  const arr = new Uint8Array(cells);
+  arr[idx] = (arr[idx] & 0xFC) | (level & 3);
+  uploadGrid(width, height, arr);
+};
+Object.defineProperty(window, 'cells', { get: () => cells });
+Object.defineProperty(window, 'width', { get: () => width });
+Object.defineProperty(window, 'height', { get: () => height });
+Object.defineProperty(window, 'running', { get: () => running });
+Object.defineProperty(window, 'gpuErrors', { get: () => gpuErrors });
 </script>
 </body>
 </html>

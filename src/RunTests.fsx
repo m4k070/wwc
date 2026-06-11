@@ -24,7 +24,8 @@ let wp = run "WL Pipeline"   (WwHdl.WlPipelineTest.runAll ())
 let wc = run "WL Counter4"   (WwHdl.WlCounterTest.runAll ())
 let wr = run "WL Reg8"       (WwHdl.WlReg8Test.runAll ())
 let wg = run "WL Golden"     (WwHdl.WlGoldenTest.runAll ())
+let wa = run "WL ALU"        (WwHdl.WlAluTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length

@@ -129,9 +129,15 @@ module WireLevel =
                 else go next (t + 1)
         go g 0
 
-    /// ピン値の書き込み (ホスト操作)。
+    /// ピン値の書き込み (ホスト操作)。セル種別を保持し、レベルだけ更新する。
     let setPin (c: Coord) (v: bool) (g: LGrid) : LGrid =
-        Map.add c (Pin v) g
+        match getL g c with
+        | LEmpty        -> Map.add c (Pin v) g
+        | Pin _         -> Map.add c (Pin v) g
+        | LWire (d, _)  -> Map.add c (LWire (d, v)) g
+        | LNand (d, _)  -> Map.add c (LNand (d, v)) g
+        | Cross (hd, vd, _, q) -> Map.add c (Cross (hd, vd, v, q)) g
+        | LDff (d, _, pc)      -> Map.add c (LDff (d, v, pc)) g
 
     /// セルの保持レベルを読む (テスト・観測用)。Cross は水平チャネル。
     let levelOf (g: LGrid) (c: Coord) : bool =
@@ -199,27 +205,31 @@ module WireLevel =
     /// LGrid を grid.bin 形式にエクスポートする (GPU 実行用)。
     /// 形式: [width:i32 LE][height:i32 LE][cell_0_0][cell_1_0]...[cell_w-1_h-1]
     /// 各セルは encodeCell の 1 byte、行優先、空セルは 0x00。
+    /// 座標は (0,0) から正規化して出力する。
     let exportGrid (g: LGrid) : byte[] =
         let coords = g |> Map.toList |> List.map fst
-        let minX = if coords.IsEmpty then 0 else coords |> List.map (fun c -> c.X) |> List.min
-        let maxX = if coords.IsEmpty then 0 else coords |> List.map (fun c -> c.X) |> List.max
-        let minY = if coords.IsEmpty then 0 else coords |> List.map (fun c -> c.Y) |> List.min
-        let maxY = if coords.IsEmpty then 0 else coords |> List.map (fun c -> c.Y) |> List.max
-        let w = maxX - minX + 1
-        let h = maxY - minY + 1
-        let buf = Array.zeroCreate (8 + w * h)
-        let le (v: int) (i: int) =
-            buf.[i] <- byte (v &&& 0xFF)
-            buf.[i+1] <- byte ((v >>> 8) &&& 0xFF)
-            buf.[i+2] <- byte ((v >>> 16) &&& 0xFF)
-            buf.[i+3] <- byte ((v >>> 24) &&& 0xFF)
-        le w 0
-        le h 4
-        for y in 0 .. h - 1 do
-            for x in 0 .. w - 1 do
-                let cell = getL g { X = minX + x; Y = minY + y }
-                buf.[8 + y * w + x] <- encodeCell cell
-        buf
+        if coords.IsEmpty then
+            Array.zeroCreate 8
+        else
+            let minX = coords |> List.map (fun c -> c.X) |> List.min
+            let maxX = coords |> List.map (fun c -> c.X) |> List.max
+            let minY = coords |> List.map (fun c -> c.Y) |> List.min
+            let maxY = coords |> List.map (fun c -> c.Y) |> List.max
+            let w = maxX - minX + 1
+            let h = maxY - minY + 1
+            let buf = Array.zeroCreate (8 + w * h)
+            let le (v: int) (i: int) =
+                buf.[i] <- byte (v &&& 0xFF)
+                buf.[i+1] <- byte ((v >>> 8) &&& 0xFF)
+                buf.[i+2] <- byte ((v >>> 16) &&& 0xFF)
+                buf.[i+3] <- byte ((v >>> 24) &&& 0xFF)
+            le w 0
+            le h 4
+            for y in 0 .. h - 1 do
+                for x in 0 .. w - 1 do
+                    let cell = getL g { X = minX + x; Y = minY + y }
+                    buf.[8 + y * w + x] <- encodeCell cell
+            buf
 
     /// grid.bin 形式から LGrid を復元する。
     let importGrid (data: byte[]) : LGrid =
@@ -248,4 +258,33 @@ module WireLevel =
                         | 5 -> LDff (dirs.[dcode], l0, l1)
                         | _ -> LEmpty
                     g <- Map.add { X = x; Y = y } cell g
+        g
+
+    /// grid.bin 形式から LGrid を復元する (オフセット付き)。
+    let importGridWithOffset (offset: Coord) (data: byte[]) : LGrid =
+        if data.Length < 8 then Map.empty else
+        let w = (int data.[0]) ||| (int data.[1] <<< 8) ||| (int data.[2] <<< 16) ||| (int data.[3] <<< 24)
+        let h = (int data.[4]) ||| (int data.[5] <<< 8) ||| (int data.[6] <<< 16) ||| (int data.[7] <<< 24)
+        let dirs = [| E; W; N; S |]
+        let mutable g = Map.empty
+        for y in 0 .. h - 1 do
+            for x in 0 .. w - 1 do
+                let b = data.[8 + y * w + x]
+                if b <> 0uy then
+                    let kind = int (b >>> 5)
+                    let dcode = int (b >>> 3) &&& 3
+                    let l0 = (b &&& 1uy) <> 0uy
+                    let l1 = ((b >>> 1) &&& 1uy) <> 0uy
+                    let cell =
+                        match kind with
+                        | 1 -> Pin l0
+                        | 2 -> LWire (dirs.[dcode], l0)
+                        | 3 -> LNand (dirs.[dcode], l0)
+                        | 4 ->
+                            let hd = if (b >>> 4 &&& 1uy) = 0uy then E else W
+                            let vd = if (b >>> 3 &&& 1uy) = 0uy then N else S
+                            Cross (hd, vd, l0, l1)
+                        | 5 -> LDff (dirs.[dcode], l0, l1)
+                        | _ -> LEmpty
+                    g <- Map.add { X = offset.X + x; Y = offset.Y + y } cell g
         g
