@@ -1,0 +1,210 @@
+{
+  "creator": "Yosys 0.62 (git sha1 v0.62, g++ 15.2.0 -fPIC -O3)",
+  "modules": {
+    "top": {
+      "attributes": {
+        "top": "00000000000000000000000000000001",
+        "src": "verilog/reg8.v:1.1-5.10"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "d": {
+          "direction": "input",
+          "bits": [ 3, 4, 5, 6, 7, 8, 9, 10 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 11, 12, 13, 14, 15, 16, 17, 18 ]
+        }
+      },
+      "cells": {
+        "$auto$ff.cc:337:slice$79": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 3 ],
+            "Q": [ 11 ]
+          }
+        },
+        "$auto$ff.cc:337:slice$80": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 4 ],
+            "Q": [ 12 ]
+          }
+        },
+        "$auto$ff.cc:337:slice$81": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 5 ],
+            "Q": [ 13 ]
+          }
+        },
+        "$auto$ff.cc:337:slice$82": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 6 ],
+            "Q": [ 14 ]
+          }
+        },
+        "$auto$ff.cc:337:slice$83": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 7 ],
+            "Q": [ 15 ]
+          }
+        },
+        "$auto$ff.cc:337:slice$84": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 8 ],
+            "Q": [ 16 ]
+          }
+        },
+        "$auto$ff.cc:337:slice$85": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 9 ],
+            "Q": [ 17 ]
+          }
+        },
+        "$auto$ff.cc:337:slice$86": {
+          "hide_name": 1,
+          "type": "$_DFF_P_",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "verilog/reg8.v:3.3-3.32"
+          },
+          "port_directions": {
+            "C": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "C": [ 2 ],
+            "D": [ 10 ],
+            "Q": [ 18 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "verilog/reg8.v:1.18-1.21"
+          }
+        },
+        "d": {
+          "hide_name": 0,
+          "bits": [ 3, 4, 5, 6, 7, 8, 9, 10 ],
+          "attributes": {
+            "src": "verilog/reg8.v:1.35-1.36"
+          }
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 11, 12, 13, 14, 15, 16, 17, 18 ],
+          "attributes": {
+            "src": "verilog/reg8.v:1.51-1.52"
+          }
+        },
+        "r": {
+          "hide_name": 0,
+          "bits": [ 11, 12, 13, 14, 15, 16, 17, 18 ],
+          "attributes": {
+            "init": "00000000",
+            "src": "verilog/reg8.v:2.13-2.14"
+          }
+        }
+      }
+    }
+  }
+}

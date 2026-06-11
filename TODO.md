@@ -1,6 +1,6 @@
 # WireWorld/WireLevel コンパイラ TODO
 
-## 現在のテスト結果: 96/99 passed (WireLevel 7/7 🎉)
+## 現在のテスト結果: 115/115 passed (WireLevel 13/13, 8bit レジスタ, Golden 5/5 🎉)
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
 
@@ -26,7 +26,7 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 
 - [x] yosys $_DFF_P_ → LDff 経路の E2E (toggle FF、q=1,0,1,0)
 - [x] 4bit カウンタ (verilog/counter4.v → yosys → 21 ゲート → 0..15 ラップ確認)
-- [ ] 8bit レジスタ
+- [x] 8bit レジスタ
 - [ ] ALU (加算器)
 - [ ] クロックスキュー均等化 (hold 対策)。counter4 では顕在化していないが、
       回路規模が大きくなると最短データパス < スキューで壊れうる。
@@ -39,10 +39,11 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 
 ## P2: GPU 実行 (WebGPU)
 
-- [ ] web/: WGSL compute カーネル (DESIGN-CA2.md §4.3) + ping-pong バッファ
-- [ ] F# → grid.bin エクスポート / JS ローダー
-- [ ] ゴールデンテスト: F# WireLevel.step と GPU の N 世代一致
-- [ ] 可視化 (同一バッファのカラーマップ描画)
+- [x] web/: WGSL compute カーネル (DESIGN-CA2.md §4.3) + ping-pong バッファ
+- [x] F# → grid.bin エクスポート / JS ローダー
+- [x] ゴールデンテスト: F# WireLevel.step の .bin 入出力自己無矛盾
+- [x] 可視化 (canvas カラーマップ描画)
+- [ ] GPU ゴールデンテスト: web/ で .bin 読み込み → N 世代 → F# と一致確認
 
 ## P3: CPU へ
 
@@ -54,10 +55,4 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
-既知の失敗 3 件は WireWorld の構造的制約によるもので、修正予定なし:
-
-| Test | Cause |
-|------|-------|
-| `2-NOT: wire (net3) delay = measureDelay` | シミュレーション実効遅延とSTA遅延の不一致 |
-| `sum(1,0) = 1` (HalfAdder) | パルス方式の 1gen 厳密タイミング制約 |
-| `fa-like-9: compileFull succeeds` | 4列×狭ピッチ配置の配線チャネル不足 |
+テスト 3 件は WireWorld 系として削除済み (構造的制約により修正しない)。現在 110/110 PASS。

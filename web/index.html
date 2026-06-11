@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WireLevel GPU Simulator</title>
+<style>
+  body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; margin: 0; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 12px 0; color: #00d4ff; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  .controls label { font-size: 13px; }
+  .controls input[type=number] { width: 70px; background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 4px; }
+  .controls button { background: #0f3460; color: #e0e0e0; border: 1px solid #00d4ff; padding: 4px 12px; cursor: pointer; }
+  .controls button:hover { background: #00d4ff; color: #1a1a2e; }
+  .controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .status { font-size: 12px; margin-bottom: 8px; color: #888; }
+  canvas { border: 1px solid #0f3460; image-rendering: pixelated; width: 512px; height: 512px; max-width: 100%; }
+  #log { font-size: 11px; margin-top: 8px; max-height: 200px; overflow-y: auto; background: #16213e; padding: 8px; }
+  #log div { padding: 1px 0; }
+  .err { color: #ff6b6b; }
+  .ok  { color: #51cf66; }
+  .info { color: #74c0fc; }
+</style>
+</head>
+<body>
+<h1>WireLevel GPU Simulator</h1>
+<div class="controls">
+  <label>世代:</label>
+  <input type="number" id="genCount" value="100" min="1" max="100000">
+  <button id="btnStep">▶ 1 世代</button>
+  <button id="btnRun">▶▶ N 世代</button>
+  <button id="btnReset">⟳ 初期化</button>
+  <label>倍率:</label>
+  <input type="number" id="scale" value="4" min="1" max="32">
+  <label>grid.bin:</label>
+  <input type="file" id="fileInput" accept=".bin">
+  <button id="btnExport">⬇ result.bin</button>
+</div>
+<div class="status" id="status">初期化中...</div>
+<canvas id="canvas"></canvas>
+<div id="log"></div>
+
+<script type="module">
+const log = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function logMsg(msg, cls = 'info') {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = msg;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+// Color palette for 6 cell kinds
+const COLORS = [
+  '#1a1a2e', // 0 Empty
+  '#ffd43b', // 1 Pin (yellow)
+  '#00d4ff', // 2 Wire (cyan)
+  '#ff6b6b', // 3 Nand (red)
+  '#51cf66', // 4 Cross (green)
+  '#cc5de8', // 5 Dff (purple)
+];
+// Level-on variants (brighter)
+const COLORS_ON = [
+  '#1a1a2e',
+  '#fff9c4',
+  '#80efff',
+  '#ff9999',
+  '#8ce99a',
+  '#e599f7',
+];
+
+// WGSL shader source
+const shaderCode = await (await fetch('sim.wgsl')).text();
+
+// ---- WebGPU init ----
+let device, queue, pipeline, bindGroup, srcBuf, dstBuf, paramsBuf;
+let width = 0, height = 0;
+let cells = null; // Uint8Array
+let gen = 0;
+let ping = true;
+let running = false;
+
+async function initWebGPU() {
+  const adapter = await navigator.gpu?.requestAdapter();
+  if (!adapter) throw new Error('WebGPU not supported');
+  device = await adapter.requestDevice();
+  queue = device.queue;
+
+  const shader = device.createShaderModule({ code: shaderCode });
+  pipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: { module: shader, entryPoint: 'step' },
+  });
+
+  logMsg('WebGPU ready: ' + adapter.name, 'ok');
+}
+
+// ---- Buffer management ----
+function ensureBuffers(w, h) {
+  const oldW = width, oldH = height;
+  width = w; height = h;
+
+  const cellCount = w * h;
+  const u32Count = Math.ceil(cellCount / 4);
+  const bufSize = u32Count * 4;
+
+  if (oldW !== w || oldH !== h || !srcBuf || srcBuf.size !== bufSize) {
+    srcBuf?.destroy();
+    dstBuf?.destroy();
+    paramsBuf?.destroy();
+
+    srcBuf = device.createBuffer({
+      size: bufSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    dstBuf = device.createBuffer({
+      size: bufSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    paramsBuf = device.createBuffer({
+      size: 12, // 3 x u32
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: srcBuf } },
+        { binding: 1, resource: { buffer: dstBuf } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+      ],
+    });
+
+    // Initially source buffer gets the grid data
+    updateParams();
+  }
+}
+
+function updateParams() {
+  queue.writeBuffer(paramsBuf, 0, new Uint32Array([width, height, 0]));
+}
+
+function packCells(w, h, cellData) {
+  const cellCount = w * h;
+  const u32Count = Math.ceil(cellCount / 4);
+  const buf = new Uint32Array(u32Count);
+  for (let i = 0; i < cellCount; i++) {
+    const wordIdx = i >> 2;
+    const shift = (i & 3) * 8;
+    buf[wordIdx] |= (cellData[i] & 0xFF) << shift;
+  }
+  return buf;
+}
+
+function unpackCells(w, h, packed) {
+  const cellCount = w * h;
+  const out = new Uint8Array(cellCount);
+  for (let i = 0; i < cellCount; i++) {
+    const wordIdx = i >> 2;
+    const shift = (i & 3) * 8;
+    out[i] = (packed[wordIdx] >> shift) & 0xFF;
+  }
+  return out;
+}
+
+function uploadGrid(w, h, cellData) {
+  ensureBuffers(w, h);
+  const packed = packCells(w, h, cellData);
+  queue.writeBuffer(srcBuf, 0, packed);
+  queue.writeBuffer(dstBuf, 0, packed);
+  ping = true;
+  gen = 0;
+  cells = new Uint8Array(cellData);
+  render();
+  statusEl.textContent = `${w}×${h}, ${cellData.filter(b => b !== 0).length} cells, gen=${gen}`;
+}
+
+function downloadResult() {
+  const cellCount = width * height;
+  const u32Count = Math.ceil(cellCount / 4);
+  const buf = ping ? srcBuf : dstBuf;
+
+  const readBuf = device.createBuffer({
+    size: u32Count * 4,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(buf, 0, readBuf, 0, u32Count * 4);
+  device.queue.submit([encoder.finish()]);
+
+  return readBuf.mapAsync(GPUMapMode.READ).then(() => {
+    const packed = new Uint32Array(readBuf.getMappedRange());
+    const out = unpackCells(width, height, packed);
+    readBuf.unmap();
+    readBuf.destroy();
+    return out;
+  });
+}
+
+// ---- Simulation ----
+async function stepGPU() {
+  if (!srcBuf) return;
+
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+
+  // Swap buffers: src = ping ? srcBuf : dstBuf, dst = ping ? dstBuf : srcBuf
+  const src = ping ? srcBuf : dstBuf;
+  const dst = ping ? dstBuf : srcBuf;
+  bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: src } },
+      { binding: 1, resource: { buffer: dst } },
+      { binding: 2, resource: { buffer: paramsBuf } },
+    ],
+  });
+  pass.setBindGroup(0, bindGroup);
+
+  const gx = Math.ceil(width / 16);
+  const gy = Math.ceil(height / 16);
+  pass.dispatchWorkgroups(gx, gy);
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+
+  ping = !ping;
+  gen++;
+}
+
+async function runN(n) {
+  running = true;
+  for (let i = 0; i < n; i++) {
+    if (!running) break;
+    await stepGPU();
+    if (i % 100 === 0 || i === n - 1) {
+      statusEl.textContent = `${width}×${height}, gen=${gen}`;
+      await readAndRender();
+    }
+  }
+  running = false;
+}
+
+async function readAndRender() {
+  const buf = ping ? srcBuf : dstBuf;
+  const cellCount = width * height;
+  const u32Count = Math.ceil(cellCount / 4);
+
+  const readBuf = device.createBuffer({
+    size: u32Count * 4,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(buf, 0, readBuf, 0, u32Count * 4);
+  device.queue.submit([encoder.finish()]);
+
+  await readBuf.mapAsync(GPUMapMode.READ);
+  const packed = new Uint32Array(readBuf.getMappedRange());
+  cells = unpackCells(width, height, packed);
+  readBuf.unmap();
+  readBuf.destroy();
+  render();
+}
+
+function render() {
+  if (!cells) return;
+  const scale = parseInt(document.getElementById('scale').value) || 4;
+  canvas.width = width * scale;
+  canvas.height = height * scale;
+
+  const imgData = ctx.createImageData(width, height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const b = cells[y * width + x];
+      const k = (b >> 5) & 7;
+      const lvl = b & 1;
+      const palette = lvl ? COLORS_ON : COLORS;
+      const hex = palette[k] || '#000';
+      const r = parseInt(hex.slice(1,3), 16);
+      const g = parseInt(hex.slice(3,5), 16);
+      const bl = parseInt(hex.slice(5,7), 16);
+      const i = (y * width + x) * 4;
+      imgData.data[i] = r;
+      imgData.data[i+1] = g;
+      imgData.data[i+2] = bl;
+      imgData.data[i+3] = 255;
+    }
+  }
+
+  // Scale up using a temp canvas
+  const tmpCanvas = document.createElement('canvas');
+  tmpCanvas.width = width;
+  tmpCanvas.height = height;
+  const tmpCtx = tmpCanvas.getContext('2d');
+  tmpCtx.putImageData(imgData, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tmpCanvas, 0, 0, width * scale, height * scale);
+}
+
+// ---- File I/O ----
+function loadGridBin(data) {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (data.byteLength < 8) throw new Error('File too small');
+  const w = view.getUint32(0, true);
+  const h = view.getUint32(4, true);
+  const expected = 8 + w * h;
+  if (data.byteLength !== expected) {
+    throw new Error(`Size mismatch: expected ${expected}, got ${data.byteLength}`);
+  }
+  const cellData = new Uint8Array(data.buffer, data.byteOffset + 8, w * h);
+  logMsg(`Loaded ${w}×${h} grid (${cellData.filter(b => b !== 0).length} cells)`, 'ok');
+  uploadGrid(w, h, cellData);
+}
+
+function exportResultBin() {
+  if (!cells) return;
+  downloadResult().then(cellData => {
+    const header = new Uint32Array([width, height]);
+    const buf = new Uint8Array(8 + cellData.length);
+    new DataView(buf.buffer).setUint32(0, width, true);
+    new DataView(buf.buffer).setUint32(4, height, true);
+    buf.set(cellData, 8);
+
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `result_${gen}gen.bin`;
+    a.click();
+    URL.revokeObjectURL(url);
+    logMsg(`Exported result.bin (gen=${gen})`, 'ok');
+  });
+}
+
+// ---- Demo: toggle FF circuit ----
+function buildToggleFF() {
+  // Simple toggle FF manually assembled
+  // DFF(output E) + NOT(output W) feedback loop, clk pin at (0,0)
+  // Grid: 12 × 9
+  const w = 12, h = 9;
+  const data = new Uint8Array(w * h);
+
+  // Helper: set cell at (x,y)
+  const set = (x, y, val) => { data[y * w + x] = val; };
+
+  // Pin (clk) at (0,0) = 001_00_000 | 0 = 0x20
+  set(0, 0, 0x20); // Pin(0)
+
+  // Wires: clk -> DFF side
+  // (0,0) -> (1,0) Wire(E)
+  set(1, 0, 0b010_00_000); // Wire(E)
+
+  // DFF at (2,4), output E, clk from S side
+  // Wire from (1,0) down to (2,3)-(2,4) region
+  // Actually let me just build a minimal toggleFF using ofAsciiL format translated
+
+  // For the demo, let's use a prebuilt toggle FF
+  // Too complex for manual byte construction; use file upload instead
+  logMsg('Built-in demo TBD — use file upload with a compiled grid.bin', 'err');
+}
+
+// ---- Event handlers ----
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => loadGridBin(new Uint8Array(reader.result));
+  reader.readAsArrayBuffer(file);
+});
+
+document.getElementById('btnStep').addEventListener('click', async () => {
+  if (running) return;
+  await stepGPU();
+  statusEl.textContent = `${width}×${height}, gen=${gen}`;
+  await readAndRender();
+});
+
+document.getElementById('btnRun').addEventListener('click', async () => {
+  if (running) return;
+  const n = parseInt(document.getElementById('genCount').value) || 100;
+  document.getElementById('btnRun').disabled = true;
+  await runN(n);
+  document.getElementById('btnRun').disabled = false;
+  statusEl.textContent = `${width}×${height}, gen=${gen}`;
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  if (running) return;
+  if (cells) uploadGrid(width, height, cells);
+});
+
+document.getElementById('btnExport').addEventListener('click', exportResultBin);
+
+document.getElementById('scale').addEventListener('change', render);
+
+// ---- Init ----
+try {
+  await initWebGPU();
+  statusEl.textContent = 'grid.bin を開くか、ドラッグ&ドロップ';
+  logMsg('WebGPU 初期化完了', 'ok');
+} catch (e) {
+  statusEl.textContent = 'Error: ' + e.message;
+  logMsg(e.message, 'err');
+}
+</script>
+</body>
+</html>
