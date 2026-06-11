@@ -90,7 +90,7 @@ function logMsg(msg, cls = 'info') {
 const COLORS = ['#1a1a2e','#ffd43b','#00d4ff','#ff6b6b','#51cf66','#cc5de8'];
 const COLORS_ON = ['#1a1a2e','#fff9c4','#80efff','#ff9999','#8ce99a','#e599f7'];
 
-const shaderCode = `// WireLevel WGSL compute shader (see index.html for full source)
+const shaderCode = `
 const E: u32 = 0u; const W: u32 = 1u; const N: u32 = 2u; const S: u32 = 3u;
 const K_EMPTY: u32 = 0u; const K_PIN: u32 = 1u; const K_WIRE: u32 = 2u; const K_NAND: u32 = 3u; const K_CROSS: u32 = 4u; const K_DFF: u32 = 5u;
 struct Params { width: u32, height: u32, flags: u32, }
@@ -102,6 +102,8 @@ fn dir(c: u32) -> u32 { return (c >> 3u) & 3u; }
 fn level(c: u32) -> u32 { return c & 1u; }
 fn opposite(d: u32) -> u32 { switch (d) { case E: { return W; } case W: { return E; } case N: { return S; } default: { return N; } } }
 fn delta(d: u32) -> vec2<i32> { switch (d) { case E: { return vec2( 1,  0); } case W: { return vec2(-1,  0); } case N: { return vec2( 0, -1); } default: { return vec2( 0,  1); } } }
+fn cellAtStorage(s: ptr<storage, array<u32>>, i: u32) -> u32 { return (*s)[i]; }
+fn setCell(d: ptr<storage, array<u32>, read_write>, i: u32, v: u32) { (*d)[i] = v; }
 fn presentedTo(c: u32, toward: u32) -> u32 {
   let k = kind(c);
   if (k == K_EMPTY) { return 0xFFFFFFFFu; }
@@ -116,34 +118,34 @@ fn presentedTo(c: u32, toward: u32) -> u32 {
   }
   return 0xFFFFFFFFu;
 }
-fn pullFrom(src: ptr<storage, array<u32>>, x: i32, y: i32, side: u32) -> u32 {
+fn pullFrom(s: ptr<storage, array<u32>>, x: i32, y: i32, side: u32) -> u32 {
   let d = delta(side);
   let nx = x + d.x; let ny = y + d.y;
   if (nx < 0 || ny < 0 || nx >= i32(dims.width) || ny >= i32(dims.height)) { return 0xFFFFFFFFu; }
-  return presentedTo((*src)[u32(ny) * dims.width + u32(nx)], opposite(side));
+  return presentedTo(cellAtStorage(s, u32(ny) * dims.width + u32(nx)), opposite(side));
 }
-fn stepCell(src: ptr<storage, array<u32>>, x: i32, y: i32) -> u32 {
+fn stepCell(s: ptr<storage, array<u32>>, x: i32, y: i32) -> u32 {
   let i = u32(y) * dims.width + u32(x);
-  let cell = (*src)[i]; let k = kind(cell);
+  let cell = cellAtStorage(s, i); let k = kind(cell);
   if (k == K_EMPTY || k == K_PIN) { return cell; }
-  if (k == K_WIRE) { return (cell & 0xF8u) | select(0u, 1u, pullFrom(src, x, y, opposite(dir(cell))) == 1u); }
+  if (k == K_WIRE) { return (cell & 0xF8u) | select(0u, 1u, pullFrom(s, x, y, opposite(dir(cell))) == 1u); }
   if (k == K_NAND) {
     let d = dir(cell); var allTrue: bool = true; var anyInput: bool = false;
-    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
-      if (s != d) { let v = pullFrom(src, x, y, s); if (v != 0xFFFFFFFFu) { anyInput = true; if (v == 0u) { allTrue = false; } } }
+    for (var side: u32 = 0u; side < 4u; side = side + 1u) {
+      if (side != d) { let v = pullFrom(s, x, y, side); if (v != 0xFFFFFFFFu) { anyInput = true; if (v == 0u) { allTrue = false; } } }
     }
     return (cell & 0xF8u) | select(0u, 1u, anyInput && !allTrue);
   }
   if (k == K_CROSS) {
     let hd = select(E, W, ((cell >> 4u) & 1u) == 1u); let vd = select(N, S, ((cell >> 3u) & 1u) == 1u);
-    let hv = pullFrom(src, x, y, opposite(hd)); let vv = pullFrom(src, x, y, opposite(vd));
+    let hv = pullFrom(s, x, y, opposite(hd)); let vv = pullFrom(s, x, y, opposite(vd));
     return (cell & 0xF8u) | (select(0u, 1u, vv == 1u) << 1u) | select(0u, 1u, hv == 1u);
   }
   if (k == K_DFF) {
-    let d = dir(cell); let dVal = select(0u, 1u, pullFrom(src, x, y, opposite(d)) == 1u);
+    let d = dir(cell); let dVal = select(0u, 1u, pullFrom(s, x, y, opposite(d)) == 1u);
     var clk: bool = false;
-    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
-      if (((d == E || d == W) && (s == N || s == S)) || ((d == N || d == S) && (s == E || s == W))) { if (pullFrom(src, x, y, s) == 1u) { clk = true; } }
+    for (var side: u32 = 0u; side < 4u; side = side + 1u) {
+      if (((d == E || d == W) && (side == N || side == S)) || ((d == N || d == S) && (side == E || side == W))) { if (pullFrom(s, x, y, side) == 1u) { clk = true; } }
     }
     let prevClk = (cell >> 1u) & 1u;
     return (cell & 0xF8u) | (select(0u, 1u, clk) << 1u) | select(cell & 1u, dVal, clk && prevClk == 0u);
@@ -154,16 +156,12 @@ fn stepCell(src: ptr<storage, array<u32>>, x: i32, y: i32) -> u32 {
 fn step(@builtin(global_invocation_id) gid: vec3u) {
   let x = i32(gid.x); let y = i32(gid.y);
   if (x >= i32(dims.width) || y >= i32(dims.height)) { return; }
-  setCell(&dst, u32(y) * dims.width + u32(x), stepCell(&src, x, y));
+  let i = u32(y) * dims.width + u32(x);
+  let newCell = stepCell(&src, x, y);
+  setCell(&dst, i, newCell);
 }
 `;
-// fix: add setCell function
-const shaderCodeFixed = shaderCode.replace(
-  'fn step(@builtin(global_invocation_id) gid: vec3u)',
-  `fn setCell(dst: ptr<storage, array<u32>, read_write>, i: u32, val: u32) { (*dst)[i] = val; }
-fn step(@builtin(global_invocation_id) gid: vec3u)`
-);
-const shaderCodeFull = shaderCodeFixed;
+const shaderCodeFull = shaderCode;
 
 // ---- WebGPU state ----
 let device, queue, pipeline, bindGroup, srcBuf, dstBuf, paramsBuf;
