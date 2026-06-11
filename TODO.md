@@ -1,6 +1,6 @@
 # WireWorld/WireLevel コンパイラ TODO
 
-## 現在のテスト結果: 128/128 passed (WireLevel 13/13, 8bit レジスタ, Golden 5/5, ALU 13/13 🎉)
+## 現在のテスト結果: 144/144 passed (WireLevel 13/13, 8bit レジスタ, Golden 5/5, ALU2 14/14, ALU4 13/13, ClockSkew 2/2 🎉)
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
 
@@ -15,7 +15,7 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 ## P0: パイプラインの WireLevel 化 ✅ 完了 (2026-06-11, PipelineWL.fs)
 
 - [x] compileWL: yosys JSON → LGrid (techMap は 1 セルゲートなので compileWL 内で完結)
-- [x] placeWL: 正方格子配置 (pitchX=16, pitchY=12) + 左端ピン列
+- [x] placeWL: 正方格子配置 (pitchX=24, pitchY=16 — alu4 輻輳対策で拡大) + 左端ピン列
 - [x] routeWL: (Coord,Dir) 状態 A*、Cross 化直交通過、ゲート隣接クリアランス、
       ファンアウトタップ (タップ元は非交差化)
 - [x] クロック配線 (通常ネットとして DFF S 側面へ。均等化は未実装 → P1 残課題)
@@ -27,10 +27,20 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 - [x] yosys $_DFF_P_ → LDff 経路の E2E (toggle FF、q=1,0,1,0)
 - [x] 4bit カウンタ (verilog/counter4.v → yosys → 21 ゲート → 0..15 ラップ確認)
 - [x] 8bit レジスタ
-- [x] ALU (2bit ADD/AND/OR/XOR, 13 tests)
-- [ ] クロックスキュー均等化 (hold 対策)。counter4 では顕在化していないが、
-      回路規模が大きくなると最短データパス < スキューで壊れうる。
-      WireLevel は遅延 = パス長そのものなので、クロック枝の長さを揃えるだけでよい
+- [x] ALU (2bit ADD/AND/OR/XOR, 14 tests)
+- [x] ALU 4bit (verilog/alu4.v → yosys → 85 ゲート, 13 tests)。
+      初回は RoutingCongestion で失敗 → A* に転回ペナルティ (+4) を導入し
+      経路を直線化 (直線セルのみ交差可のため後続ネットの交差点が増える)、
+      pitchX=24 / pitchY=16 に拡大して解消
+- [x] クロックスキュー均等化 (hold 対策, 2026-06-11)。counter4/reg8 で skew=0 達成。
+      実装 (PipelineWL.routeWL 内 balanceClockNet):
+      * DFF クロック終端をタップ禁止に (数珠つなぎ分配だと均等化が原理的に不可能)
+      * 各終端の専有サフィックス (リーフ edge) のみ延長 → 木の再帰均等化が不要
+      * 延長は (1) 直線 run のコの字バンプ (+2h)、足りなければ
+        (2) リーフ edge を撤去して幹の任意点から「到達 = tMax」の正確長 DFS で再配線
+        (スラック消費優先の方向順序 + パリティ/残距離枝刈り + 自己重複禁止)
+      * 経路長のパリティは端点で固定のため、tMax / tMax-1 の両方を試す (残差 ≤1)
+      * 検証: WireLevel.clockArrivals (終端からの逆走でパス長 = 到達世代を実測)
 
 ### 学んだ設計則
 
@@ -43,7 +53,15 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 - [x] F# → grid.bin エクスポート / JS ローダー
 - [x] ゴールデンテスト: F# WireLevel.step の .bin 入出力自己無矛盾
 - [x] 可視化 (canvas カラーマップ描画)
-- [ ] GPU ゴールデンテスト: web/ で .bin 読み込み → N 世代 → F# と一致確認
+- [x] GPU ゴールデンテスト (2026-06-11, `web/run-test.sh` で 2/2 PASS)。
+      未収束 init (ピン設定直後) → GPU N 世代 → F# settle 結果とバイト一致。
+      * Playwright はヘッドレスでは SwiftShader adapter。`--enable-unsafe-webgpu`
+        が必須 (旧 `--enable-webgpu` は実在しないスイッチで、テストは skip していた)
+      * headless-shell ビルドは WebGPU 非対応 → `channel: 'chromium'` を使う
+      * Pop!_OS 等ではシステムライブラリで動く。NixOS では flake.nix の
+        WWC_CHROMIUM_LIBS を run-test.sh が LD_LIBRARY_PATH に注入
+      * 正式ランナーは Playwright (web/run-test.sh)。旧マシン (Vivaldi/NixOS)
+        前提だった golden-test-puppeteer.mjs は削除済み
 
 ## P3: CPU へ
 

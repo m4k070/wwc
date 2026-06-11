@@ -1674,7 +1674,7 @@ module WlAluTest =
                 let desc = sprintf "A=%d B=%d op=%d -> %d (exp %d)" a b op result expected
                 desc, result = expected
 
-            [ "WL-ALU: compile succeeds",          true
+            [ yield ("WL-ALU: compile succeeds", true)
               yield test (false,false,false,false,false,false) 0  // ADD 0+0=0
               yield test (true, false,false,false,false,false) 1  // ADD 1+0=1
               yield test (false,false,true, false,false,false) 1  // ADD 0+1=1
@@ -1690,3 +1690,93 @@ module WlAluTest =
               yield test (true, false,true, false,true, true) 0 ] // XOR 1^1=0
 
     let runAll () : (string * bool) list = testResults
+
+// ---------------------------------------------------------------------
+// WL-ALU4: 4bit ALU (ADD/AND/OR/XOR) の E2E テスト
+//   Verilog → yosys → WireLevel → 真理値表検証
+// ---------------------------------------------------------------------
+module WlAlu4Test =
+    open Domain
+    open WireLevel
+    open PipelineWL
+    open Netlist
+
+    let private alu4Json = System.IO.File.ReadAllText("verilog/alu4.json")
+
+    let private testResults =
+        match compileWL alu4Json with
+        | Error e -> [ "WL-ALU4: compile succeeds", false ]
+        | Ok (grid, placed, pins) ->
+            let coords = grid |> Map.toList |> List.map fst
+            let minX = coords |> List.map (fun c -> c.X) |> List.min
+            let minY = coords |> List.map (fun c -> c.Y) |> List.min
+            let offset = { X = minX; Y = minY }
+            let bin = exportGrid grid
+            let grid0 = importGridWithOffset offset bin
+
+            // yosys ポート: A=[2..5] B=[6..9] op=[10,11] Y=[12..15]
+            let pinA = [| for i in 0..3 -> pins.[NetId (2 + i)] |]
+            let pinB = [| for i in 0..3 -> pins.[NetId (6 + i)] |]
+            let pinOp = [| for i in 0..1 -> pins.[NetId (10 + i)] |]
+            let outY =
+                [| for i in 0..3 ->
+                     placed |> List.find (fun p -> p.Gate.Output = NetId (12 + i)) |> fun p -> p.Coord |]
+
+            let bit v i = (v >>> i) &&& 1 = 1
+
+            let test (a: int) (b: int) (op: int) (expected: int) =
+                let mutable g = grid0
+                for i in 0..3 do
+                    g <- g |> setPin pinA.[i] (bit a i) |> setPin pinB.[i] (bit b i)
+                for i in 0..1 do
+                    g <- g |> setPin pinOp.[i] (bit op i)
+                let g = settle 4000 g |> fst
+                let result =
+                    [0..3] |> List.sumBy (fun i -> if levelOf g outY.[i] then 1 <<< i else 0)
+                let desc = sprintf "A=%d B=%d op=%d -> %d (exp %d)" a b op result expected
+                desc, result = expected
+
+            [ yield ("WL-ALU4: compile succeeds", true)
+              yield test 0  0  0 0   // ADD 0+0=0
+              yield test 5  3  0 8   // ADD 5+3=8
+              yield test 15 1  0 0   // ADD 15+1=0 (mod 16)
+              yield test 12 5  0 1   // ADD 12+5=1 (mod 16)
+              yield test 9  6  0 15  // ADD 9+6=15
+              yield test 12 10 1 8   // AND 12&10=8
+              yield test 15 9  1 9   // AND 15&9=9
+              yield test 5  10 1 0   // AND 5&10=0
+              yield test 12 10 2 14  // OR  12|10=14
+              yield test 5  0  2 5   // OR  5|0=5
+              yield test 12 10 3 6   // XOR 12^10=6
+              yield test 15 15 3 0 ] // XOR 15^15=0
+
+    let runAll () : (string * bool) list = testResults
+
+// ---------------------------------------------------------------------
+// WL-SKEW: クロックスキュー均等化の検証 (P1 hold 対策)
+//   WireLevel は配線セル 1 個 = 1 世代なので、全 DFF のクロック到達世代が
+//   揃っていればスキューによる hold 違反は起きない。
+//   パリティ (経路長の偶奇は端点で固定) のため残差 1 までは許容する。
+// ---------------------------------------------------------------------
+module WlClockSkewTest =
+    open WireLevel
+    open PipelineWL
+
+    let private skewOf (jsonPath: string) =
+        let json = System.IO.File.ReadAllText(jsonPath)
+        match compileWL json with
+        | Error _ -> None
+        | Ok (grid, _, _) ->
+            match clockArrivals grid |> List.map snd with
+            | [] -> Some (0, 0)
+            | arrivals -> Some (List.max arrivals - List.min arrivals, arrivals.Length)
+
+    let runAll () : (string * bool) list =
+        [ match skewOf "verilog/counter4.json" with
+          | None -> yield "WL-SKEW: counter4 compile succeeds", false
+          | Some (skew, n) ->
+              yield sprintf "WL-SKEW: counter4 %d DFFs skew=%d (<=1)" n skew, skew <= 1
+          match skewOf "verilog/reg8.json" with
+          | None -> yield "WL-SKEW: reg8 compile succeeds", false
+          | Some (skew, n) ->
+              yield sprintf "WL-SKEW: reg8 %d DFFs skew=%d (<=1)" n skew, skew <= 1 ]

@@ -20,7 +20,7 @@
   "homepage": "https://github.com/m4k070/wwc#readme",
   "devDependencies": {
     "@playwright/test": "^1.60.0",
-    "playwright": "^1.60.0",
-    "puppeteer-core": "^25.1.0"
+    "@types/node": "^25.9.3",
+    "playwright": "^1.60.0"
   }
 }

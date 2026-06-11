@@ -35,6 +35,12 @@ match compileWL toggleJson with
     File.WriteAllBytes(Path.Combine(outDir, "toggle_init.bin"), initBin)
     printfn "toggle_init.bin: %d bytes (grid %d cells)" initBin.Length (grid |> Map.count)
 
+    // clk=1 設定直後 (未収束) — GPU ゴールデンテストの初期状態。
+    // GPU で N 世代回すと toggle_clk1.bin (収束状態) に一致するはず
+    let g1init = setPin clkPin true grid
+    File.WriteAllBytes(Path.Combine(outDir, "toggle_clk1_init.bin"), exportGrid g1init)
+    printfn "toggle_clk1_init.bin: %d bytes" (exportGrid g1init).Length
+
     // clk=1 に設定して settle → エクスポート
     let g1 = fst (settle 2000 (setPin clkPin true grid))
     let step1Bin = exportGrid g1
@@ -74,10 +80,28 @@ match compileWL haJson with
     File.WriteAllBytes(Path.Combine(outDir, "ha_init.bin"), haInit)
     printfn "ha_init.bin: %d bytes (grid %d cells)" haInit.Length (grid |> Map.count)
 
+    // a=1,b=1 設定直後 (未収束) — GPU ゴールデンテストの初期状態
+    let gInit = grid |> setPin pins.[NetId 2] true |> setPin pins.[NetId 3] true
+    File.WriteAllBytes(Path.Combine(outDir, "ha_11_init.bin"), exportGrid gInit)
+    printfn "ha_11_init.bin: %d bytes" (exportGrid gInit).Length
+
     // a=1,b=1 → carry=1, sum=0 を settle で確認
-    let g = grid |> setPin pins.[NetId 2] true |> setPin pins.[NetId 3] true |> settle 1000 |> fst
+    let g = gInit |> settle 1000 |> fst
     let ha11 = exportGrid g
     File.WriteAllBytes(Path.Combine(outDir, "ha_11.bin"), ha11)
     printfn "ha_11.bin: %d bytes" ha11.Length
+
+// ALU (yosys 合成済み JSON から)
+let exportAlu (name: string) =
+    let path = Path.Combine(__SOURCE_DIRECTORY__, "..", "verilog", name + ".json")
+    match compileWL (File.ReadAllText path) with
+    | Error e -> eprintfn "%s compile error: %A" name e
+    | Ok (grid, _, _) ->
+        let bin = exportGrid grid
+        File.WriteAllBytes(Path.Combine(outDir, name + "_init.bin"), bin)
+        printfn "%s_init.bin: %d bytes (grid %d cells)" name bin.Length (grid |> Map.count)
+
+exportAlu "alu2"
+exportAlu "alu4"
 
 printfn "\nDone. Run 'python3 -m http.server' in web/ to view."

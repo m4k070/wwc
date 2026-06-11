@@ -147,6 +147,36 @@ module WireLevel =
         | Cross (_, _, hv, _) -> hv
         | LDff (_, q, _) -> q
 
+    /// 各 DFF のクロック到達世代 (= クロック側終端から駆動源までのセル数) を測る。
+    /// クロックスキュー検証用。配線セル 1 個 = 1 世代なので、パス長がそのまま遅延。
+    /// 戻り値: (DFF 座標, 到達世代)。クロック未接続の DFF は含まない。
+    let clockArrivals (g: LGrid) : (Coord * int) list =
+        let addD (c: Coord) (d: Dir) = { X = c.X + (delta d).X; Y = c.Y + (delta d).Y }
+        let subD (c: Coord) (d: Dir) = { X = c.X - (delta d).X; Y = c.Y - (delta d).Y }
+        let cap = Map.count g + 1
+        g |> Map.toList |> List.choose (fun (c, cell) ->
+            match cell with
+            | LDff (dir, _, _) ->
+                let clkSides = match dir with E | W -> [N; S] | N | S -> [E; W]
+                clkSides
+                |> List.tryPick (fun s ->
+                    let t = addD c s
+                    match getL g t with
+                    | LWire (d, _) -> Some (t, d)
+                    | _ -> None)
+                |> Option.map (fun (t, d0) ->
+                    // 終端から駆動源 (Pin/ゲート) まで逆走。Cross は直進チャネルを辿る。
+                    let rec go (cur: Coord) (dIn: Dir) (n: int) =
+                        if n > cap then n
+                        else
+                            let prev = subD cur dIn
+                            match getL g prev with
+                            | LWire (d2, _) -> go prev d2 (n + 1)
+                            | Cross _ -> go prev dIn (n + 1)
+                            | _ -> n
+                    c, go t d0 1)
+            | _ -> None)
+
     /// ASCII アートから LGrid を組む。
     ///   '.' = 空, '>' '<' '^' 'v' = Wire E/W/N/S (向き = 信号の進行方向)
     ///   'E' 'W' 'N' 'S' = NAND (出力方向)

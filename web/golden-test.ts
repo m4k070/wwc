@@ -3,17 +3,20 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 const WEB_DIR = join(__dirname);
+// init = ピン設定直後の未収束状態 (F# ExportGrid.fsx が生成)。
+// GPU で steps 世代回すと expected (F# settle の収束状態) に一致するはず。
+// ピン値はステップで変化しないので、init と expected のピン状態は同一であること。
 const TEST_CASES = [
   {
     name: 'toggleFF',
-    initFile: 'toggle_init.bin',
+    initFile: 'toggle_clk1_init.bin',
     steps: 1000,
     expectedFile: 'toggle_clk1.bin',
   },
   {
     name: 'halfAdder',
-    initFile: 'ha_init.bin',
-    steps: 100,
+    initFile: 'ha_11_init.bin',
+    steps: 1000,
     expectedFile: 'ha_11.bin',
   },
 ];
@@ -77,7 +80,8 @@ for (const tc of TEST_CASES) {
     // Enable WebGPU flags are needed - but Playwright Chromium may need explicit flags
     // Check if WebGPU is available
     const webgpuSupported = await page.evaluate(async () => {
-      return !!(navigator.gpu && await navigator.gpu.requestAdapter());
+      const gpu = (navigator as any).gpu;
+      return !!(gpu && await gpu.requestAdapter());
     });
 
     if (!webgpuSupported) {
@@ -93,7 +97,13 @@ for (const tc of TEST_CASES) {
     const resultBin = await runGPUSimulation(page, initBin, tc.steps);
 
     console.log(`Comparing results for ${tc.name}...`);
-    compareBins(resultBin, expectedBin, tc.name);
+    // downloadResult() は 8 バイトヘッダなしの生セル配列を返す。
+    // 寸法はヘッダから検証し、セル部分のみ比較する。
+    const view = new DataView(expectedBin.buffer, expectedBin.byteOffset);
+    const w = view.getUint32(0, true);
+    const h = view.getUint32(4, true);
+    expect(resultBin.length, `${tc.name}: cell count`).toBe(w * h);
+    compareBins(resultBin, expectedBin.slice(8), tc.name);
 
     console.log(`✓ ${tc.name} passed`);
   });

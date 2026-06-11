@@ -18,20 +18,22 @@ export default defineConfig({
       name: 'chromium-webgpu',
       use: {
         ...devices['Desktop Chrome'],
+        // headless-shell ビルドは WebGPU adapter を持たないため、
+        // フル Chromium の新 headless モードを使う
+        channel: 'chromium',
         launchOptions: {
+          // WebGPU はヘッドレスでは SwiftShader (CPU) adapter で動かす。
+          // --enable-unsafe-webgpu が必須 (--enable-webgpu は実在しないスイッチ)。
           args: [
-            '--enable-webgpu',
-            '--use-vulkan=native',
-            '--enable-features=Vulkan,WebGPU',
+            '--enable-unsafe-webgpu',
+            '--enable-unsafe-swiftshader',
+            '--enable-features=Vulkan',
             '--ignore-gpu-blocklist',
-            '--disable-gpu-driver-workarounds',
             '--no-sandbox',
             '--disable-setuid-sandbox',
           ],
         },
-        env: {
-          LD_LIBRARY_PATH: '/nix/store/3x4lz5q9k2l4vz5q9k2l4vz5q9k2l4vz5/lib:/nix/store/glib-2.80.0/lib:/nix/store/nss-3.99/lib:/nix/store/nspr-4.35/lib:/nix/store/dbus-1.14.10/lib:/nix/store/at-spi2-core-2.50.0/lib:/nix/store/cups-2.4.7/lib:/nix/store/libxkbfile-1.1.2/lib:/nix/store/libxcomposite-0.4.5/lib:/nix/store/libxdamage-1.1.6/lib:/nix/store/libxfixes-6.0.0/lib:/nix/store/libxrandr-1.5.3/lib:/nix/store/libgbm-24.0.7/lib:/nix/store/alsa-lib-1.2.10/lib:/nix/store/pulseaudio-17.0/lib',
-        },
+        // LD_LIBRARY_PATH は run-test.sh が export し、子プロセスに継承される
       },
     },
   ],

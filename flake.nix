@@ -10,6 +10,23 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        # Playwright Chromium が実行時に必要とする共有ライブラリ群
+        chromiumLibs = with pkgs; [
+          glib
+          nss
+          nspr
+          dbus
+          at-spi2-core
+          cups
+          libxkbfile
+          libxcomposite
+          libxdamage
+          libxfixes
+          libxrandr
+          libgbm
+          alsa-lib
+          pulseaudio
+        ];
       in {
         devShells.default = pkgs.mkShell {
           name = "wwc";
@@ -29,25 +46,13 @@
 
             # Node.js (Playwright + WebGPU テスト用)
             nodejs_22
-            # Playwright Chromium 依存ライブラリ
-            glib
-            nss
-            nspr
-            dbus
-            at-spi2-core
-            cups
-            libxkbfile
-            libxcomposite
-            libxdamage
-            libxfixes
-            libxrandr
-            libgbm
-            alsa-lib
-            pulseaudio
 
             # ユーティリティ
             git
-          ];
+          ] ++ chromiumLibs;
+
+          # web/run-test.sh が Chromium 用 LD_LIBRARY_PATH の構築に使う
+          WWC_CHROMIUM_LIBS = pkgs.lib.makeLibraryPath chromiumLibs;
 
           shellHook = ''
             echo "wwc dev shell"
@@ -61,6 +66,7 @@
             echo "  dotnet fsi src/ExportRLE.fsx         # Golly RLE 生成 → golly/"
             echo "  python3 scripts/verify_cells.py      # セルライブラリ検証"
             echo "  golly golly/cell_junc3.rle           # Golly GUI で確認"
+            echo "  web/run-test.sh                      # WebGPU ゴールデンテスト"
           '';
         };
       });
