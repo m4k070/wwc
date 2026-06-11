@@ -336,17 +336,17 @@ async function toggleClock() {
 
 // Auto-cycle: CLK=1 settle → CLK=0 settle → CLK=1 settle → ...
 let cycleRunning = false;
-async function autoCycle(stepsPerPhase = 100) {
+async function autoCycle(stepsPerPhase = 500) {
   if (cycleRunning || !width) return;
   cycleRunning = true;
   document.getElementById('btnCycle').disabled = true;
   for (let cyc = 0; cyc < 20 && cycleRunning; cyc++) {
     // CLK=1 phase
     if (!clockHigh) await toggleClock();
-    await stepN(stepsPerPhase, 20);
+    await stepN(stepsPerPhase, 50);
     // CLK=0 phase
     if (clockHigh) await toggleClock();
-    await stepN(stepsPerPhase, 20);
+    await stepN(stepsPerPhase, 50);
     const v = readOutputValue();
     logMsg(`cycle ${cyc + 1}: out=0x${v.toString(16).toUpperCase()} gen=${gen}`, 'ok');
     if (v !== 0) break; // stop if output changed
@@ -445,7 +445,7 @@ async function loadMincpu() {
 
 document.getElementById('btnLoad').addEventListener('click', loadMincpu);
 document.getElementById('btnClock').addEventListener('click', toggleClock);
-document.getElementById('btnCycle').addEventListener('click', () => autoCycle(80));
+document.getElementById('btnCycle').addEventListener('click', () => autoCycle(500));
 
 document.getElementById('btnStep').addEventListener('click', async () => {
   if (running) return;
