@@ -52,12 +52,15 @@
 
   <div class="btn-row">
     <button id="btnLoad">⬇ Load mincpu</button>
-    <button id="btnPlay">▶ Play</button>
+    <button id="btnClock">🔄 Toggle CLK</button>
+    <button id="btnCycle">🔁 Auto Cycle</button>
     <button id="btnStep">⏭ Step 1</button>
     <button id="btnStepN">⏩ Step 100</button>
     <button id="btnReset">⟳ Reset</button>
+    <button id="btnPlay">▶ Play</button>
   </div>
 
+  <div class="stat-row"><span class="stat-label">CLK</span><span class="stat-value" id="statClk">0</span></div>
   <div class="stat-row"><span class="stat-label">Generation</span><span class="stat-value" id="statGen">0</span></div>
   <div class="stat-row"><span class="stat-label">Grid</span><span class="stat-value" id="statGrid">--</span></div>
   <div class="stat-row"><span class="stat-label">Cells</span><span class="stat-value" id="statCells">--</span></div>
@@ -166,21 +169,25 @@ const shaderCodeFull = shaderCode;
 // ---- WebGPU state ----
 let device, queue, pipeline, bindGroup, srcBuf, dstBuf, paramsBuf;
 let width = 0, height = 0;
-let cells = null; // Uint8Array — initial grid snapshot for reset
+let cells = null; // Uint8Array — latest grid state
+let initCells = null; // Uint8Array — initial grid snapshot for reset
 let gen = 0;
 let ping = true;
 let running = false;
 let playTimer = null;
 let totalSteps = 0;
 let stepTimeLog = [];
+let clockHigh = false; // true = CLK=1, false = CLK=0
 
-// Output port positions (from F# ExportMincpuMeta.fsx, normalized to grid origin)
+// Output port positions (from web/mincpu-meta.json, normalized 0-based)
 const OUT_PORTS = [
   { bit: 0, x: 276, y: 244 }, { bit: 1, x: 300, y: 244 },
   { bit: 2, x: 324, y: 244 }, { bit: 3, x: 348, y: 244 },
   { bit: 4, x: 372, y: 244 }, { bit: 5, x: 396, y: 244 },
   { bit: 6, x: 12,  y: 260 }, { bit: 7, x: 36,  y: 260 },
 ];
+// CLK pin position (from mincpu-meta.json)
+const CLK_X = 0, CLK_Y = 4;
 
 function readOutputValue() {
   if (!cells) return -1;
@@ -237,22 +244,22 @@ function ensureBuffers(w, h) {
   }
 }
 
-function uploadGrid(w, h, cellData) {
+function uploadGrid(w, h, cellData, keepGen = false) {
   ensureBuffers(w, h);
   const packed = new Uint32Array(w * h);
   for (let i = 0; i < w * h; i++) packed[i] = cellData[i];
   queue.writeBuffer(srcBuf, 0, packed);
   queue.writeBuffer(dstBuf, 0, packed);
   ping = true;
-  gen = 0;
-  totalSteps = 0;
+  if (!keepGen) { gen = 0; totalSteps = 0; }
   cells = new Uint8Array(cellData);
+  initCells = new Uint8Array(cellData);
   document.getElementById('statGrid').textContent = `${w}×${h}`;
   document.getElementById('statCells').textContent = cellData.filter(b => b !== 0).length;
   render();
   updateOutputDisplay();
   statusEl.textContent = `${w}×${h}, gen=${gen}`;
-  document.getElementById('statGen').textContent = '0';
+  document.getElementById('statGen').textContent = String(gen);
 }
 
 async function readBack() {
@@ -297,10 +304,55 @@ async function stepGPU() {
   const elapsed = performance.now() - t0;
   stepTimeLog.push(elapsed);
   if (stepTimeLog.length > 100) stepTimeLog.shift();
-  document.getElementById('statGen').textContent = gen;
+  document.getElementById('statGen').textContent = String(gen);
   const avg = stepTimeLog.reduce((a, b) => a + b, 0) / stepTimeLog.length;
   const speed = avg > 0 ? Math.round(1000 / avg) : 0;
   document.getElementById('statSpeed').textContent = `${speed} gen/s`;
+}
+
+// Toggle CLK pin level by modifying the cell in GPU buffers
+async function toggleClock() {
+  if (!srcBuf || !width) return;
+  await readBack();
+  const idx = CLK_Y * width + CLK_X;
+  if (idx >= cells.length) return;
+  const cell = cells[idx];
+  const k = (cell >> 5) & 7;
+  if (k !== 1) return; // not a PIN
+  clockHigh = !clockHigh;
+  cells[idx] = (cell & 0xFE) | (clockHigh ? 1 : 0);
+  // Re-upload to both buffers
+  const packed = new Uint32Array(width * height);
+  for (let i = 0; i < width * height; i++) packed[i] = cells[i];
+  queue.writeBuffer(srcBuf, 0, packed);
+  queue.writeBuffer(dstBuf, 0, packed);
+  ping = true;
+  document.getElementById('btnClock').textContent = clockHigh ? '🔲 CLK=1' : '🔳 CLK=0';
+  document.getElementById('statClk').textContent = clockHigh ? '1' : '0';
+  logMsg(`CLK → ${clockHigh ? 1 : 0}`, 'info');
+  render();
+  updateOutputDisplay();
+}
+
+// Auto-cycle: CLK=1 settle → CLK=0 settle → CLK=1 settle → ...
+let cycleRunning = false;
+async function autoCycle(stepsPerPhase = 100) {
+  if (cycleRunning || !width) return;
+  cycleRunning = true;
+  document.getElementById('btnCycle').disabled = true;
+  for (let cyc = 0; cyc < 20 && cycleRunning; cyc++) {
+    // CLK=1 phase
+    if (!clockHigh) await toggleClock();
+    await stepN(stepsPerPhase, 20);
+    // CLK=0 phase
+    if (clockHigh) await toggleClock();
+    await stepN(stepsPerPhase, 20);
+    const v = readOutputValue();
+    logMsg(`cycle ${cyc + 1}: out=0x${v.toString(16).toUpperCase()} gen=${gen}`, 'ok');
+    if (v !== 0) break; // stop if output changed
+  }
+  cycleRunning = false;
+  document.getElementById('btnCycle').disabled = false;
 }
 
 async function stepN(n, readEvery = 100) {
@@ -312,7 +364,8 @@ async function stepN(n, readEvery = 100) {
     if (i % readEvery === 0 || i === n - 1) {
       await readBack();
       updateOutputDisplay();
-      statusEl.textContent = `${width}×${height}, gen=${gen}, out=0x${readOutputValue().toString(16).toUpperCase()}`;
+      const v = readOutputValue();
+      statusEl.textContent = `${width}×${height}, gen=${gen}, clk=${clockHigh ? 1 : 0}, out=0x${v.toString(16).toUpperCase()}`;
       render();
     }
   }
@@ -360,9 +413,14 @@ function loadGridBin(data) {
   const cellData = new Uint8Array(data.buffer, data.byteOffset + 8, w * h);
   logMsg(`Loaded ${w}×${h} grid (${cellData.filter(b => b !== 0).length} cells)`, 'ok');
   uploadGrid(w, h, cellData);
+  // Detect clock state from the grid
+  const clkIdx = CLK_Y * w + CLK_X;
+  clockHigh = clkIdx < cellData.length ? ((cellData[clkIdx] & 1) === 1) : false;
+  document.getElementById('btnClock').textContent = clockHigh ? '🔲 CLK=1' : '🔳 CLK=0';
+  document.getElementById('statClk').textContent = clockHigh ? '1' : '0';
   document.getElementById('cpuDiagram').textContent =
-    `┌───── SM83 CPU ─────┐  gen=${gen}
-│  ALU  ──┬── acc[8] │  out=0x${'0'.repeat(2)}
+    `┌───── SM83 CPU ─────┐  gen=0
+│  ALU  ──┬── acc[8] │  out=0x00
 │  PC=00  │  ir=00   │
 │  ROM[16]├── state=0│
 │  out[8] │  JMP LDI │
@@ -386,6 +444,8 @@ async function loadMincpu() {
 }
 
 document.getElementById('btnLoad').addEventListener('click', loadMincpu);
+document.getElementById('btnClock').addEventListener('click', toggleClock);
+document.getElementById('btnCycle').addEventListener('click', () => autoCycle(80));
 
 document.getElementById('btnStep').addEventListener('click', async () => {
   if (running) return;
@@ -428,7 +488,13 @@ document.getElementById('btnPlay').addEventListener('click', () => {
 
 document.getElementById('btnReset').addEventListener('click', () => {
   if (playTimer) { clearInterval(playTimer); playTimer = null; document.getElementById('btnPlay').textContent = '▶ Play'; }
-  if (cells) { uploadGrid(width, height, cells); }
+  if (initCells) {
+    uploadGrid(width, height, initCells);
+    const clkIdx = CLK_Y * width + CLK_X;
+    clockHigh = clkIdx < initCells.length ? ((initCells[clkIdx] & 1) === 1) : false;
+    document.getElementById('btnClock').textContent = clockHigh ? '🔲 CLK=1' : '🔳 CLK=0';
+    document.getElementById('statClk').textContent = clockHigh ? '1' : '0';
+  }
 });
 
 // File upload
