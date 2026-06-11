@@ -27,7 +27,8 @@ let wg = run "WL Golden"     (WwHdl.WlGoldenTest.runAll ())
 let wa = run "WL ALU"        (WwHdl.WlAluTest.runAll ())
 let w4 = run "WL ALU4"       (WwHdl.WlAlu4Test.runAll ())
 let sk = run "WL ClockSkew"  (WwHdl.WlClockSkewTest.runAll ())
+let mc = run "WL Mincpu"     (WwHdl.WlMincpuTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk @ mc
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length

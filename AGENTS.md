@@ -30,6 +30,8 @@ yosys は `nix develop --command yosys ...` で使う (flake.nix に同梱)。
 例: `nix develop --command yosys -p "read_verilog verilog/counter4.v; synth -top top -flatten; abc -g NAND; opt_clean; write_json verilog/counter4.json"`
 (この yosys 0.62 では `abc -g NAND,NOT` はエラー。NOT は暗黙なので `-g NAND` でよい)
 
+順序回路合成は `dffunmap` が必要: `nix develop --command yosys -p "read_verilog verilog/mincpu.v; synth -top top -flatten; dffunmap; abc -g NAND; opt_clean; write_json verilog/mincpu.json"` (DFF は `$_DFF_P_` のみサポート。`$_DFFE_PP0P_` 等は PipelineWL.parseGateKind が未対応)
+
 Module dependency order (within and across files):
 
 `Units` → `Domain` → `Rule` → `Netlist` → `Library` → `CellTest` → `Place` → `Route` → `Sta` → `Sim` → `Pipeline` → `FrontendTest` → `RoutingTest` → `StaTest` → `E2eTest` → `MultiStageTest` → `NandGateTest` → `MultiGateTest`
@@ -52,7 +54,7 @@ Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx c
 
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
 
-**Total tests**: 128. Current pass rate: **128/128** (WireLevel 8/8, WL Pipeline 7/7, WL Counter4 3/3, WL ALU 13/13 含む)。
+**Total tests**: 147. Current pass rate: **147/147** (WL Mincpu 3/3 含む、WL ALU4 13/13 含む)。
 
 WireLevel のテストは settle (収束待ち) でクロックを駆動する。固定半周期を使う場合は
 「半周期 > 組合せ収束時間」を守ること (counter4 は halfP=128 で誤動作、512 で完動)。
@@ -66,6 +68,14 @@ WireLevel のテストは settle (収束待ち) でクロックを駆動する�
 | `fa-like-9: compileFull succeeds` | 4列×狭ピッチ配置で配線チャネル不足 (RoutingCongestion) |
 
 **4列配置（9-10ゲート）の限界**: 4列×ピッチ13の配置は、fan-out≧3のネットが複数存在する回路で配線輻輳が発生する。11ゲート以上は8列以上になるためこの問題は起きにくい。
+
+## Clock balance
+
+`PipelineWL.balanceClockNet` はクロックツリーの経路長を均等化する。小規模回路 (counter4, reg8) では skew=0 に調整可能。
+287ゲートの mincpu では配線リソース不足でスキュー非調整となり警告を出すが、CPU の動作自体は正しい
+(cyc6 で out=4 を確認。F# シミュレーションは 46k セルで ~80s/cycle)。
+
+スキュー非調整でも `balanceClocks` は `Ok` を返し、コンパイルは続行される。
 
 ## External dependency
 

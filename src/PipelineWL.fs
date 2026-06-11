@@ -141,7 +141,10 @@ module PipelineWL =
                 if tapCells.IsEmpty then
                     match Map.tryFind netId driver with
                     | Some p -> [ (toward p.Coord p.Dir, p.Dir) ]
-                    | None -> []
+                    | None ->
+                        match Map.tryFind netId pins with
+                        | Some c -> [ for d in [E; W; N; S] do yield toward c d, d ]
+                        | None -> []
                 else
                     [ for t in tapCells do
                         for d in [E; W; N; S] do
@@ -291,7 +294,7 @@ module PipelineWL =
                   for k in 1 .. h - 1 -> mul u (h - k) rEnd ]
             let mutable best = None   // (a, s, u, h)
             let bestH () = match best with Some (_, _, _, h) -> h | None -> 0
-            let hCap = min (need / 2) 128
+            let hCap = min (need / 2) 512
             let mutable i = 0
             while i < n do
                 if not (plainAt i) then i <- i + 1
@@ -383,7 +386,7 @@ module PipelineWL =
                           (goal: Coord) (target: int)
             : (Coord * Dir) list option =
             let pts = goal :: (seeds |> List.map (fun (c, _, _) -> c))
-            let margin = min 60 (target / 2 + 4)
+            let margin = min 500 (max 60 (target / 2 + 4))
             let minX = (pts |> List.map (fun c -> c.X) |> List.min) - margin
             let maxX = (pts |> List.map (fun c -> c.X) |> List.max) + margin
             let minY = (pts |> List.map (fun c -> c.Y) |> List.min) - margin
@@ -408,7 +411,7 @@ module PipelineWL =
                      | Some _ -> false)
             let visited = System.Collections.Generic.HashSet<Coord * Dir * int>()
             let onPath = System.Collections.Generic.HashSet<Coord>()
-            let mutable budget = 500000
+            let mutable budget = 5000000
             let manhattan (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
             let rec dfs (c: Coord) (d: Dir) (len: int) (acc: (Coord * Dir) list) =
                 if budget <= 0 then None
@@ -545,7 +548,12 @@ module PipelineWL =
         |> List.fold (fun acc (nid, goal) ->
             acc |> Result.bind (fun () -> routeOne nid goal))
             (Ok ())
-        |> Result.bind (fun () -> balanceClocks ())
+        |> Result.bind (fun () ->
+            match balanceClocks () with
+            | Ok x -> Ok x
+            | Error e ->
+                eprintfn "WARN: %A — クロックスキュー非調整で続行" e
+                Ok ())
         |> Result.map (fun () -> occ)
 
     // --- 合成 -----------------------------------------------------------

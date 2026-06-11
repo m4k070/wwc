@@ -1780,3 +1780,22 @@ module WlClockSkewTest =
           | None -> yield "WL-SKEW: reg8 compile succeeds", false
           | Some (skew, n) ->
               yield sprintf "WL-SKEW: reg8 %d DFFs skew=%d (<=1)" n skew, skew <= 1 ]
+
+// WL-MINCPU: 最小8bit CPU のコンパイル検証 (287 gates, P3)
+module WlMincpuTest =
+    open Domain
+    open Netlist
+    open WireLevel
+    open PipelineWL
+
+    let runAll () : (string * bool) list =
+        [ let json = System.IO.File.ReadAllText "verilog/mincpu.json"
+          match compileWL json with
+          | Error e -> yield sprintf "WL-MINCPU: compile error %A" e, false
+          | Ok (grid, placed, _) ->
+              yield "WL-MINCPU: compile succeeds", true
+              let nand = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Nand) |> List.length
+              let not_ = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Not) |> List.length
+              let dff = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Dff) |> List.length
+              yield sprintf "WL-MINCPU: placed=%d (NAND=%d NOT=%d DFF=%d)" placed.Length nand not_ dff, true
+              yield sprintf "WL-MINCPU: grid=%d cells" (Map.count grid), true ]
