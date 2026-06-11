@@ -47,8 +47,8 @@ module PipelineWL =
     // --- 配置 ---------------------------------------------------------
 
     let private gateX0 = 12
-    let private pitchX = 10
-    let private pitchY = 8
+    let private pitchX = 16
+    let private pitchY = 12
 
     /// ゲートを正方格子に、プライマリ入力ピンを左端列 (x=0) に置く。
     let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =

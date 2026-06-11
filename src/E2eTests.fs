@@ -1423,3 +1423,51 @@ module WlPipelineTest =
                   "WL-DFF: yosys toggle FF 4 cycles", ok ]
 
         haResults @ toggleResults
+
+
+// ---------------------------------------------------------------------
+// 16. yosys 合成 4bit カウンタ E2E (WireLevel)
+//     verilog/counter4.v を yosys (synth; abc -g NAND) で合成した JSON を
+//     compileWL に通し、クロック駆動で 0..15 のラップアラウンドを検証する。
+//     クロックは固定周期ではなく settle (収束待ち) で駆動する:
+//     「半周期 > 組合せ収束時間」の設計則をテスト側で保証するため。
+// ---------------------------------------------------------------------
+module WlCounterTest =
+    open Domain
+    open Netlist
+    open WireLevel
+    open PipelineWL
+
+    let private jsonPath =
+        System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "counter4.json")
+
+    let runAll () : (string * bool) list =
+        if not (System.IO.File.Exists jsonPath) then
+            [ "WL-CNT: counter4.json present", false ]
+        else
+            let json = System.IO.File.ReadAllText jsonPath
+            let qBits =
+                match Pipeline.parseYosysJson json with
+                | Ok m -> m.Ports.["q"].Bits
+                | Error _ -> []
+            match compileWL json with
+            | Error e ->
+                printfn "  WL_CNT_ERR: %A" e
+                [ "WL-CNT: compile succeeds", false ]
+            | Ok (grid, placed, pins) ->
+                let outOf n =
+                    placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
+                let clkPin = pins |> Map.toList |> List.head |> snd
+                let value g =
+                    qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
+                    |> List.sum
+                let mutable g = fst (settle 2000 grid)   // 初期収束 (clk=0)
+                let init0 = value g = 0
+                let mutable ok = true
+                for k in 1 .. 18 do
+                    g <- fst (settle 2000 (setPin clkPin true g))
+                    g <- fst (settle 2000 (setPin clkPin false g))
+                    if value g <> k % 16 then ok <- false
+                [ "WL-CNT: compile succeeds",            true
+                  "WL-CNT: initial value 0",             init0
+                  "WL-CNT: counts 1..18 mod 16 (wrap)",  ok ]

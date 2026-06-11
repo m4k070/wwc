@@ -12,21 +12,30 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 
 ---
 
-## P0: パイプラインの WireLevel 化
+## P0: パイプラインの WireLevel 化 ✅ 完了 (2026-06-11, PipelineWL.fs)
 
-- [ ] techMap2: GateKind → WireLevel セル (LNand/LDff、1 セル + クリアランス)
-- [ ] place2: WireLevel 向け配置 (ピッチ縮小可、ゲートは 1 セル)
-- [ ] route2: 方向付与 (dir = 進行方向) + Cross セル挿入 + ゲート隣接クリアランス
-- [ ] クロックツリー配線 (Pin → 全 DFF 側面、概均衡)
-- [ ] emit2: LGrid 合成 + byte グリッドエクスポート (encodeCell)
-- [ ] E2E: yosys JSON (半加算器) → WireLevel → settle 検証で真理値表 4/4
+- [x] compileWL: yosys JSON → LGrid (techMap は 1 セルゲートなので compileWL 内で完結)
+- [x] placeWL: 正方格子配置 (pitchX=16, pitchY=12) + 左端ピン列
+- [x] routeWL: (Coord,Dir) 状態 A*、Cross 化直交通過、ゲート隣接クリアランス、
+      ファンアウトタップ (タップ元は非交差化)
+- [x] クロック配線 (通常ネットとして DFF S 側面へ。均等化は未実装 → P1 残課題)
+- [x] emitWL: LGrid 合成 (byte 一括エクスポートは P2 で)
+- [x] E2E: 半加算器真理値表 4/4
 
-## P1: 順序回路 E2E (M6/M7 統合)
+## P1: 順序回路 E2E
 
-- [ ] yosys $_DFF_P_ → LDff 経路の E2E (toggle FF を Verilog から)
-- [ ] 4bit カウンタ
+- [x] yosys $_DFF_P_ → LDff 経路の E2E (toggle FF、q=1,0,1,0)
+- [x] 4bit カウンタ (verilog/counter4.v → yosys → 21 ゲート → 0..15 ラップ確認)
 - [ ] 8bit レジスタ
 - [ ] ALU (加算器)
+- [ ] クロックスキュー均等化 (hold 対策)。counter4 では顕在化していないが、
+      回路規模が大きくなると最短データパス < スキューで壊れうる。
+      WireLevel は遅延 = パス長そのものなので、クロック枝の長さを揃えるだけでよい
+
+### 学んだ設計則
+
+- **半周期 > 組合せ収束時間** (setup 制約)。counter4 は halfP=128 で誤動作、
+  512 で完動。テストは固定周期でなく `settle` (収束待ち) でクロックを駆動する。
 
 ## P2: GPU 実行 (WebGPU)
 

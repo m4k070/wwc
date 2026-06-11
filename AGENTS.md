@@ -11,7 +11,7 @@ No separate lint or typecheck step — the F# compiler covers both. No formatter
 
 ## Architecture
 
-Multi-file F# project (9 files in `src/`). Files are compiled in dependency order:
+Multi-file F# project (10 files in `src/`). Files are compiled in dependency order:
 
 ```
 Domain.fs      # Units, Domain, Rule, Netlist            ( 98 lines)
@@ -22,8 +22,13 @@ Route.fs       # Lee/BFS routing algorithm                (255 lines)
 Sta.fs         # Static timing analysis                   (290 lines)
 Sim.fs         # Clock-gated simulation                   (189 lines)
 Pipeline.fs    # Compilation pipeline (frontend→RLE)      (765 lines)
-E2eTests.fs    # All test modules                         (~1350 lines)
+PipelineWL.fs  # yosys Netlist → WireLevel コンパイラ (P0)
+E2eTests.fs    # All test modules                         (~1500 lines)
 ```
+
+yosys は `nix develop --command yosys ...` で使う (flake.nix に同梱)。
+例: `nix develop --command yosys -p "read_verilog verilog/counter4.v; synth -top top -flatten; abc -g NAND; opt_clean; write_json verilog/counter4.json"`
+(この yosys 0.62 では `abc -g NAND,NOT` はエラー。NOT は暗黙なので `-g NAND` でよい)
 
 Module dependency order (within and across files):
 
@@ -47,7 +52,10 @@ Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx c
 
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
 
-**Total tests**: 99. Current pass rate: **96/99** (WireLevel 7/7 含む)。
+**Total tests**: 110. Current pass rate: **107/110** (WireLevel 8/8, WL Pipeline 7/7, WL Counter4 3/3 含む)。
+
+WireLevel のテストは settle (収束待ち) でクロックを駆動する。固定半周期を使う場合は
+「半周期 > 組合せ収束時間」を守ること (counter4 は halfP=128 で誤動作、512 で完動)。
 
 ### Known failures
 
