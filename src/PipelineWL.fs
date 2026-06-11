@@ -72,12 +72,14 @@ module PipelineWL =
     /// ゲートの入力ネット → 終端セル割り当てと、強制空白にすべき側面セル。
     /// ゲートは東向き前提: W=背面, N/S=側面, E=出力。
     /// $_DFF_P_ の Inputs はポート名アルファベット順で [C; D]。
+    /// $_DFF_PP0_ の Inputs は [C; D; R] (R = async reset, 無視)。
     let private gateTerminals (p: WlPlaced) : (NetId * Coord) list * Coord list =
         let w = toward p.Coord W
         let n = toward p.Coord N
         let s = toward p.Coord S
         match p.Gate.Kind, p.Gate.Inputs with
         | Dff, [clkNet; dNet] -> [ (dNet, w); (clkNet, s) ], [ n ]
+        | Dff, [cNet; dNet; _rNet] -> [ (dNet, w); (cNet, s) ], [ n ]
         | _, [a]              -> [ (a, w) ], [ n; s ]
         | _, [a; b]           -> [ (a, w); (b, n) ], [ s ]
         | _, [a; b; c]        -> [ (a, w); (b, n); (c, s) ], []
@@ -534,6 +536,7 @@ module PipelineWL =
             |> List.choose (fun p ->
                 match p.Gate.Kind, p.Gate.Inputs with
                 | Dff, [clkNet; _] -> Some (clkNet, toward p.Coord S)
+                | Dff, [cNet; _; _] -> Some (cNet, toward p.Coord S)
                 | _ -> None)
             |> List.groupBy fst
             |> List.fold (fun acc (net, terms) ->

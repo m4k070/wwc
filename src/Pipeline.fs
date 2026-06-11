@@ -89,14 +89,16 @@ module Pipeline =
     /// `abc -g NAND,NOT` の出力は $\_NOT\_ と $\_NAND\_ のみ。
     let private parseGateKind (t: string) : GateKind option =
         match t with
-        | "$_NOT_"   -> Some Not
-        | "$_NAND_"  -> Some Nand
-        | "$_AND_"   -> Some And    // abc -g AND,NOT 使用時の後方互換
-        | "$_OR_"    -> Some Or
-        | "$_XOR_"   -> Some Xor    // abc -g NAND,NOT では出力されないが後方互換用に残す
-        | "$_DFF_P_" -> Some Dff
-        | "$_BUF_"   -> Some Buf
-        | _          -> None
+        | "$_NOT_"      -> Some Not
+        | "$_NAND_"     -> Some Nand
+        | "$_AND_"      -> Some And    // abc -g AND,NOT 使用時の後方互換
+        | "$_OR_"       -> Some Or
+        | "$_XOR_"      -> Some Xor    // abc -g NAND,NOT では出力されないが後方互換用に残す
+        | "$_DFF_P_"    -> Some Dff
+        | "$_DFF_PP0_"  -> Some Dff    // DFF with async reset, enable
+        | "$_BUF_"      -> Some Buf
+        | "$scopeinfo"  -> None        // メタデータセル、無視
+        | _             -> None
 
     /// YosysModule を Netlist IR へ変換する。
     let private getPrimarySignals (m: YosysModule) =
@@ -121,40 +123,33 @@ module Pipeline =
         
         primaryInputs, primaryOutputs, clockNet
 
-    let private parseGates (m: YosysModule) =
-        m.Cells  // 宣言順を保持 (Map.toList はキー昇順になるため使わない)
-        |> List.mapi (fun i (name, cell) ->
-            match parseGateKind cell.Type with
-            | None -> Error (ParseError $"unknown gate type '{cell.Type}' in cell '{name}'")
-            | Some kind ->
-                let inputs =
-                    cell.PortDirections |> Map.toList
-                    |> List.filter (fun (_, dir) -> dir = "input")
-                    |> List.sortBy fst
-                    |> List.collect (fun (port, _) ->
-                        cell.Connections |> Map.tryFind port
-                        |> Option.defaultValue []
-                        |> List.map NetId)
-                
-                let outputNet =
-                    cell.PortDirections |> Map.toList
-                    |> List.filter (fun (_, dir) -> dir = "output")
-                    |> List.sortBy fst
-                    |> List.tryHead
-                    |> Option.bind (fun (port, _) ->
-                        cell.Connections |> Map.tryFind port
-                        |> Option.bind List.tryHead
-                        |> Option.map NetId)
-                
-                match outputNet with
-                | None    -> Error (ParseError $"cell '{name}' has no output connection")
-                | Some o  -> Ok { Id = i; Kind = kind; Inputs = inputs; Output = o })
-        |> List.fold (fun acc r ->
-            match acc, r with
-            | Ok xs, Ok x -> Ok (x :: xs)
-            | Error e, _  -> Error e
-            | _, Error e  -> Error e) (Ok [])
-        |> Result.map List.rev
+    let private parseGates (m: YosysModule) : Result<Gate list, CompileError> =
+        let parsed =
+            m.Cells  // 宣言順を保持 (Map.toList はキー昇順になるため使わない)
+            |> List.choose (fun (name, cell) ->
+                match parseGateKind cell.Type with
+                | None -> None  // $scopeinfo など不明なセル種別はスキップ
+                | Some kind ->
+                    let inputs =
+                        cell.PortDirections |> Map.toList
+                        |> List.filter (fun (_, dir) -> dir = "input")
+                        |> List.sortBy fst
+                        |> List.collect (fun (port, _) ->
+                            cell.Connections |> Map.tryFind port
+                            |> Option.defaultValue []
+                            |> List.map NetId)
+                    let outputNet =
+                        cell.PortDirections |> Map.toList
+                        |> List.filter (fun (_, dir) -> dir = "output")
+                        |> List.sortBy fst
+                        |> List.tryHead
+                        |> Option.bind (fun (port, _) ->
+                            cell.Connections |> Map.tryFind port
+                            |> Option.bind List.tryHead
+                            |> Option.map NetId)
+                    outputNet |> Option.map (fun o ->
+                        { Id = 0; Kind = kind; Inputs = inputs; Output = o }))
+        Ok (parsed |> List.mapi (fun i g -> { g with Id = i }))
 
     /// YosysModule を Netlist IR へ変換する。
     let yosysToNetlist (m: YosysModule) : Result<Netlist, CompileError> =

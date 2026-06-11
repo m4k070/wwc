@@ -1799,3 +1799,37 @@ module WlMincpuTest =
               let dff = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Dff) |> List.length
               yield sprintf "WL-MINCPU: placed=%d (NAND=%d NOT=%d DFF=%d)" placed.Length nand not_ dff, true
               yield sprintf "WL-MINCPU: grid=%d cells" (Map.count grid), true ]
+
+
+// ---------------------------------------------------------------------
+// 22. SM83 サブセット CPU コンパイル検証
+//     verilog/sm83_min.v → yosys → compileWL
+//     380 gates (NAND=242 NOT=112 DFF=26) の CPU がコンパイル可能であることを確認する。
+// ---------------------------------------------------------------------
+module WlSm83Test =
+    open Domain
+    open Netlist
+    open WireLevel
+    open PipelineWL
+
+    let private jsonPath =
+        System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "sm83_min.json")
+
+    let runAll () : (string * bool) list =
+        if not (System.IO.File.Exists jsonPath) then
+            [ "WL-SM83: sm83_min.json present", false ]
+        else
+            let json = System.IO.File.ReadAllText jsonPath
+            match compileWL json with
+            | Error e ->
+                printfn "  WL_SM83_ERR: %A" e
+                [ "WL-SM83: compile succeeds", false ]
+            | Ok (grid, placed, pins) ->
+                let nand = placed |> List.filter (fun p -> p.Gate.Kind = Nand) |> List.length
+                let not_ = placed |> List.filter (fun p -> p.Gate.Kind = Not) |> List.length
+                let dff  = placed |> List.filter (fun p -> p.Gate.Kind = Dff) |> List.length
+                let countsOk = placed.Length = 380 && nand = 242 && not_ = 112 && dff = 26
+                let gridOk = Map.count grid > 0
+                [ "WL-SM83: compile succeeds", true
+                  sprintf "WL-SM83: placed=%d (NAND=%d NOT=%d DFF=%d)" placed.Length nand not_ dff, countsOk
+                  sprintf "WL-SM83: grid=%d cells pins=%d" (Map.count grid) (Map.count pins), gridOk ]
