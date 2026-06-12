@@ -220,7 +220,7 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
 }`;
 
 // ---- WebGPU init ----
-let device, queue, pipeline, bindGroup, srcBuf, dstBuf, paramsBuf;
+let device, queue, pipeline, bindGroups = [null, null], srcBuf, dstBuf, paramsBuf;
 let width = 0, height = 0;
 let cells = null; // Uint8Array
 let gen = 0;
@@ -283,7 +283,8 @@ function ensureBuffers(w, h) {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    bindGroup = device.createBindGroup({
+    // Pre-create 2 bind groups for ping-pong (swap buffers without recreate)
+    bindGroups[0] = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: srcBuf } },
@@ -291,8 +292,15 @@ function ensureBuffers(w, h) {
         { binding: 2, resource: { buffer: paramsBuf } },
       ],
     });
+    bindGroups[1] = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: dstBuf } },
+        { binding: 1, resource: { buffer: srcBuf } },
+        { binding: 2, resource: { buffer: paramsBuf } },
+      ],
+    });
 
-    // Initially source buffer gets the grid data
     updateParams();
   }
 }
@@ -351,55 +359,51 @@ function downloadResult() {
 }
 
 // ---- Simulation ----
-async function stepGPU() {
-  if (!srcBuf) return;
-
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-
-  // Swap buffers: src = ping ? srcBuf : dstBuf, dst = ping ? dstBuf : srcBuf
-  const src = ping ? srcBuf : dstBuf;
-  const dst = ping ? dstBuf : srcBuf;
-  bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: src } },
-      { binding: 1, resource: { buffer: dst } },
-      { binding: 2, resource: { buffer: paramsBuf } },
-    ],
-  });
-  pass.setBindGroup(0, bindGroup);
-
+function dispatchGen(encoder) {
   const gx = Math.ceil(width / 16);
   const gy = Math.ceil(height / 16);
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroups[ping ? 0 : 1]);
   pass.dispatchWorkgroups(gx, gy);
   pass.end();
-  device.queue.submit([encoder.finish()]);
-  await device.queue.onSubmittedWorkDone();
-
   ping = !ping;
-  gen++;
+}
+
+const SIM_BATCH = 128; // 1 submit あたりの最大世代数 (32-128 が安全)
+
+async function stepNGPU(n) {
+  if (!srcBuf) return;
+  let remaining = n;
+  while (remaining > 0) {
+    const batch = Math.min(SIM_BATCH, remaining);
+    const encoder = device.createCommandEncoder();
+    for (let i = 0; i < batch; i++) dispatchGen(encoder);
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    remaining -= batch;
+  }
+  gen += n;
+}
+
+async function stepGPU() {
+  await stepNGPU(1);
 }
 
 async function runN(n) {
   running = true;
-  for (let i = 0; i < n; i++) {
-    if (!running) break;
-    await stepGPU();
-    if (i % 100 === 0 || i === n - 1) {
-      statusEl.textContent = `${width}×${height}, gen=${gen}`;
-      await readAndRender();
-    }
+  while (n > 0 && running) {
+    const batch = Math.min(SIM_BATCH, n);
+    await stepNGPU(batch);
+    n -= batch;
+    statusEl.textContent = `${width}×${height}, gen=${gen}`;
+    await readAndRender();
   }
   running = false;
 }
 
 async function stepN(n) {
-  for (let i = 0; i < n; i++) {
-    await stepGPU();
-  }
+  await stepNGPU(n);
 }
 
 async function readAndRender() {

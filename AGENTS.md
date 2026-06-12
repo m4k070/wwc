@@ -3,8 +3,9 @@
 ## Commands
 
 ```bash
-dotnet build src/WwHdl.fsproj          # build (required before tests)
-dotnet fsi src/RunTests.fsx            # run all 92 E2E tests (references bin/Debug/net8.0/WwHdl.dll)
+dotnet build src/WwHdl.fsproj          # build
+dotnet fsi src/RunTests.fsx            # all tests
+web/run-test.sh                        # WebGPU golden tests
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
@@ -21,7 +22,7 @@ Place.fs       # Placement algorithm                       (23 lines)
 Route.fs       # Lee/BFS routing algorithm                (255 lines)
 Sta.fs         # Static timing analysis                   (290 lines)
 Sim.fs         # Clock-gated simulation                   (189 lines)
-Pipeline.fs    # Compilation pipeline (frontend→RLE)      (765 lines)
+Pipeline.fs    # Yosys JSON frontend/parse + WireWorld pipeline (legacy)   (765 lines)
 PipelineWL.fs  # yosys Netlist → WireLevel コンパイラ (P0)
 E2eTests.fs    # All test modules                         (~1500 lines)
 ```
@@ -42,6 +43,12 @@ Module dependency order (within and across files):
 HDL → Yosys JSON → Netlist → (Gate × StdCell) → Placement → Wires → Grid → Golly RLE
 ```
 
+**WireLevel compile pipeline** (PipelineWL.fs):
+
+```
+HDL → Yosys JSON → Netlist → Place (grid) → Route (A* BFS) → Emit (WireLevel grid)
+```
+
 Key design choices:
 - Sparse grid: `Map<Coord, CellState>` (Empty = key absent)
 - `[<Measure>] type gen` — WireWorld generations as a unit of measure; `StdCell.Latency: int<gen>` and `Wire.Delay: int<gen>` share the same dimension
@@ -54,7 +61,7 @@ Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx c
 
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
 
-**Total tests**: 147. Current pass rate: **147/147** (WL Mincpu 3/3 含む、WL ALU4 13/13 含む)。
+**Total tests**: 150. Current pass rate: **150/150** (WL Mincpu 3/3 含む、WL ALU4 13/13 含む)。
 
 ## Clock balance
 
@@ -95,28 +102,17 @@ GPU 実行は WebGPU (ブラウザ + WGSL compute、ping-pong バッファ) で�
 F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte
 エンコーディングが GPU 側と共有される。
 
-WebGPU golden tests: **4/4 パス** (toggleFF, halfAdder, mincpu-clk1(3500steps), mincpu-clk0(800steps))。
+WebGPU golden tests: **10/10 パス** (toggleFF, halfAdder, mincpu-clk1, mincpu-clk0,
+sm83-cyc0-high, sm83-cyc0-low,
+sm83p0-cyc0-high, sm83p0-cyc0-low,
+sm83p0-mc-nop/NOP, sm83p0-mc-lda/LD_A, sm83p0-mc-ldb/LD_B, sm83p0-mc-add/ADD — 各 high+low)。
 GPU 結果は F# `settle` と byte-exact 一致。mincpu (46k cells) の 3500 ステップを
 SwiftShader (CPU) で 43s、F# リファレンスは約 93s と約 2 倍高速。
-実 GPU では大幅な高速化が期待できる。
 
 WireWorld 系パイプライン (junc3/STA/クロック注入 Sim) は組合せ回路デモとして
 維持。新規開発は WireLevel 上で行う。
 
-## DFF (D flip-flop) design status — WireWorld (歴史的経緯)
-
-`$_DFF_P_` → `GateKind.Dff` is parsed by the pipeline, and `Library.buildDLatch()` produces a 5×JUNC3 + DIODE-based level-sensitive D-latch pattern (37×7, 109 cells). However, DFF is **not yet functional** due to a fundamental WireWorld limitation:
-
-- **JUNC3 fires on any 1-2 Head inputs**; there is no way to create a CLK-gated AND gate that requires 2 specific inputs without firing on Vdd alone
-- The SR-latch (J4/J5) oscillates because the Vdd (=CLK) alone fires the junction regardless of S/R inputs
-- Feedback loop delays exceed the Head lifetime (1 gen Head → 1 gen Tail → Wire), preventing stable state retention
-- True CLK-gated storage requires system-level timing (clock period < loop delay) or a different storage mechanism (DIODE-based ring oscillator)
-
-**Next approach**: Ring-oscillator-based storage: DIODE + delay loop with JUNC3 write gate (AND(D,CLK) via NAND+NOT). The ring maintains Head circulation without requiring continuous Vdd. Write gate uses 3-Head absorption to inject/clear Head based on D.
-
-Currently DFF is excluded from `defaultLib`. `buildDLatch()` and `dff` remain in Library.fs for future development.
-
----
+詳細な技術情報はスキルファイルを参照:
 
 詳細な技術情報はスキルファイルを参照:
 - **fsharp-wireworld**: F#イディオム, Units of Measure, Struct gotchas, Yosys JSONパース, Map疎グリッド

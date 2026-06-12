@@ -1,14 +1,10 @@
-# WireWorld/WireLevel コンパイラ TODO
+# WireLevel コンパイラ TODO
 
-## 現在のテスト結果: 144/144 passed (WireLevel 13/13, 8bit レジスタ, Golden 5/5, ALU2 14/14, ALU4 13/13, ClockSkew 2/2 🎉)
+## 現在のテスト結果: 150/150 passed 🎉 (GPU golden test 16/16 PASS)
+- F#: WireLevel 8, WL-Pipeline 6, WL-CNT 3, WL-REG8 3, WL-GOLDEN 5, WL-ALU 14, WL-ALU4 13, WL-SKEW 2, WL-MINCPU 3, WL-SM83 3 — 他 WireWorld 系 90
+- GPU: toggleFF, halfAdder, mincpu(2), sm83(2), sm83p0-cyc0(2), sm83p0-mc(8)
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
-
-## 2026-06-11 戦略ピボット
-
-WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密タイミング制約
-により順序回路でスケールしないため、独自 CA ルール **WireLevel** に移行した。
-詳細: DESIGN-CA2.md / AGENTS.md。
 
 ---
 
@@ -46,6 +42,10 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 
 - **半周期 > 組合せ収束時間** (setup 制約)。counter4 は halfP=128 で誤動作、
   512 で完動。テストは固定周期でなく `settle` (収束待ち) でクロックを駆動する。
+- **P0 compile では maxExplore=2M が必要**。300k では 264k cells の端-to-端経路が探索不足。
+  2M で全経路確保。既存テスト (150/150) への影響なし。
+- **P0 settle は ~2500 gen 必要** (cyc0-high が limit hit, cyc0-low は 2161 gen で収束)。
+  F# 実装は ~200s/settle と低速 → GPU 検証に委ねる。
 
 ## P2: GPU 実行 (WebGPU)
 
@@ -65,12 +65,34 @@ WireWorld はバックファイア (RunBackfire.fsx で実証) と 1gen 厳密�
 
 ## P3: CPU へ
 
-- [ ] SM83 (LR35902) サブセットの Verilog 入手/記述 → yosys 合成
-- [ ] WireLevel CPU のマイクロベンチ (NOP ループ等)
+- [x] SM83 (LR35902) サブセットの Verilog 記述 → yosys 合成 (sm83_min.json, 380 gates)
+- [x] P0 拡張 (1095 gates): LD r,#imm8 / MOV r1,r2 / ALU op,r / INC/DEC r / NOP。yosys 合成確認
+- [x] P0 compileWL 成功: 264,705 cells, pitch 24×16, maxExplore=2M
+- [x] GPU golden test: SM83 P0 10 ケース PASS (cyc0 2 + NOP/LDA/LDB/ADD multi-cycle 8)
+- [x] WireLevel CPU のマイクロベンチ (src/TestSm83.fsx, NOP/LD/ALU 8命令) — F# 実装は低速すぎるため GPU 検証で代替
+- [x] GPU での SM83 動作確認 (web/ golden test 16/16 PASS, うち SM83/SM83P0 12 ケース)
 - [ ] GB エミュレータ統合 (バス/割込みブリッジ)
+
+### 開発サイクルへの GPU 統合
+
+`web/run-wl.sh` がコンパイル → .bin エクスポート → GPU シミュレーション → 検証
+を一括実行する:
+
+```bash
+web/run-wl.sh sm83          # SM83: export → GPU test
+web/run-wl.sh --all         # 全回路: export → GPU golden test (16 ケース, ~4min)
+web/run-wl.sh --list        # 利用可能テスト一覧
+web/run-wl.sh mincpu --headed  # ブラウザ表示あり
+```
+
+アーキテクチャ:
+- `web/golden-cases.json` — テストケース定義 (init/steps/expected/exportScript)
+- `golden-test.ts` — JSON 駆動の Playwright テスト (.bin 不在時は自動スキップ + エクスポートヒント表示)
+- `run-wl.sh` — 統合ランナー (依存自動セットアップ付き, npm/playwright install 不要)
 
 ---
 
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
-テスト 3 件は WireWorld 系として削除済み (構造的制約により修正しない)。現在 110/110 PASS。
+WireWorld 系テストは構造的制約により修正しない。現在 90 テストが WireWorld 系。
+全テスト 150/150 PASS 維持中。

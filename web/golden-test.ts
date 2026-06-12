@@ -1,37 +1,15 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
 const WEB_DIR = join(__dirname);
-// init = ピン設定直後の未収束状態 (F# ExportGrid.fsx が生成)。
+// init = ピン設定直後の未収束状態 (F#  export スクリプトが生成)。
 // GPU で steps 世代回すと expected (F# settle の収束状態) に一致するはず。
 // ピン値はステップで変化しないので、init と expected のピン状態は同一であること。
-const TEST_CASES = [
-  {
-    name: 'toggleFF',
-    initFile: 'toggle_clk1_init.bin',
-    steps: 1000,
-    expectedFile: 'toggle_clk1.bin',
-  },
-  {
-    name: 'halfAdder',
-    initFile: 'ha_11_init.bin',
-    steps: 1000,
-    expectedFile: 'ha_11.bin',
-  },
-  {
-    name: 'mincpu-clk1',
-    initFile: 'mincpu_clk1_init.bin',
-    steps: 3500,
-    expectedFile: 'mincpu_clk1.bin',
-  },
-  {
-    name: 'mincpu-clk0',
-    initFile: 'mincpu_clk0_init.bin',
-    steps: 800,
-    expectedFile: 'mincpu_clk0.bin',
-  },
-];
+const TEST_CASES: {
+  name: string; initFile: string; steps: number; expectedFile: string;
+  exportScript?: string; timeoutMs?: number;
+}[] = JSON.parse(readFileSync(join(WEB_DIR, 'golden-cases.json'), 'utf-8'));
 
 function readBin(file: string): Uint8Array {
   const buf = readFileSync(join(WEB_DIR, file));
@@ -78,8 +56,17 @@ async function runGPUSimulation(page: any, initBin: Uint8Array, steps: number): 
 
 for (const tc of TEST_CASES) {
   test(`GPU Golden Test: ${tc.name}`, async ({ page }) => {
+    // .bin ファイルが無い場合はスキップ (exportScript のヒントを表示)
+    if (!existsSync(join(WEB_DIR, tc.initFile)) || !existsSync(join(WEB_DIR, tc.expectedFile))) {
+      const hint = tc.exportScript
+        ? `.bin files not found — run: dotnet fsi ${tc.exportScript}`
+        : '.bin files not found';
+      test.skip(true, hint);
+      return;
+    }
+
     // 大規模回路はシミュレーションに時間がかかる
-    test.setTimeout(tc.steps > 2000 ? 120000 : 60000);
+    test.setTimeout(tc.timeoutMs ?? (tc.steps > 2000 ? 120000 : 60000));
 
     // Launch with WebGPU enabled
     await page.goto('file://' + join(WEB_DIR, 'index.html'), {

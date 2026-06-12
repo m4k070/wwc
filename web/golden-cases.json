@@ -1,0 +1,126 @@
+[
+  {
+    "name": "toggleFF",
+    "initFile": "toggle_clk1_init.bin",
+    "steps": 1000,
+    "expectedFile": "toggle_clk1.bin",
+    "exportScript": "src/ExportGrid.fsx"
+  },
+  {
+    "name": "halfAdder",
+    "initFile": "ha_11_init.bin",
+    "steps": 1000,
+    "expectedFile": "ha_11.bin",
+    "exportScript": "src/ExportGrid.fsx"
+  },
+  {
+    "name": "mincpu-clk1",
+    "initFile": "mincpu_clk1_init.bin",
+    "steps": 3500,
+    "expectedFile": "mincpu_clk1.bin",
+    "exportScript": "src/ExportMincpu.fsx"
+  },
+  {
+    "name": "mincpu-clk0",
+    "initFile": "mincpu_clk0_init.bin",
+    "steps": 800,
+    "expectedFile": "mincpu_clk0.bin",
+    "exportScript": "src/ExportMincpu.fsx"
+  },
+  {
+    "name": "sm83-cyc0-high",
+    "initFile": "sm83_cyc0_high_init.bin",
+    "steps": 2000,
+    "expectedFile": "sm83_cyc0_high.bin",
+    "exportScript": "src/ExportSm83.fsx",
+    "timeoutMs": 180000
+  },
+  {
+    "name": "sm83-cyc0-low",
+    "initFile": "sm83_cyc0_low_init.bin",
+    "steps": 800,
+    "expectedFile": "sm83_cyc0_low.bin",
+    "exportScript": "src/ExportSm83.fsx",
+    "timeoutMs": 180000
+  },
+  {
+    "name": "sm83p0-cyc0-high",
+    "initFile": "sm83p0_cyc0_high_init.bin",
+    "steps": 2500,
+    "expectedFile": "sm83p0_cyc0_high.bin",
+    "exportScript": "src/ExportSm83P0.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-cyc0-low",
+    "initFile": "sm83p0_cyc0_low_init.bin",
+    "steps": 2161,
+    "expectedFile": "sm83p0_cyc0_low.bin",
+    "exportScript": "src/ExportSm83P0.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-nop-high",
+    "initFile": "sm83p0_mc_nop_high_init.bin",
+    "steps": 2500,
+    "expectedFile": "sm83p0_mc_nop_high.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-nop-low",
+    "initFile": "sm83p0_mc_nop_low_init.bin",
+    "steps": 2161,
+    "expectedFile": "sm83p0_mc_nop_low.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-lda-high",
+    "initFile": "sm83p0_mc_lda_high_init.bin",
+    "steps": 2500,
+    "expectedFile": "sm83p0_mc_lda_high.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-lda-low",
+    "initFile": "sm83p0_mc_lda_low_init.bin",
+    "steps": 2243,
+    "expectedFile": "sm83p0_mc_lda_low.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-ldb-high",
+    "initFile": "sm83p0_mc_ldb_high_init.bin",
+    "steps": 2500,
+    "expectedFile": "sm83p0_mc_ldb_high.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-ldb-low",
+    "initFile": "sm83p0_mc_ldb_low_init.bin",
+    "steps": 2500,
+    "expectedFile": "sm83p0_mc_ldb_low.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-add-high",
+    "initFile": "sm83p0_mc_add_high_init.bin",
+    "steps": 2500,
+    "expectedFile": "sm83p0_mc_add_high.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  },
+  {
+    "name": "sm83p0-mc-add-low",
+    "initFile": "sm83p0_mc_add_low_init.bin",
+    "steps": 2427,
+    "expectedFile": "sm83p0_mc_add_low.bin",
+    "exportScript": "src/ExportSm83P0Multi.fsx",
+    "timeoutMs": 600000
+  }
+]

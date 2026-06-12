@@ -50,7 +50,7 @@ module PipelineWL =
     let private pitchX = 24
     let private pitchY = 16
 
-    /// ゲートを正方格子に、プライマリ入力ピンを左端列 (x=0) に置く。
+    /// ゲートを JSON 宣言順に正方格子に配置する。
     let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
         let n = max 1 nl.Gates.Length
         let ncols = int (ceil (sqrt (float n)))
@@ -192,10 +192,14 @@ module PipelineWL =
                     gScore.[(c, d)] <- 1
                     prev.[(c, d)] <- None
                     pq.Enqueue ((c, d), 1 + h c)
+            let maxExplore =
+                min ((maxX - minX + 1) * (maxY - minY + 1) * 4) 2000000
+            let mutable explored = 0
             let mutable goalState = None
-            while goalState.IsNone && pq.Count > 0 do
+            while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
                 let (c, d) = pq.Dequeue ()
                 if closed.Add ((c, d)) then
+                    explored <- explored + 1
                     if c = goal then goalState <- Some (c, d)
                     else
                         let dirs = if isCrossingCell c then [d] else [E; W; N; S]
@@ -298,7 +302,9 @@ module PipelineWL =
             let bestH () = match best with Some (_, _, _, h) -> h | None -> 0
             let hCap = min (need / 2) 512
             let mutable i = 0
-            while i < n do
+            let mutable congested = false
+            let failLimit = 100
+            while i < n && not congested do
                 if not (plainAt i) then i <- i + 1
                 else
                     let d = snd arr.[i]
@@ -306,15 +312,21 @@ module PipelineWL =
                     while j + 1 < n && plainAt (j + 1) && snd arr.[j + 1] = d do
                         j <- j + 1
                     let perp = match d with E | W -> [N; S] | N | S -> [E; W]
+                    let mutable failStreak = 0
                     for a in i .. j - 1 do
                         for s in 2 .. j - a + 1 do
                             for u in perp do
-                                if bestH () < hCap then
+                                if not congested && bestH () < hCap then
                                     let mutable h = hCap
                                     while h > bestH ()
                                           && not (bumpCells a s u h |> List.forall freeCell) do
                                         h <- h - 1
-                                    if h > bestH () then best <- Some (a, s, u, h)
+                                    if h > bestH () then
+                                        best <- Some (a, s, u, h)
+                                        failStreak <- 0
+                                    else
+                                        failStreak <- failStreak + 1
+                                        if failStreak > failLimit then congested <- true
                     i <- j + 1
             best
             |> Option.map (fun (a, s, u, h) ->
@@ -413,7 +425,7 @@ module PipelineWL =
                      | Some _ -> false)
             let visited = System.Collections.Generic.HashSet<Coord * Dir * int>()
             let onPath = System.Collections.Generic.HashSet<Coord>()
-            let mutable budget = 5000000
+            let mutable budget = 500000
             let manhattan (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
             let rec dfs (c: Coord) (d: Dir) (len: int) (acc: (Coord * Dir) list) =
                 if budget <= 0 then None
