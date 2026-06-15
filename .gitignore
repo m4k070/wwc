@@ -5,3 +5,4 @@
 /test-results
 # verilog/ は合成結果JSONも含めて管理する
 /.direnv
+/wgpu-runner/target
