@@ -25,6 +25,7 @@
           name = "wwc";
           packages = with pkgs; [
             dotnet-sdk_8
+            fantomas
             python3
             yosys
             rustc cargo rustfmt rust-analyzer

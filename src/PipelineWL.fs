@@ -185,92 +185,22 @@ module PipelineWL =
                      | Some _ -> false
                      | _ -> true)
 
-            // trySimplePath: L字/Z字マンハッタン経路を試す（A* 回避で高速化）
-            let trySimplePath (netId: NetId) (seeds: (Coord * Dir) list) (goal: Coord)
-                : (Coord * Dir) list option =
-                let manhattan (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
-                let checkPath (c: Coord) (d: Dir) =
-                    let mutable cur = c
-                    let mutable curD = d
-                    let mutable path = [(cur, curD)]
-                    // 直進して goal と X または Y が一致するまで
-                    while cur.X <> goal.X && cur.Y <> goal.Y do
-                        let step = toward cur curD
-                        if not (passOk step curD) then None
-                        else
-                            cur <- step
-                            path <- (cur, curD) :: path
-                    if cur.X = goal.X && cur.Y = goal.Y then Some (List.rev path)
-                    else
-                        // 残りは goal 方向へ直進
-                        let remD = if cur.X <> goal.X then
-                                      if goal.X > cur.X then E else W
-                                   else if goal.Y > cur.Y then N else S
-                        let mutable cur2 = cur
-                        let mutable path2 = path
-                        while cur2 <> goal do
-                            let step = toward cur2 remD
-                            if not (passOk step remD) then None
-                            else
-                                cur2 <- step
-                                path2 <- (cur2, remD) :: path2
-                        Some (List.rev path2)
-                // L字: シード方向で直進 → goal 方向で直進
-                let lpath = seeds |> List.tryPick (fun (c, d) -> checkPath c d)
-                if lpath.IsSome then lpath
-                else
-                    // Z字: シード方向と直交する方向で1ステップ → L字
-                    let perp d = match d with E | W -> [N; S] | N | S -> [E; W]
-                    seeds
-                    |> List.tryPick (fun (c, d) ->
-                        perp d |> List.tryPick (fun d2 ->
-                            let c2 = toward c d2
-                            if passOk c2 d2 then checkPath c2 d2 else None))
-
             // A*: 状態 = (セル, 進入方向)。交差セル上では直進のみ許可。
-            // まず L/Z 字経路を試す
-            match trySimplePath netId seeds goal with
-            | Some path ->
-                // 経路を occ に書き込む
-                let (c0, d0) = path.[0]
-                let tapC = { X = c0.X - (delta d0).X; Y = c0.Y - (delta d0).Y }
-                (match occGet tapC with
-                 | Some (OccWire (n2, f2, _)) ->
-                     occSet tapC (OccWire (n2, f2, false))
-                     tapSources.Add tapC |> ignore
-                 | _ -> ())
-                path |> List.iteri (fun i (c, d) ->
-                    let straight = i < path.Length - 1 && snd path.[i + 1] = d
-                    match occGet c with
-                    | Some (OccWire (n2, f2, _)) ->
-                        let (hN, hD), (vN, vD) =
-                            if d = E || d = W then (netId, d), (n2, f2)
-                            else (n2, f2), (netId, d)
-                        occSet c (OccCross (hN, hD, vN, vD))
-                        (match netCells.TryGetValue n2 with
-                         | true, l -> l.Remove c |> ignore
-                         | _ -> ())
-                    | _ ->
-                        occSet c (OccWire (netId, d, straight))
-                        if not (c = goal && Set.contains c clkTerminalCells) then
-                            addNetCell netId c)
-                Ok ()
-            | None ->
-                let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
-                let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
-                let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
-                let closed = System.Collections.Generic.HashSet<Coord * Dir>()
-                let h (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
-                for (c, d) in seeds do
-                    if passOk c d && not (gScore.ContainsKey ((c, d))) then
-                        gScore.[(c, d)] <- 1
-                        prev.[(c, d)] <- None
-                        pq.Enqueue ((c, d), 1 + h c)
-                let maxExplore =
-                    min ((maxX - minX + 1) * (maxY - minY + 1) * 8) 10000000
-                let mutable explored = 0
-                let mutable goalState = None
-                while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
+            let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
+            let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
+            let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
+            let closed = System.Collections.Generic.HashSet<Coord * Dir>()
+            let h (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
+            for (c, d) in seeds do
+                if passOk c d && not (gScore.ContainsKey ((c, d))) then
+                    gScore.[(c, d)] <- 1
+                    prev.[(c, d)] <- None
+                    pq.Enqueue ((c, d), 1 + h c)
+            let maxExplore =
+                min ((maxX - minX + 1) * (maxY - minY + 1) * 8) 10000000
+            let mutable explored = 0
+            let mutable goalState = None
+            while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
                 let (c, d) = pq.Dequeue ()
                 if closed.Add ((c, d)) then
                     explored <- explored + 1
@@ -299,7 +229,6 @@ module PipelineWL =
                 let path = back [] s |> Array.ofList
 
                 // タップ元セルを非交差化:
-                // 分岐はタップセルの全方位提示に依存するため、後から Cross 化されると壊れる。
                 let (c0, d0) = path.[0]
                 let tapC = { X = c0.X - (delta d0).X; Y = c0.Y - (delta d0).Y }
                 (match occGet tapC with
@@ -312,7 +241,6 @@ module PipelineWL =
                     let straight = i < path.Length - 1 && snd path.[i + 1] = d
                     match occGet c with
                     | Some (OccWire (n2, f2, _)) ->
-                        // 直交通過 → Cross 化。元ネットはこのセルをタップ不可に。
                         let (hN, hD), (vN, vD) =
                             if d = E || d = W then (netId, d), (n2, f2)
                             else (n2, f2), (netId, d)
