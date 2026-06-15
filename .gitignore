@@ -3,4 +3,5 @@
 /.serena
 /node_modules
 /test-results
-/verilog
+# verilog/ は合成結果JSONも含めて管理する
+/.direnv

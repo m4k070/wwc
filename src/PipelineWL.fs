@@ -47,11 +47,10 @@ module PipelineWL =
     // --- 配置 ---------------------------------------------------------
 
     let private gateX0 = 12
-    let private pitchX = 24
-    let private pitchY = 16
 
     /// ゲートを JSON 宣言順に正方格子に配置する。
-    let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
+    /// pitchX/pitchY: ゲート間の水平/垂直距離。
+    let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
         let n = max 1 nl.Gates.Length
         let ncols = int (ceil (sqrt (float n)))
         let placed =
@@ -66,6 +65,9 @@ module PipelineWL =
             |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
             |> Map.ofList
         placed, pins
+
+    let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
+        placeWLWithPitch 24 16 nl
 
     // --- 終端割り当て ---------------------------------------------------
 
@@ -93,23 +95,26 @@ module PipelineWL =
     /// 各終端へは「既配線セルからのタップ (ファンアウト)」または
     /// 「駆動ゲートの出力先頭セル」から (Coord, Dir) 状態の A* で配線する。
     let routeWL (placed: WlPlaced list) (pins: Map<NetId, Coord>) : Result<OccGrid, CompileError> =
-        let mutable occ : OccGrid =
-            Map.ofList
-                [ for p in placed do yield p.Coord, OccGate p.Gate.Output
-                  for KeyValue (netId, c) in pins do yield c, OccGate netId ]
+        let occDict = System.Collections.Generic.Dictionary<Coord, OccCell>()
+        for p in placed do occDict.Add(p.Coord, OccGate p.Gate.Output)
+        for KeyValue (netId, c) in pins do occDict.Add(c, OccGate netId)
+        let occGet c = match occDict.TryGetValue c with true, v -> Some v | _ -> None
+        let occSet c v = occDict[c] <- v
+        let occRemove c = occDict.Remove c |> ignore
+        let occHas c = occDict.ContainsKey c
+        let toOccGrid () = occDict |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
 
         // 強制空白セル (ゲートの未使用側面)
         let forbidden =
             placed |> List.collect (fun p -> snd (gateTerminals p)) |> Set.ofList
 
         // 予約セル: (座標 → ネット, 出力先頭セルか)。
-        //   終端は該当ネットのゴールとしてのみ進入可。
-        //   出力先頭セルは該当ネットなら通過可 (初回ルートのシード)。
-        let reserved : Map<Coord, NetId * bool> =
-            Map.ofList
-                [ for p in placed do
-                    for (nid, c) in fst (gateTerminals p) do yield c, (nid, false)
-                  for p in placed do yield toward p.Coord p.Dir, (p.Gate.Output, true) ]
+        let resDict = System.Collections.Generic.Dictionary<Coord, NetId * bool>()
+        for p in placed do
+            for (nid, c) in fst (gateTerminals p) do resDict.Add(c, (nid, false))
+        for p in placed do resDict.Add(toward p.Coord p.Dir, (p.Gate.Output, true))
+        let resGet c = match resDict.TryGetValue c with true, v -> Some v | _ -> None
+        let resHas c = resDict.ContainsKey c
 
         let driver = placed |> List.map (fun p -> p.Gate.Output, p) |> Map.ofList
 
@@ -162,7 +167,7 @@ module PipelineWL =
             let inB (c: Coord) = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
 
             let isCrossingCell (c: Coord) =
-                match Map.tryFind c occ with
+                match occGet c with
                 | Some (OccWire (n2, _, _)) -> n2 <> netId
                 | _ -> false
 
@@ -170,33 +175,102 @@ module PipelineWL =
                 if not (inB c) || Set.contains c forbidden then false
                 else
                     let resOk =
-                        match Map.tryFind c reserved with
+                        match resGet c with
                         | Some (n, isFirst) -> n = netId && (isFirst || c = goal)
                         | None -> true
                     resOk &&
-                    (match Map.tryFind c occ with
-                     | None -> true
+                    (match occGet c with
                      | Some (OccWire (n2, f2, straight)) ->
-                         // 他ネットの直線セルは直交方向に通過可 (Cross 化)
                          n2 <> netId && straight && perpendicular nd f2 && c <> goal
-                     | Some _ -> false)
+                     | Some _ -> false
+                     | _ -> true)
+
+            // trySimplePath: L字/Z字マンハッタン経路を試す（A* 回避で高速化）
+            let trySimplePath (netId: NetId) (seeds: (Coord * Dir) list) (goal: Coord)
+                : (Coord * Dir) list option =
+                let manhattan (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
+                let checkPath (c: Coord) (d: Dir) =
+                    let mutable cur = c
+                    let mutable curD = d
+                    let mutable path = [(cur, curD)]
+                    // 直進して goal と X または Y が一致するまで
+                    while cur.X <> goal.X && cur.Y <> goal.Y do
+                        let step = toward cur curD
+                        if not (passOk step curD) then None
+                        else
+                            cur <- step
+                            path <- (cur, curD) :: path
+                    if cur.X = goal.X && cur.Y = goal.Y then Some (List.rev path)
+                    else
+                        // 残りは goal 方向へ直進
+                        let remD = if cur.X <> goal.X then
+                                      if goal.X > cur.X then E else W
+                                   else if goal.Y > cur.Y then N else S
+                        let mutable cur2 = cur
+                        let mutable path2 = path
+                        while cur2 <> goal do
+                            let step = toward cur2 remD
+                            if not (passOk step remD) then None
+                            else
+                                cur2 <- step
+                                path2 <- (cur2, remD) :: path2
+                        Some (List.rev path2)
+                // L字: シード方向で直進 → goal 方向で直進
+                let lpath = seeds |> List.tryPick (fun (c, d) -> checkPath c d)
+                if lpath.IsSome then lpath
+                else
+                    // Z字: シード方向と直交する方向で1ステップ → L字
+                    let perp d = match d with E | W -> [N; S] | N | S -> [E; W]
+                    seeds
+                    |> List.tryPick (fun (c, d) ->
+                        perp d |> List.tryPick (fun d2 ->
+                            let c2 = toward c d2
+                            if passOk c2 d2 then checkPath c2 d2 else None))
 
             // A*: 状態 = (セル, 進入方向)。交差セル上では直進のみ許可。
-            let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
-            let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
-            let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
-            let closed = System.Collections.Generic.HashSet<Coord * Dir>()
-            let h (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
-            for (c, d) in seeds do
-                if passOk c d && not (gScore.ContainsKey ((c, d))) then
-                    gScore.[(c, d)] <- 1
-                    prev.[(c, d)] <- None
-                    pq.Enqueue ((c, d), 1 + h c)
-            let maxExplore =
-                min ((maxX - minX + 1) * (maxY - minY + 1) * 4) 2000000
-            let mutable explored = 0
-            let mutable goalState = None
-            while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
+            // まず L/Z 字経路を試す
+            match trySimplePath netId seeds goal with
+            | Some path ->
+                // 経路を occ に書き込む
+                let (c0, d0) = path.[0]
+                let tapC = { X = c0.X - (delta d0).X; Y = c0.Y - (delta d0).Y }
+                (match occGet tapC with
+                 | Some (OccWire (n2, f2, _)) ->
+                     occSet tapC (OccWire (n2, f2, false))
+                     tapSources.Add tapC |> ignore
+                 | _ -> ())
+                path |> List.iteri (fun i (c, d) ->
+                    let straight = i < path.Length - 1 && snd path.[i + 1] = d
+                    match occGet c with
+                    | Some (OccWire (n2, f2, _)) ->
+                        let (hN, hD), (vN, vD) =
+                            if d = E || d = W then (netId, d), (n2, f2)
+                            else (n2, f2), (netId, d)
+                        occSet c (OccCross (hN, hD, vN, vD))
+                        (match netCells.TryGetValue n2 with
+                         | true, l -> l.Remove c |> ignore
+                         | _ -> ())
+                    | _ ->
+                        occSet c (OccWire (netId, d, straight))
+                        if not (c = goal && Set.contains c clkTerminalCells) then
+                            addNetCell netId c)
+                Ok ()
+            | None ->
+                let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
+                let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
+                let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
+                let closed = System.Collections.Generic.HashSet<Coord * Dir>()
+                let h (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
+                for (c, d) in seeds do
+                    if passOk c d && not (gScore.ContainsKey ((c, d))) then
+                        gScore.[(c, d)] <- 1
+                        prev.[(c, d)] <- None
+                        pq.Enqueue ((c, d), 1 + h c)
+                let maxExplore =
+                    min ((maxX - minX + 1) * (maxY - minY + 1) * 8) 10000000
+                let mutable explored = 0
+                let mutable goalState = None
+                while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
                 let (c, d) = pq.Dequeue ()
                 if closed.Add ((c, d)) then
                     explored <- explored + 1
@@ -228,26 +302,26 @@ module PipelineWL =
                 // 分岐はタップセルの全方位提示に依存するため、後から Cross 化されると壊れる。
                 let (c0, d0) = path.[0]
                 let tapC = { X = c0.X - (delta d0).X; Y = c0.Y - (delta d0).Y }
-                (match Map.tryFind tapC occ with
+                (match occGet tapC with
                  | Some (OccWire (n2, f2, _)) ->
-                     occ <- Map.add tapC (OccWire (n2, f2, false)) occ
+                     occSet tapC (OccWire (n2, f2, false))
                      tapSources.Add tapC |> ignore
                  | _ -> ())
 
                 path |> Array.iteri (fun i (c, d) ->
                     let straight = i < path.Length - 1 && snd path.[i + 1] = d
-                    match Map.tryFind c occ with
+                    match occGet c with
                     | Some (OccWire (n2, f2, _)) ->
                         // 直交通過 → Cross 化。元ネットはこのセルをタップ不可に。
                         let (hN, hD), (vN, vD) =
                             if d = E || d = W then (netId, d), (n2, f2)
                             else (n2, f2), (netId, d)
-                        occ <- Map.add c (OccCross (hN, hD, vN, vD)) occ
+                        occSet c (OccCross (hN, hD, vN, vD))
                         (match netCells.TryGetValue n2 with
                          | true, l -> l.Remove c |> ignore
                          | _ -> ())
                     | _ ->
-                        occ <- Map.add c (OccWire (netId, d, straight)) occ
+                        occSet c (OccWire (netId, d, straight))
                         if not (c = goal && Set.contains c clkTerminalCells) then
                             addNetCell netId c)
                 Ok ()
@@ -264,18 +338,18 @@ module PipelineWL =
             let rec go (c: Coord) (dIn: Dir) acc =
                 let acc = (c, dIn) :: acc
                 let prev = { X = c.X - (delta dIn).X; Y = c.Y - (delta dIn).Y }
-                match Map.tryFind prev occ with
+                match occGet prev with
                 | Some (OccWire (_, d2, _)) -> go prev d2 acc
                 | Some (OccCross _) -> go prev dIn acc   // 直進チャネル
                 | _ -> acc                               // OccGate (Pin / 駆動ゲート)
-            match Map.tryFind terminal occ with
+            match occGet terminal with
             | Some (OccWire (_, d, _)) -> go terminal d []
             | _ -> []
 
         let freeCell (c: Coord) =
-            not (Map.containsKey c occ)
+            not (occHas c)
             && not (Set.contains c forbidden)
-            && not (Map.containsKey c reserved)
+            && not (resHas c)
 
         /// edge の直線 run にコの字バンプを 1 つ挿入する (長さ +2h, h ≤ need/2)。
         /// バンプ可能なのは OccWire(net, d, straight=true) のみ:
@@ -286,7 +360,7 @@ module PipelineWL =
             let n = arr.Length
             let plainAt i =
                 let (c, d) = arr.[i]
-                match Map.tryFind c occ with
+                match occGet c with
                 | Some (OccWire (nid, d2, true)) -> nid = netId && d2 = d
                 | _ -> false
             let mul (dd: Dir) k (c: Coord) =
@@ -336,7 +410,8 @@ module PipelineWL =
                 let rEnd = fst arr.[a + s - 1]
                 // 中間セルを空ける (straight=true のみなのでタップ元ではない)
                 for t in a + 1 .. a + s - 2 do
-                    occ <- Map.remove (fst arr.[t]) occ
+                    occRemove (fst arr.[t])
+
                 let seg =
                     [ yield rA, d
                       for k in 1 .. h -> mul u k rA, u
@@ -344,9 +419,8 @@ module PipelineWL =
                       for k in 1 .. h - 1 -> mul u (h - k) rEnd, u'
                       yield rEnd, u' ]
                 seg |> List.iteri (fun t (c, dd) ->
-                    // 終端 rEnd の次は元の後続 (方向 d ≠ u') なので straight=false
                     let straight = t < seg.Length - 1 && snd seg.[t + 1] = dd
-                    occ <- Map.add c (OccWire (netId, dd, straight)) occ)
+                    occSet c (OccWire (netId, dd, straight)))
                 let edge' =
                     List.ofArray arr.[0 .. a - 1] @ seg @ List.ofArray arr.[a + s .. n - 1]
                 edge', 2 * h)
@@ -368,16 +442,17 @@ module PipelineWL =
             let arr = Array.ofList path
             arr |> Array.iteri (fun i (c, d) ->
                 let straight = i < arr.Length - 1 && snd arr.[i + 1] = d
-                match Map.tryFind c occ with
+                match occGet c with
                 | Some (OccWire (n2, f2, _)) ->
                     let (hN, hD), (vN, vD) =
                         if d = E || d = W then (netId, d), (n2, f2)
                         else (n2, f2), (netId, d)
-                    occ <- Map.add c (OccCross (hN, hD, vN, vD)) occ
-                    (match netCells.TryGetValue n2 with
-                     | true, l -> l.Remove c |> ignore
-                     | _ -> ())
-                | _ -> occ <- Map.add c (OccWire (netId, d, straight)) occ)
+                    occSet c (OccCross (hN, hD, vN, vD))
+
+                    match netCells.TryGetValue n2 with
+                    | true, l -> l.Remove c |> ignore
+                    | _ -> ()
+                | _ -> occSet c (OccWire (netId, d, straight)))
 
         /// リーフ edge を撤去する。Cross は他ネットチャネルを直線 Wire に復元する。
         /// タップ元セルを含む場合は他分岐が壊れるため撤去不可 (false)。
@@ -385,11 +460,11 @@ module PipelineWL =
             if edge |> List.exists (fun (c, _) -> tapSources.Contains c) then false
             else
                 for (c, _) in edge do
-                    match Map.tryFind c occ with
-                    | Some (OccWire (n, _, _)) when n = netId -> occ <- Map.remove c occ
+                    match occGet c with
+                    | Some (OccWire (n, _, _)) when n = netId -> occRemove c
                     | Some (OccCross (hN, hD, vN, vD)) ->
-                        if hN = netId then occ <- Map.add c (OccWire (vN, vD, true)) occ
-                        elif vN = netId then occ <- Map.add c (OccWire (hN, hD, true)) occ
+                        if hN = netId then occSet c (OccWire (vN, vD, true))
+                        elif vN = netId then occSet c (OccWire (hN, hD, true))
                     | _ -> ()
                 true
 
@@ -407,18 +482,18 @@ module PipelineWL =
             let maxY = (pts |> List.map (fun c -> c.Y) |> List.max) + margin
             let inB (c: Coord) = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
             let isCrossingCell (c: Coord) =
-                match Map.tryFind c occ with
+                match occGet c with
                 | Some (OccWire (n2, _, _)) -> n2 <> netId
                 | _ -> false
             let passOk (c: Coord) (nd: Dir) =
                 if not (inB c) || Set.contains c forbidden then false
                 else
                     let resOk =
-                        match Map.tryFind c reserved with
+                        match resGet c with
                         | Some (n, isFirst) -> n = netId && (isFirst || c = goal)
                         | None -> true
                     resOk &&
-                    (match Map.tryFind c occ with
+                    (match occGet c with
                      | None -> true
                      | Some (OccWire (n2, f2, straight)) ->
                          n2 <> netId && straight && perpendicular nd f2 && c <> goal
@@ -485,7 +560,7 @@ module PipelineWL =
                     |> Seq.collect (List.mapi (fun i (c, _) -> c, i + 1))
                     |> Seq.filter (fun (c, _) ->
                         ownerCount.[c] > 1
-                        && (match Map.tryFind c occ with
+                        && (match occGet c with
                             | Some (OccWire (n, _, _)) -> n = netId
                             | _ -> false))
                     |> Seq.distinctBy fst
@@ -534,9 +609,9 @@ module PipelineWL =
                                                 let tapC =
                                                     { X = c0.X - (delta d0).X
                                                       Y = c0.Y - (delta d0).Y }
-                                                (match Map.tryFind tapC occ with
+                                                (match occGet tapC with
                                                  | Some (OccWire (n, dq, _)) when n = netId ->
-                                                     occ <- Map.add tapC (OccWire (n, dq, false)) occ
+                                                     occSet tapC (OccWire (n, dq, false))
                                                      tapSources.Add tapC |> ignore
                                                  | _ -> ())
                                             | [] -> ())
@@ -569,7 +644,7 @@ module PipelineWL =
             | Error e ->
                 eprintfn "WARN: %A — クロックスキュー非調整で続行" e
                 Ok ())
-        |> Result.map (fun () -> occ)
+        |> Result.map (fun () -> toOccGrid ())
 
     // --- 合成 -----------------------------------------------------------
 
@@ -598,18 +673,23 @@ module PipelineWL =
         | Not | Nand | Dff -> true
         | _ -> false
 
-    /// yosys JSON → WireLevel グリッド。
+    /// yosys JSON → WireLevel グリッド (ピッチ指定可能)。
     /// 戻り値: (グリッド, 配置, ピン座標)。出力ネットの観測は駆動ゲートのセルで行う。
-    let compileWL (src: string)
+    let compileWLWithPitch (pitchX: int) (pitchY: int) (src: string)
         : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
         frontend src
         |> Result.bind (fun nl ->
             match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
             | Some g -> Error (UnmappableGate g.Kind)
             | None ->
-                let placed, pins = placeWL nl
+                let placed, pins = placeWLWithPitch pitchX pitchY nl
                 routeWL placed pins
                 |> Result.map (fun occ -> emitWL placed pins occ, placed, pins))
+
+    /// yosys JSON → WireLevel グリッド (デフォルトピッチ 24x16)。
+    let compileWL (src: string)
+        : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
+        compileWLWithPitch 24 16 src
 
     /// デバッグ用: LGrid を ASCII ダンプする (構造のみ、レベルは大文字/記号で表現しない)。
     let dumpAscii (g: LGrid) : string =

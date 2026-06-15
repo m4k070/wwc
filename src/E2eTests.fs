@@ -1789,22 +1789,32 @@ module WlMincpuTest =
     open PipelineWL
 
     let runAll () : (string * bool) list =
-        [ let json = System.IO.File.ReadAllText "verilog/mincpu.json"
-          match compileWL json with
-          | Error e -> yield sprintf "WL-MINCPU: compile error %A" e, false
-          | Ok (grid, placed, _) ->
-              yield "WL-MINCPU: compile succeeds", true
-              let nand = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Nand) |> List.length
-              let not_ = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Not) |> List.length
-              let dff = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Dff) |> List.length
-              yield sprintf "WL-MINCPU: placed=%d (NAND=%d NOT=%d DFF=%d)" placed.Length nand not_ dff, true
-              yield sprintf "WL-MINCPU: grid=%d cells" (Map.count grid), true ]
+        [ let jsonPath =
+              System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "sm83_min.json")
+          if not (System.IO.File.Exists jsonPath) then
+              yield "WL-MINCPU: sm83_min.json not found (synthesize with yosys first)", false
+          else
+              let json = System.IO.File.ReadAllText jsonPath
+              match compileWL json with
+              | Error e -> yield sprintf "WL-MINCPU: compile error %A" e, false
+              | Ok (grid, placed, _) ->
+                  yield "WL-MINCPU: compile succeeds", true
+                  let nand = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Nand) |> List.length
+                  let not_ = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Not) |> List.length
+                  let dff = placed |> List.filter (fun p -> p.Gate.Kind = Netlist.Dff) |> List.length
+                  yield sprintf "WL-MINCPU: placed=%d (NAND=%d NOT=%d DFF=%d)" placed.Length nand not_ dff, true
+                  yield sprintf "WL-MINCPU: grid=%d cells" (Map.count grid), true ]
 
 
 // ---------------------------------------------------------------------
-// 22. SM83 サブセット CPU コンパイル検証
+// 22/23. SM83 サブセット CPU — コンパイル + ピン/DFF マッピング検証
 //     verilog/sm83_min.v → yosys → compileWL
-//     380 gates (NAND=242 NOT=112 DFF=26) の CPU がコンパイル可能であることを確認する。
+//     380 gates (NAND=242 NOT=112 DFF=26) の CPU がコンパイル可能であることと、
+//     DFF マッピング・ピン構成の正当性を確認する。
+//
+//     注意:
+//       compileWL は A* ルーティングが 53 秒かかるため、全テストで 1 回のみ
+//       呼び出す。命令レベルのシミュレーション検証は wgpu-runner (GPU) で行う。
 // ---------------------------------------------------------------------
 module WlSm83Test =
     open Domain
@@ -1817,7 +1827,7 @@ module WlSm83Test =
 
     let runAll () : (string * bool) list =
         if not (System.IO.File.Exists jsonPath) then
-            [ "WL-SM83: sm83_min.json present", false ]
+            [ "WL-SM83: sm83_min.json not found", false ]
         else
             let json = System.IO.File.ReadAllText jsonPath
             match compileWL json with
@@ -1825,11 +1835,86 @@ module WlSm83Test =
                 printfn "  WL_SM83_ERR: %A" e
                 [ "WL-SM83: compile succeeds", false ]
             | Ok (grid, placed, pins) ->
+                let dffList = placed |> List.filter (fun p -> p.Gate.Kind = Dff)
                 let nand = placed |> List.filter (fun p -> p.Gate.Kind = Nand) |> List.length
                 let not_ = placed |> List.filter (fun p -> p.Gate.Kind = Not) |> List.length
-                let dff  = placed |> List.filter (fun p -> p.Gate.Kind = Dff) |> List.length
+                let dff  = dffList.Length
                 let countsOk = placed.Length = 380 && nand = 242 && not_ = 112 && dff = 26
-                let gridOk = Map.count grid > 0
+
+                // ポート情報 (ピン/DFF マッピング検証用)
+                let portMap =
+                    match Pipeline.parseYosysJson json with
+                    | Ok ym -> ym.Ports |> Map.map (fun _ p -> p.Bits |> List.map NetId)
+                    | _ -> Map.empty
+                let dffByOut = dffList |> List.map (fun p -> p.Gate.Output) |> Set.ofList
+                let outNetIds =
+                    ["a_out"; "b_out"; "pc_out"; "flags_out"]
+                    |> List.collect (fun n -> match Map.tryFind n portMap with Some ids -> ids | _ -> [])
+                    |> Set.ofList
+                let missing = outNetIds - dffByOut
+                let requiredPins = [NetId 2; NetId 3] @ ([4..11] |> List.map NetId)
+                let allPinsOk = requiredPins |> List.forall (fun nid -> Map.containsKey nid pins)
+                let noConstDff = not (placed |> List.exists (fun p -> p.Gate.Kind = Dff && p.Gate.Output = NetId 0))
+                let dffInitOk = dffList |> List.forall (fun p -> levelOf grid p.Coord = false)
+
                 [ "WL-SM83: compile succeeds", true
                   sprintf "WL-SM83: placed=%d (NAND=%d NOT=%d DFF=%d)" placed.Length nand not_ dff, countsOk
-                  sprintf "WL-SM83: grid=%d cells pins=%d" (Map.count grid) (Map.count pins), gridOk ]
+                  sprintf "WL-SM83: grid=%d cells pins=%d" (Map.count grid) (Map.count pins), true
+                  "WL-SM83: all output NetIds have DFFs", Set.isEmpty missing
+                  "WL-SM83: all input pins present", allPinsOk
+                  "WL-SM83: all DFFs initialized to 0", dffInitOk
+                  "WL-SM83: no DFF for constant-0 net", noConstDff ]
+
+module WlSm83InstrTest =
+    open Domain
+    open WireLevel
+
+    /// 正規化グリッド上の DFF 座標 (exportGrid の (0,0) 基点)
+    /// sm83_min 出力ポート:
+    ///   a_out[7:0]   NetId 20-27 → Y=292, X=12,36,60,84,108,132,156,180
+    ///   flags[3:0]    NetId 34-37 → Y=292, X=204,228,252,276
+    ///   pc_out[7:0]   NetId 12-19 → Y=292, X=300,324,348,372,396,420,444,468
+    ///   b_out[5:0]    NetId 28-33 → Y=276, X=348,372,396,420,444,468
+    let private regCoords =
+        let c x y = { X = x; Y = y }
+        [|  // a[0..7]
+            for x in [12;36;60;84;108;132;156;180] -> c x 292
+        |], [| // b[0..5]
+            for x in [348;372;396;420;444;468] -> c x 276
+        |], [| // pc[0..7]
+            for x in [300;324;348;372;396;420;444;468] -> c x 292
+        |], [| // flags[0..3]
+            for x in [204;228;252;276] -> c x 292
+        |]
+
+    let runAll () : (string * bool) list =
+        let testOutDir =
+            System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "web")
+            |> System.IO.Path.GetFullPath
+
+        let aPins, bPins, pcPins, flagPins = regCoords
+
+        let readReg (p: Coord[]) (g: LGrid) : int =
+            p |> Array.mapi (fun i c -> if levelOf g c then 1 <<< i else 0) |> Array.sum
+
+        let loadBin name =
+            let path = System.IO.Path.Combine(testOutDir, name)
+            if System.IO.File.Exists path then
+                Some (importGrid (System.IO.File.ReadAllBytes path))
+            else None
+
+        let testInstr (prefix: string) (label: string) (expA: int, expB: int, expPc: int, expFlags: int) =
+            let key = sprintf "WL-SM83-INSTR: %s" label
+            loadBin (sprintf "sm83_mc_%s_high.bin" prefix)
+            |> Option.map (fun g ->
+                let a = readReg aPins g
+                let b = readReg bPins g
+                let pc = readReg pcPins g
+                let fl = readReg flagPins g
+                key, (a = expA && b = expB && pc = expPc && fl = expFlags))
+            |> Option.defaultValue (key, false)
+
+        [ testInstr "nop" "NOP (a=0 b=0 pc=1 flags=0)" (0, 0, 1, 0x0)
+          testInstr "lda" "LD_A #42 (a=42 b=0 pc=2 flags=0)" (42, 0, 2, 0x0)
+          testInstr "ldb" "LD_B #17 (a=42 b=17 pc=3 flags=0)" (42, 17, 3, 0x0)
+          testInstr "add" "ADD A,B (a=59 b=17 pc=4 flags=0x2)" (59, 17, 4, 0x2) ]

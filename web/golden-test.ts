@@ -88,7 +88,21 @@ for (const tc of TEST_CASES) {
     const initBin = readBin(tc.initFile);
     const expectedBin = readBin(tc.expectedFile);
 
-    console.log(`Running ${tc.name}: ${tc.steps} steps...`);
+    // Log which WebGPU adapter is being used
+    // Capture console messages from the page
+    const logs: string[] = [];
+    page.on('console', msg => { if (msg.type() === 'log') logs.push(msg.text()); });
+    const adapterInfo = await page.evaluate(async () => {
+      try {
+        const gpu = (navigator as any).gpu;
+        if (!gpu) return 'no WebGPU';
+        const adapter = await gpu.requestAdapter();
+        if (!adapter) return 'no adapter';
+        const info = (adapter as any).info || {};
+        return JSON.stringify(Object.keys(info).length > 0 ? info : { vendor: info.vendor, arch: info.architecture });
+      } catch (e) { return 'error: ' + e.message; }
+    });
+    console.log(`Running ${tc.name}: ${tc.steps} steps... (adapter: ${adapterInfo})`);
 
     const resultBin = await runGPUSimulation(page, initBin, tc.steps);
 

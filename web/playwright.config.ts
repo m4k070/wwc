@@ -26,7 +26,6 @@ export default defineConfig({
           // --enable-unsafe-webgpu が必須 (--enable-webgpu は実在しないスイッチ)。
           args: [
             '--enable-unsafe-webgpu',
-            '--enable-unsafe-swiftshader',
             '--enable-features=Vulkan',
             '--ignore-gpu-blocklist',
             '--no-sandbox',

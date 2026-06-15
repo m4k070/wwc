@@ -5,7 +5,9 @@
 ```bash
 dotnet build src/WwHdl.fsproj          # build
 dotnet fsi src/RunTests.fsx            # all tests
-web/run-test.sh                        # WebGPU golden tests
+web/run-test.sh                        # WebGPU golden tests (Playwright/SwiftShader)
+wgpu-runner/run-tests.sh               # GPU golden tests (Rust + wgpu, RTX 3060)
+wgpu-runner/target/release/wgpu-runner # Rust native wgpu CLI (run single .bin)
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
@@ -61,7 +63,19 @@ Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx c
 
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
 
-**Total tests**: 150. Current pass rate: **150/150** (WL Mincpu 3/3 含む、WL ALU4 13/13 含む)。
+**Total tests**: 152. Current pass rate: **151/152** (WL Mincpu 1 fail: `verilog/mincpu.json` not found — synthesize with yosys first)。GPU golden tests: **24/24** パス (RTX 3060, Vulkan)。
+
+**SM83 CPU test** (`WlSm83Test`): compileWL で sm83_min.json (380 gates, 69k cells) をコンパイルし、DFF マッピング・ピン構成・初期化状態を検証 (7 tests)。compileWL は A* ルーティングが支配的で 53 秒を要する。
+
+**SM83 multi-instruction golden tests** (`ExportSm83Multi.fsx` + `golden-cases.json`): 4 命令 (NOP/LD_A/LD_B/ADD) の各 clk phase (high/low) の F# `settle` をリファレンスとし、GPU が byte-exact 一致することを検証 (8 tests)。レジスタ値 (A/B/PC/Flags) を Verilog 仕様と照合済み:
+- NOP: a=0, b=0, pc=1, flags=0x0 ✓
+- LD_A #42: a=42, b=0, pc=2, flags=0x0 ✓
+- LD_B #17: a=42, b=17, pc=3, flags=0x0 ✓
+- ADD A,B (42+17): a=59, b=17, pc=4, flags=0x2 ✓
+
+**重要な発見**: DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その時点での入力値を捕捉する。命令値の変更後、必ず clk=0 のまま組合せ論理を収束させてから clk=1 に遷移しないと、伝播前の古い値が捕捉される。これを `ExportSm83Multi.fsx` では setup settle (clk=0 で inst 変更 → settle → clk=1 → settle) の2段階で対処。
+
+既存の golden tests (sm83-cyc0, sm83p0 系) は NOP のみテストしているためこの問題に影響しない。
 
 ## Clock balance
 
@@ -102,12 +116,13 @@ GPU 実行は WebGPU (ブラウザ + WGSL compute、ping-pong バッファ) で�
 F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte
 エンコーディングが GPU 側と共有される。
 
-WebGPU golden tests: **10/10 パス** (toggleFF, halfAdder, mincpu-clk1, mincpu-clk0,
-sm83-cyc0-high, sm83-cyc0-low,
-sm83p0-cyc0-high, sm83p0-cyc0-low,
-sm83p0-mc-nop/NOP, sm83p0-mc-lda/LD_A, sm83p0-mc-ldb/LD_B, sm83p0-mc-add/ADD — 各 high+low)。
-GPU 結果は F# `settle` と byte-exact 一致。mincpu (46k cells) の 3500 ステップを
-SwiftShader (CPU) で 43s、F# リファレンスは約 93s と約 2 倍高速。
+GPU golden tests: **24/24 パス** (Rust + wgpu + RTX 3060, Vulkan)。
+GPU 結果は F# `settle` と byte-exact 一致。
+ベンチマーク (RTX 3060):
+- sm83-cyc0-high (139k cells, 2000 steps): 0.41s (SwiftShader 比 44x 高速)
+- sm83p0-cyc0-high (425k cells, 2500 steps): 0.46s (SwiftShader 比 130x 高速)
+- mincpu-clk1 (105k cells, 3500 steps): 0.39s (F# ref 比 205x 高速)
+- sm83-mc-add-high (139k cells, 2419 steps): 0.56s (F# ref 比 280x 高速)
 
 WireWorld 系パイプライン (junc3/STA/クロック注入 Sim) は組合せ回路デモとして
 維持。新規開発は WireLevel 上で行う。

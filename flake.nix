@@ -12,43 +12,32 @@
         pkgs = nixpkgs.legacyPackages.${system};
         # Playwright Chromium が実行時に必要とする共有ライブラリ群
         chromiumLibs = with pkgs; [
-          glib
-          nss
-          nspr
-          dbus
-          at-spi2-core
-          cups
-          libxkbfile
-          libxcomposite
-          libxdamage
-          libxfixes
-          libxrandr
-          libgbm
-          alsa-lib
-          pulseaudio
+          glib nss nspr dbus at-spi2-core cups expat libxcb libX11 libXext
+          libxkbcommon cairo pango udev libxkbfile libxcomposite libxdamage
+          libxfixes libxrandr libgbm alsa-lib pulseaudio
         ];
+        # wgpu-runner が Vulkan 経由で GPU を使うためのライブラリ
+        vulkanLibs = with pkgs; [ vulkan-loader ];
+        # 全ランタイムライブラリのパス (Chromium + Vulkan)
+        allLibs = chromiumLibs ++ vulkanLibs;
       in {
         devShells.default = pkgs.mkShell {
           name = "wwc";
           packages = with pkgs; [
-            # F# / .NET
             dotnet-sdk_8
-
-            # Python (セルライブラリ検証スクリプト)
             python3
-
-            # Verilog 合成 (HDL → NAND+NOT)
             yosys
-
-            # Node.js (Playwright + WebGPU テスト用)
+            rustc cargo rustfmt rust-analyzer
             nodejs_22
-
-            # ユーティリティ
+            vulkan-tools
             git
-          ] ++ chromiumLibs;
+          ] ++ allLibs;
 
-          # web/run-test.sh が Chromium 用 LD_LIBRARY_PATH の構築に使う
+          # Chromium 用 (web/run-test.sh が参照)
           WWC_CHROMIUM_LIBS = pkgs.lib.makeLibraryPath chromiumLibs;
+
+          # wgpu-runner が Vulkan を認識するためのライブラリパス
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [ vulkan-loader ]);
 
           shellHook = ''
             echo "wwc dev shell"
@@ -61,6 +50,7 @@
             echo "  dotnet fsi src/RunTests.fsx          # F# 全テスト"
             echo "  python3 scripts/verify_cells.py      # セルライブラリ検証"
             echo "  web/run-test.sh                      # WebGPU ゴールデンテスト"
+            echo "  wgpu-runner/target/release/wgpu-runner  # Rust WebGPU ランナー"
           '';
         };
       });
