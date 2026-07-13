@@ -1,0 +1,249 @@
+{
+  "checkInterval": 256,
+  "circuit": "sm83_min",
+  "init": "sm83_min_instr_init.bin",
+  "maxStepsPerPhase": 6000,
+  "meta": "sm83_min_instr_meta.json",
+  "steps": [
+    {
+      "desc": "NOP",
+      "expect": {
+        "a": 0,
+        "b": 0,
+        "flags": 0,
+        "pc": 1
+      },
+      "pins": {
+        "inst": 192
+      }
+    },
+    {
+      "desc": "LD A,#42",
+      "expect": {
+        "a": 42,
+        "b": 0,
+        "flags": 0,
+        "pc": 2
+      },
+      "pins": {
+        "inst": 42
+      }
+    },
+    {
+      "desc": "LD B,#17",
+      "expect": {
+        "a": 42,
+        "b": 17,
+        "flags": 0,
+        "pc": 3
+      },
+      "pins": {
+        "inst": 81
+      }
+    },
+    {
+      "desc": "ADD A,B",
+      "expect": {
+        "a": 59,
+        "b": 17,
+        "flags": 2,
+        "pc": 4
+      },
+      "pins": {
+        "inst": 128
+      }
+    },
+    {
+      "desc": "SUB A,B",
+      "expect": {
+        "a": 42,
+        "b": 17,
+        "flags": 4,
+        "pc": 5
+      },
+      "pins": {
+        "inst": 144
+      }
+    },
+    {
+      "desc": "LD B,#42",
+      "expect": {
+        "a": 42,
+        "b": 42,
+        "flags": 4,
+        "pc": 6
+      },
+      "pins": {
+        "inst": 106
+      }
+    },
+    {
+      "desc": "SUB A,B",
+      "expect": {
+        "a": 0,
+        "b": 42,
+        "flags": 12,
+        "pc": 7
+      },
+      "pins": {
+        "inst": 144
+      }
+    },
+    {
+      "desc": "LD A,#5",
+      "expect": {
+        "a": 5,
+        "b": 42,
+        "flags": 12,
+        "pc": 8
+      },
+      "pins": {
+        "inst": 5
+      }
+    },
+    {
+      "desc": "LD B,#9",
+      "expect": {
+        "a": 5,
+        "b": 9,
+        "flags": 12,
+        "pc": 9
+      },
+      "pins": {
+        "inst": 73
+      }
+    },
+    {
+      "desc": "SUB A,B",
+      "expect": {
+        "a": 252,
+        "b": 9,
+        "flags": 7,
+        "pc": 10
+      },
+      "pins": {
+        "inst": 144
+      }
+    },
+    {
+      "desc": "LD A,#63",
+      "expect": {
+        "a": 63,
+        "b": 9,
+        "flags": 7,
+        "pc": 11
+      },
+      "pins": {
+        "inst": 63
+      }
+    },
+    {
+      "desc": "LD B,#63",
+      "expect": {
+        "a": 63,
+        "b": 63,
+        "flags": 7,
+        "pc": 12
+      },
+      "pins": {
+        "inst": 127
+      }
+    },
+    {
+      "desc": "ADD A,B",
+      "expect": {
+        "a": 126,
+        "b": 63,
+        "flags": 2,
+        "pc": 13
+      },
+      "pins": {
+        "inst": 128
+      }
+    },
+    {
+      "desc": "ADD A,B",
+      "expect": {
+        "a": 189,
+        "b": 63,
+        "flags": 2,
+        "pc": 14
+      },
+      "pins": {
+        "inst": 128
+      }
+    },
+    {
+      "desc": "ADD A,B",
+      "expect": {
+        "a": 252,
+        "b": 63,
+        "flags": 2,
+        "pc": 15
+      },
+      "pins": {
+        "inst": 128
+      }
+    },
+    {
+      "desc": "ADD A,B",
+      "expect": {
+        "a": 59,
+        "b": 63,
+        "flags": 3,
+        "pc": 16
+      },
+      "pins": {
+        "inst": 128
+      }
+    },
+    {
+      "desc": "AND A,B",
+      "expect": {
+        "a": 59,
+        "b": 63,
+        "flags": 0,
+        "pc": 17
+      },
+      "pins": {
+        "inst": 160
+      }
+    },
+    {
+      "desc": "XOR A,B",
+      "expect": {
+        "a": 4,
+        "b": 63,
+        "flags": 0,
+        "pc": 18
+      },
+      "pins": {
+        "inst": 176
+      }
+    },
+    {
+      "desc": "LD B,#4",
+      "expect": {
+        "a": 4,
+        "b": 4,
+        "flags": 0,
+        "pc": 19
+      },
+      "pins": {
+        "inst": 68
+      }
+    },
+    {
+      "desc": "XOR A,B",
+      "expect": {
+        "a": 0,
+        "b": 4,
+        "flags": 8,
+        "pc": 20
+      },
+      "pins": {
+        "inst": 176
+      }
+    }
+  ]
+}
