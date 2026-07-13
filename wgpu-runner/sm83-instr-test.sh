@@ -1,16 +1,38 @@
 #!/usr/bin/env bash
-# sm83-instr-test.sh
-# SM83 命令レベルのシミュレーション検証 (GPU)。
+# sm83-instr-test.sh — SM83 命令レベル GPU 検証 (Phase 1b)
 #
-# Phase1b で実装予定:
-#   F# でコンパイル → ピン設定 → stepN → .bin 出力 (reference)
-#   wgpu-runner に同じ .bin を入力 → stepN → .bin 出力
-#   2 つの .bin を byte-exact 比較して一致確認
-#   レジスタ値 (A/B/PC/Flags) を .bin から読み出し期待値と比較
+# F# でコンパイル済みの初期グリッド (init.bin) + 座標メタ (meta.json) +
+# 命令列と期待レジスタ値 (program.json) を wgpu-runner のプログラムモードに渡し、
+# GPU 単独で「inst 書込 → clk=0 settle → clk=1 settle → レジスタ読出 → 期待値比較」
+# のサイクルを回す。F# リファレンスシミュレーションは不要。
 #
-# F# リファレンスの stepN は低速 (69k grid, 62ms/step) なため、
-# コンパイル検証は F# (WlSm83Test)、高速シミュレーション検証は
-# wgpu-runner (GPU, ~0.4s/2000steps) で行う。
+# Usage: ./wgpu-runner/sm83-instr-test.sh [--export] [--dump-regs] [--dump-dir DIR]
+#   --export     F# エクスポート (ExportSm83MinInstr.fsx) を強制再実行 (~4min)
+#   --dump-regs  期待値比較せず全レジスタ値を JSON lines で出力
+#   --dump-dir   FAIL した命令のグリッドを .bin 保存するディレクトリ
+set -euo pipefail
 
-echo "SM83 instruction GPU tests — planned for Phase 1b"
-echo "Use: wgpu-runner/run-tests.sh (existing golden tests)"
+cd "$(dirname "$0")/.."
+RUNNER=./wgpu-runner/target/release/wgpu-runner
+PROGRAM=web/sm83_min_program.json
+
+FORCE_EXPORT=false
+PASSTHRU=()
+for arg in "$@"; do
+  case "$arg" in
+    --export) FORCE_EXPORT=true ;;
+    *) PASSTHRU+=("$arg") ;;
+  esac
+done
+
+if [ ! -x "$RUNNER" ]; then
+  echo "Building wgpu-runner..."
+  nix develop -c bash -c "cd wgpu-runner && cargo build --release" 2>&1 | tail -1
+fi
+
+if $FORCE_EXPORT || [ ! -f "$PROGRAM" ]; then
+  echo "Exporting sm83_min instruction test artifacts (F# compile + reset settle)..."
+  nix develop -c bash -c "dotnet build src/WwHdl.fsproj -v q && dotnet fsi src/ExportSm83MinInstr.fsx"
+fi
+
+nix develop -c bash -c "\"$RUNNER\" --program \"$PROGRAM\" ${PASSTHRU[*]+"${PASSTHRU[*]}"}"

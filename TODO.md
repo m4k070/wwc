@@ -71,6 +71,25 @@
 - [x] GPU golden test: SM83 P0 10 ケース PASS (cyc0 2 + NOP/LDA/LDB/ADD multi-cycle 8)
 - [x] WireLevel CPU のマイクロベンチ (src/TestSm83.fsx, NOP/LD/ALU 8命令) — F# 実装は低速すぎるため GPU 検証で代替
 - [x] GPU での SM83 動作確認 (web/ golden test 16/16 PASS, うち SM83/SM83P0 12 ケース)
+- [x] 命令レベル GPU 検証 (Phase 1b, 2026-07-10)。F# リファレンス不要で GPU 単独の
+      マルチ命令実行 + レジスタ値検証が可能に:
+      * wgpu-runner プログラムモード (`--program prog.json [--dump-regs] [--dump-dir D]`)。
+        meta JSON (ピン/レジスタの正規化座標バス) + program JSON (命令列 + 期待値) 駆動で
+        回路非依存。ループ: pins 書込 → clk=0 固定点 → clk=1 固定点 → レジスタ読出 → 比較。
+        固定点検出は F# settle と同値 (interval 実行 → +1 世代不変チェック)
+      * `src/ExportSm83MinInstr.fsx`: Sm83MinModel (Verilog quirk 写像。ADD の H は
+        4bit ラップ比較 `((a&15)+(b&15))&15 >= 8` に注意) + 正規化 meta + init.bin +
+        期待値つき 20 命令 program JSON を生成
+      * `wgpu-runner/sm83-instr-test.sh`: 統合ランナー (成果物なければ自動エクスポート)
+      * sm83_min 20 命令 (全 opcode + 全フラグ Z/N/H/C、キャリー連鎖/ボロー) 20/20 PASS。
+        2 回実行で世代数まで決定的
+      * **クロック配線バグを発見・修正**: balanceClockNet の graceful degradation が
+        ripUpEdge でリーフ edge を撤去した後 routeExactLen 失敗時に復元せず、
+        DFF b[1] がクロック未接続 → レジスタビットがリセット値に固着していた
+        (PipelineWL.fs: 撤去前の occ を退避し失敗時に復元)。従来の golden テストは
+        b bit1=1 を通る値を一度もロードしていなかったため検出できなかった
+- [ ] web/sm83_mc_*.bin / sm83_cyc0_*.bin の再生成 — 既存 bin はクロック未接続バグ入り
+      回路のもの (F#/GPU 一致テストとしては有効だが回路として b[1] 欠陥あり)
 - [ ] GB エミュレータ統合 (バス/割込みブリッジ)
 
 ### 開発サイクルへの GPU 統合
@@ -89,6 +108,18 @@ web/run-wl.sh mincpu --headed  # ブラウザ表示あり
 - `web/golden-cases.json` — テストケース定義 (init/steps/expected/exportScript)
 - `golden-test.ts` — JSON 駆動の Playwright テスト (.bin 不在時は自動スキップ + エクスポートヒント表示)
 - `run-wl.sh` — 統合ランナー (依存自動セットアップ付き, npm/playwright install 不要)
+
+---
+
+## 既知の問題
+
+- `verilog/sm83_p0.json` / `sm83_p0.v` が紛失 (ExportSm83P0*.fsx / TestSm83.fsx の
+  4 本が参照、再エクスポート不可)。web/ の sm83p0 系 .bin は既存分のみ
+- コミット 399b9c8 に混入した PipelineWL.fs の高速化 WIP (Dictionary 化 +
+  trySimplePath) は未完成でビルド不能だったため、8db9be0 版に復元した上で
+  クロック配線修正を適用した (WIP コードは git 履歴 399b9c8 に残存)
+- クロックスキュー未解消 WARN は sm83_min で残存 (残差 110 gen)。接続は保たれる
+  ようになったが、スキュー起因の hold 違反リスクは将来の大規模回路で要注意
 
 ---
 
