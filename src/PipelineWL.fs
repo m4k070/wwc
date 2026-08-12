@@ -187,6 +187,11 @@ module PipelineWL =
                          | Some _ -> false)
                 let bboxArea = (maxX - minX + 1) * (maxY - minY + 1)
                 let maxExplore = min (bboxArea * 8) 50000000
+                // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、
+                // 後続ネットが交差できるセルを増やす (輻輳対策)。
+                // リトライが進むほど下げる (4→2→1) — 初回は直線優先で交差余地を
+                // 温存し、輻輳が深刻なリトライでは柔軟な経路選択を許容する。
+                let turnPenalty = max 1 (4 / exploreMult)
                 let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
                 let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
                 let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
@@ -209,7 +214,7 @@ module PipelineWL =
                             for nd in dirs do
                                 let c' = toward c nd
                                 if passOk c' nd && not (closed.Contains ((c', nd))) then
-                                    let ng = gc + 1 + (if nd <> d then 4 else 0)
+                                    let ng = gc + 1 + (if nd <> d then turnPenalty else 0)
                                     if not (gScore.ContainsKey ((c', nd))) || ng < gScore.[(c', nd)] then
                                         gScore.[(c', nd)] <- ng
                                         prev.[(c', nd)] <- Some (c, d)
