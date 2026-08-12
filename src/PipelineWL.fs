@@ -152,105 +152,106 @@ module PipelineWL =
                         for d in [E; W; N; S] do
                             yield (toward t d, d) ]
 
-            // 探索範囲: シードとゴールの bbox + マージン
-            let pts = goal :: (seeds |> List.map fst)
-            let margin = 60
-            let minX = (pts |> List.map (fun c -> c.X) |> List.min) - margin
-            let maxX = (pts |> List.map (fun c -> c.X) |> List.max) + margin
-            let minY = (pts |> List.map (fun c -> c.Y) |> List.min) - margin
-            let maxY = (pts |> List.map (fun c -> c.Y) |> List.max) + margin
-            let inB (c: Coord) = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
-
             let isCrossingCell (c: Coord) =
                 match Map.tryFind c occ with
                 | Some (OccWire (n2, _, _)) -> n2 <> netId
                 | _ -> false
 
-            let passOk (c: Coord) (nd: Dir) =
-                if not (inB c) || Set.contains c forbidden then false
-                else
-                    let resOk =
-                        match Map.tryFind c reserved with
-                        | Some (n, isFirst) -> n = netId && (isFirst || c = goal)
-                        | None -> true
-                    resOk &&
-                    (match Map.tryFind c occ with
-                     | None -> true
-                     | Some (OccWire (n2, f2, straight)) ->
-                         // 他ネットの直線セルは直交方向に通過可 (Cross 化)
-                         n2 <> netId && straight && perpendicular nd f2 && c <> goal
-                     | Some _ -> false)
-
-            // A*: 状態 = (セル, 進入方向)。交差セル上では直進のみ許可。
-            let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
-            let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
-            let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
-            let closed = System.Collections.Generic.HashSet<Coord * Dir>()
+            // リトライループ: 探索範囲 (bbox マージン) を拡大しながら A* を再試行する。
+            // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、後続ネットが
+            // 交差できるセルを増やす (輻輳対策)。
             let h (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
-            for (c, d) in seeds do
-                if passOk c d && not (gScore.ContainsKey ((c, d))) then
-                    gScore.[(c, d)] <- 1
-                    prev.[(c, d)] <- None
-                    pq.Enqueue ((c, d), 1 + h c)
-            let maxExplore =
-                min ((maxX - minX + 1) * (maxY - minY + 1) * 4) 2000000
-            let mutable explored = 0
-            let mutable goalState = None
-            while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
-                let (c, d) = pq.Dequeue ()
-                if closed.Add ((c, d)) then
-                    explored <- explored + 1
-                    if c = goal then goalState <- Some (c, d)
+            let pts = goal :: (seeds |> List.map fst)
+            let mutable exploreMult = 1
+            let mutable result = None
+            while result.IsNone && exploreMult <= 16 do
+                let margin = 60 * exploreMult
+                let minX = (pts |> List.map (fun c -> c.X) |> List.min) - margin
+                let maxX = (pts |> List.map (fun c -> c.X) |> List.max) + margin
+                let minY = (pts |> List.map (fun c -> c.Y) |> List.min) - margin
+                let maxY = (pts |> List.map (fun c -> c.Y) |> List.max) + margin
+                let inB (c: Coord) = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
+                let passOk (c: Coord) (nd: Dir) =
+                    if not (inB c) || Set.contains c forbidden then false
                     else
-                        let dirs = if isCrossingCell c then [d] else [E; W; N; S]
-                        let gc = gScore.[(c, d)]
-                        for nd in dirs do
-                            let c' = toward c nd
-                            if passOk c' nd && not (closed.Contains ((c', nd))) then
-                                // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、
-                                // 後続ネットが交差できるセルを増やす (輻輳対策)
-                                let ng = gc + 1 + (if nd <> d then 4 else 0)
-                                if not (gScore.ContainsKey ((c', nd))) || ng < gScore.[(c', nd)] then
-                                    gScore.[(c', nd)] <- ng
-                                    prev.[(c', nd)] <- Some (c, d)
-                                    pq.Enqueue ((c', nd), ng + h c')
-
-            match goalState with
+                        let resOk =
+                            match Map.tryFind c reserved with
+                            | Some (n, isFirst) -> n = netId && (isFirst || c = goal)
+                            | None -> true
+                        resOk &&
+                        (match Map.tryFind c occ with
+                         | None -> true
+                         | Some (OccWire (n2, f2, straight)) ->
+                             // 他ネットの直線セルは直交方向に通過可 (Cross 化)
+                             n2 <> netId && straight && perpendicular nd f2 && c <> goal
+                         | Some _ -> false)
+                let bboxArea = (maxX - minX + 1) * (maxY - minY + 1)
+                let maxExplore = min (bboxArea * 8) 50000000
+                let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
+                let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
+                let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
+                let closed = System.Collections.Generic.HashSet<Coord * Dir>()
+                for (c, d) in seeds do
+                    if passOk c d && not (gScore.ContainsKey ((c, d))) then
+                        gScore.[(c, d)] <- 1
+                        prev.[(c, d)] <- None
+                        pq.Enqueue ((c, d), 1 + h c)
+                let mutable explored = 0
+                let mutable goalState = None
+                while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
+                    let (c, d) = pq.Dequeue ()
+                    if closed.Add ((c, d)) then
+                        explored <- explored + 1
+                        if c = goal then goalState <- Some (c, d)
+                        else
+                            let dirs = if isCrossingCell c then [d] else [E; W; N; S]
+                            let gc = gScore.[(c, d)]
+                            for nd in dirs do
+                                let c' = toward c nd
+                                if passOk c' nd && not (closed.Contains ((c', nd))) then
+                                    let ng = gc + 1 + (if nd <> d then 4 else 0)
+                                    if not (gScore.ContainsKey ((c', nd))) || ng < gScore.[(c', nd)] then
+                                        gScore.[(c', nd)] <- ng
+                                        prev.[(c', nd)] <- Some (c, d)
+                                        pq.Enqueue ((c', nd), ng + h c')
+                match goalState with
+                | Some s ->
+                    let rec back acc st =
+                        match prev.[st] with
+                        | None -> st :: acc
+                        | Some p -> back (st :: acc) p
+                    let path = back [] s |> Array.ofList
+                    // タップ元セルを非交差化:
+                    // 分岐はタップセルの全方位提示に依存するため、後から Cross 化されると壊れる。
+                    let (c0, d0) = path.[0]
+                    let tapC = { X = c0.X - (delta d0).X; Y = c0.Y - (delta d0).Y }
+                    (match Map.tryFind tapC occ with
+                     | Some (OccWire (n2, f2, _)) ->
+                         occ <- Map.add tapC (OccWire (n2, f2, false)) occ
+                         tapSources.Add tapC |> ignore
+                     | _ -> ())
+                    path |> Array.iteri (fun i (c, d) ->
+                        let straight = i < path.Length - 1 && snd path.[i + 1] = d
+                        match Map.tryFind c occ with
+                        | Some (OccWire (n2, f2, _)) ->
+                            // 直交通過 → Cross 化。元ネットはこのセルをタップ不可に。
+                            let (hN, hD), (vN, vD) =
+                                if d = E || d = W then (netId, d), (n2, f2)
+                                else (n2, f2), (netId, d)
+                            occ <- Map.add c (OccCross (hN, hD, vN, vD)) occ
+                            (match netCells.TryGetValue n2 with
+                             | true, l -> l.Remove c |> ignore
+                             | _ -> ())
+                        | _ ->
+                            occ <- Map.add c (OccWire (netId, d, straight)) occ
+                            if not (c = goal && Set.contains c clkTerminalCells) then
+                                addNetCell netId c)
+                    result <- Some (Ok ())
+                | None ->
+                    exploreMult <- exploreMult * 2
+            match result with
+            | Some r -> r
             | None -> Error (RoutingCongestion netId)
-            | Some s ->
-                let rec back acc st =
-                    match prev.[st] with
-                    | None -> st :: acc
-                    | Some p -> back (st :: acc) p
-                let path = back [] s |> Array.ofList
-
-                // タップ元セルを非交差化:
-                // 分岐はタップセルの全方位提示に依存するため、後から Cross 化されると壊れる。
-                let (c0, d0) = path.[0]
-                let tapC = { X = c0.X - (delta d0).X; Y = c0.Y - (delta d0).Y }
-                (match Map.tryFind tapC occ with
-                 | Some (OccWire (n2, f2, _)) ->
-                     occ <- Map.add tapC (OccWire (n2, f2, false)) occ
-                     tapSources.Add tapC |> ignore
-                 | _ -> ())
-
-                path |> Array.iteri (fun i (c, d) ->
-                    let straight = i < path.Length - 1 && snd path.[i + 1] = d
-                    match Map.tryFind c occ with
-                    | Some (OccWire (n2, f2, _)) ->
-                        // 直交通過 → Cross 化。元ネットはこのセルをタップ不可に。
-                        let (hN, hD), (vN, vD) =
-                            if d = E || d = W then (netId, d), (n2, f2)
-                            else (n2, f2), (netId, d)
-                        occ <- Map.add c (OccCross (hN, hD, vN, vD)) occ
-                        (match netCells.TryGetValue n2 with
-                         | true, l -> l.Remove c |> ignore
-                         | _ -> ())
-                    | _ ->
-                        occ <- Map.add c (OccWire (netId, d, straight)) occ
-                        if not (c = goal && Set.contains c clkTerminalCells) then
-                            addNetCell netId c)
-                Ok ()
 
         // --- クロックスキュー均等化 (P1: hold 対策) -----------------------
         // WireLevel は配線セル 1 個 = 1 世代なので、クロック枝の長さを揃えれば
@@ -568,10 +569,17 @@ module PipelineWL =
                     balanceClockNet net (terms |> List.map snd)))
                 (Ok ())
 
-        // 全ゲートの全入力終端を順に配線
+        // 全ゲートの全入力終端を順に配線 (短いネット優先で輻輳軽減)
         let terminals =
             placed |> List.collect (fun p -> fst (gateTerminals p))
+        let netLen (nid: NetId) (goal: Coord) =
+            match Map.tryFind nid driver with
+            | Some p ->
+                let src = toward p.Coord p.Dir
+                abs (goal.X - src.X) + abs (goal.Y - src.Y)
+            | None -> System.Int32.MaxValue
         terminals
+        |> List.sortBy (fun (nid, goal) -> netLen nid goal)
         |> List.fold (fun acc (nid, goal) ->
             acc |> Result.bind (fun () -> routeOne nid goal))
             (Ok ())
