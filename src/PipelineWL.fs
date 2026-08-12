@@ -577,7 +577,9 @@ module PipelineWL =
                     balanceClockNet net (terms |> List.map snd)))
                 (Ok ())
 
-        // 全ゲートの全入力終端を順に配線 (短いネット優先で輻輳軽減)
+        // 全ゲートの全入力終端を順に配線 (短いネット優先で輻輳軽減)。
+        // routeOne が輻輳失敗した場合は Rip-up & reroute (残課題 2): そのネットの
+        // bbox 内の先行ネットを最大 10 個撤去して再ルーティングする。
         let routeSw = System.Diagnostics.Stopwatch.StartNew()
         let terminals =
             placed |> List.collect (fun p -> fst (gateTerminals p))
@@ -587,15 +589,154 @@ module PipelineWL =
                 let src = toward p.Coord p.Dir
                 abs (goal.X - src.X) + abs (goal.Y - src.Y)
             | None -> System.Int32.MaxValue
-        terminals
-        |> List.sortBy (fun (nid, goal) -> netLen nid goal)
-        |> List.mapi (fun i t -> i, t)
-        |> List.fold (fun acc (i, (nid, goal)) ->
-            if i % 100 = 0 then
+
+        // ネット → 全終端 (再ルーティング待ちキューへ投入する単位)
+        let netToTerminals : Map<NetId, Coord list> =
+            terminals
+            |> List.groupBy fst
+            |> List.map (fun (nid, ts) -> nid, ts |> List.map snd)
+            |> Map.ofList
+
+        // --- Rip-up & reroute ---------------------------------------------
+        // 失敗ネット (nid, goal) の bbox 内の先行ネットを最大 maxRipNets 個撤去し、
+        // 失敗ネットを解放された空間で再ルーティングする。撤去したネットの ID を
+        // 返し、呼び出し側が再ルーティング待ちキューへ入れる。
+        // 再ルーティングも失敗した場合は撤去前の occ を復元して元のエラーを返す
+        // (balanceClockNet の restoreEdge と同じ思想)。ループ防止のため再試行回数
+        // 上限 (ネット単位 / 全体) を設ける。
+        let ripCount = System.Collections.Generic.Dictionary<NetId, int>()
+        let maxRipsPerNet = 3
+        let maxTotalRips = 1000
+        let mutable totalRips = 0
+
+        let ripUpAndReroute (nid: NetId) (goal: Coord) : Result<NetId list, CompileError> =
+            if totalRips >= maxTotalRips then Error (RoutingCongestion nid)
+            else
+                // 失敗ネットの bbox (駆動源 / ピン / 既配線タップセル / ゴール + margin)。
+                // routeOne が最後 (mult=16) まで失敗した時点での探索範囲は margin 960 なので、
+                // ブロッカーはその範囲内にいる。タップセル (ファンアウトの既配線部分) を
+                // 含めることで、routeOne の実際の探索中心に合わせる。
+                let pts =
+                    [ yield goal
+                      match netCells.TryGetValue nid with
+                      | true, l -> for c in l do yield c
+                      | _ -> ()
+                      match Map.tryFind nid driver with
+                      | Some p -> yield toward p.Coord p.Dir
+                      | None -> ()
+                      match Map.tryFind nid pins with
+                      | Some c -> yield c
+                      | None -> () ]
+                let margin = 960
+                let minX = (pts |> List.map (fun c -> c.X) |> List.min) - margin
+                let maxX = (pts |> List.map (fun c -> c.X) |> List.max) + margin
+                let minY = (pts |> List.map (fun c -> c.Y) |> List.min) - margin
+                let maxY = (pts |> List.map (fun c -> c.Y) |> List.max) + margin
+                let inB (c: Coord) = c.X >= minX && c.X <= maxX && c.Y >= minY && c.Y <= maxY
+
+                // 1 パスで「ネット→全セル」と「bbox 内占有数」を同時に集計する。
+                let cellsByNet = System.Collections.Generic.Dictionary<NetId, ResizeArray<Coord * OccCell>>()
+                let bboxCount = System.Collections.Generic.Dictionary<NetId, int>()
+                let addToResize n x =
+                    match cellsByNet.TryGetValue n with
+                    | true, l -> l.Add x
+                    | _ -> let l = ResizeArray<Coord * OccCell>() in l.Add x; cellsByNet.[n] <- l
+                let bump n =
+                    match bboxCount.TryGetValue n with
+                    | true, k -> bboxCount.[n] <- k + 1
+                    | _ -> bboxCount.[n] <- 1
+                for KeyValue (c, cell) in occ do
+                    match cell with
+                    | OccWire (n, _, _) ->
+                        addToResize n (c, cell)
+                        if inB c && n <> nid then bump n
+                    | OccCross (hN, _, vN, _) ->
+                        addToResize hN (c, cell); addToResize vN (c, cell)
+                        if inB c then
+                            if hN <> nid then bump hN
+                            if vN <> nid then bump vN
+                    | _ -> ()
+
+                // ブロッカー候補: bbox 占有が多い順に、未達上限・リップアップ可能
+                // (タップ元を含まない = ファンアウト枝のない) ネットを最大 10 個。
+                // タップ元を持つネットは ripUpEdge が false を返すため事前に除外する
+                // (大きな共有ネットは占有数トップに来やすいが撤去できない)。
+                let candidates =
+                    bboxCount
+                    |> Seq.sortByDescending (fun (KeyValue (_, k)) -> k)
+                    |> Seq.map (fun (KeyValue (n, _)) -> n)
+                    |> Seq.filter (fun n ->
+                        match ripCount.TryGetValue n with
+                        | true, k -> k < maxRipsPerNet
+                        | _ -> true)
+                    |> Seq.filter (fun n ->
+                        match cellsByNet.TryGetValue n with
+                        | true, cells -> cells |> Seq.forall (fun (c, _) -> not (tapSources.Contains c))
+                        | _ -> false)
+                    |> Seq.truncate 10
+                    |> List.ofSeq
+
+                // 撤去。タップ元を含むネットは ripUpEdge が false を返すのでスキップ。
+                let mutable ripped : (NetId * (Coord * OccCell) list) list = []
+                for n2 in candidates do
+                    match cellsByNet.TryGetValue n2 with
+                    | true, cells when cells.Count > 0 ->
+                        let cellsList = List.ofSeq cells
+                        let rippable =
+                            cellsList |> List.forall (fun (c, _) -> not (tapSources.Contains c))
+                        if rippable then
+                            // ripUpEdge は Coord のみ参照する (Dir は未使用)
+                            let edge = cellsList |> List.map (fun (c, _) -> c, E)
+                            if ripUpEdge n2 edge then
+                                ripCount.[n2] <-
+                                    (match ripCount.TryGetValue n2 with true, k -> k | _ -> 0) + 1
+                                totalRips <- totalRips + 1
+                                netCells.Remove n2 |> ignore
+                                ripped <- (n2, cellsList) :: ripped
+                                eprintfn "[ripup] NetId %A 撤去 (%d cells, NetId %A の輻輳回避)"
+                                    n2 cellsList.Length nid
+                    | _ -> ()
+
+                let ripped = List.rev ripped
+                if List.isEmpty ripped then Error (RoutingCongestion nid)
+                else
+                    match routeOne nid goal with
+                    | Ok () ->
+                        eprintfn "[ripup] NetId %A ok (rip-up 後再ルーティング成功)" nid
+                        Ok (ripped |> List.map fst)
+                    | Error e ->
+                        // 撤去前の occ を復元して元のエラーを返す。失敗は致命的 (コンパイル中断)
+                        // なので netCells の復元は不要 (occ と一緒に破棄される)。
+                        for (_, cellsList) in ripped do
+                            for (c, cell) in cellsList do occ <- Map.add c cell occ
+                        Error e
+
+        // 終端を短いネット優先でキューへ投入。routeOne 失敗時は rip-up & reroute。
+        let queue = System.Collections.Generic.Queue<NetId * Coord>()
+        for (nid, goal) in terminals |> List.sortBy (fun (nid, goal) -> netLen nid goal) do
+            queue.Enqueue (nid, goal)
+        let totalTerminals = queue.Count
+        let mutable processed = 0
+        let mutable result : Result<unit, CompileError> = Ok ()
+        while (match result with Ok _ -> true | _ -> false) && queue.Count > 0 do
+            let (nid, goal) = queue.Dequeue ()
+            processed <- processed + 1
+            if processed % 100 = 0 then
                 eprintfn "[route] %d/%d (NetId %A) %d s"
-                    i terminals.Length nid (int routeSw.Elapsed.TotalSeconds)
-            acc |> Result.bind (fun () -> routeOne nid goal))
-            (Ok ())
+                    processed totalTerminals nid (int routeSw.Elapsed.TotalSeconds)
+            match routeOne nid goal with
+            | Ok () -> ()
+            | Error (RoutingCongestion _) ->
+                match ripUpAndReroute nid goal with
+                | Ok blockers ->
+                    for b in blockers do
+                        match Map.tryFind b netToTerminals with
+                        | Some goals -> for g in goals do queue.Enqueue (b, g)
+                        | None -> ()
+                | Error e -> result <- Error e
+            | Error e -> result <- Error e
+        eprintfn "[route] done: %d terminals processed, %d rip-ups" processed totalRips
+        result
         |> Result.bind (fun () ->
             match balanceClocks () with
             | Ok x -> Ok x
