@@ -1,18 +1,46 @@
-# wwc — HDL → WireWorld Compiler
+# wwc — HDL → Cellular Automaton Compiler
 
-任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン **WireWorld** 上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
+任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス: M1〜クロック配線まで実装完了。E2E テスト 59/59 通過。**
+> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 158/158 通過。**
 
 ---
 
 ## これは何か
 
-WireWorld は 4 状態（Empty / Electron Head / Electron Tail / Conductor）のセルオートマトンで、導線・論理ゲート・メモリを構築でき、チューリング完全。本プロジェクトは「HDL で書いた回路を WireWorld グリッドへ自動変換する」コンパイラを目指す。
+本プロジェクトは「HDL で書いた回路を CA グリッドへ自動変換する」コンパイラを目指す。
 
-通常の論理合成と決定的に違うのは、**WireWorld では「配線長 = 信号遅延」** という点。ゲートの全入力が同じ世代（tick）に到達しないと誤動作する。この制約をコンパイラがどう扱うかが本質的な課題になる。
+当初は **WireWorld**（4 状態 CA）をターゲットにしていたが、順序回路でスケールしないことが判明したため、独自 CA ルール **WireLevel**（51 状態、レベル駆動・pull 型有向配線）にピボットした。詳細は [DESIGN-CA2.md](DESIGN-CA2.md) を参照。
+
+### WireWorld での問題（なぜピボットしたか）
+
+1. **バックファイア**: ゲート発火時に電子が全入力配線へ逆流。周期クロックの順序回路ではサイクル毎に上流ゲートを誤発火させる
+2. **厳密タイミング**: パルス方式は全ゲート入力の 1gen 精度整合が必須。5ゲートの半加算器ですら sum が未解決のまま
+
+### WireLevel の利点
+
+- レベル駆動・pull 型有向配線 → バックファイアなし
+- 専用 Cross/DFF セル → 順序回路が動作
+- toggle FF (DFF+NOT ループ) の複数サイクル動作を検証済み
 
 ## アーキテクチャ
+
+### WireLevel コンパイラ（メイン）
+
+```
+HDL source
+   │  frontend        (Verilog/Yosys JSON → Netlist)
+   ▼
+Netlist
+   │  place           (グリッドへ配置)
+   ▼
+Grid (Placement)
+   │  route           (A* BFS 配線)
+   ▼
+WireLevel Grid → GPU バイナリ (.bin)
+```
+
+### WireWorld コンパイラ（レガシー、組合せ回路デモ用に維持）
 
 ```
 HDL source
@@ -31,15 +59,32 @@ Wire list
    │  Sta.computeArrival / insertDelays (タイミング均等化)   ✅
    │  emit            (配置 + 配線を 1 枚の Grid に合成)      ✅
    ▼
-WireWorld Grid → Golly RLE                                  ✅
+WireWorld Grid → Golly RLE
+```
+
+### ファイル構成
+
+```
+src/
+  Domain.fs      # Units, Domain, Rule, Netlist
+  WireLevel.fs   # 独自CAルール (レベル駆動・pull型有向配線) — 新ターゲット
+  Library.fs     # StdCell definitions, CellTest
+  Place.fs       # Placement algorithm
+  Route.fs       # Lee/BFS routing algorithm
+  Sta.fs         # Static timing analysis
+  Sim.fs         # Clock-gated simulation
+  Pipeline.fs    # Yosys JSON frontend + WireWorld pipeline (legacy)
+  PipelineWL.fs  # Yosys Netlist → WireLevel コンパイラ (P0)
+  E2eTests.fs    # All test modules
+wgpu-runner/     # Rust + wgpu GPU シミュレータ
+web/             # WebGPU フロントエンド (WGSL compute)
 ```
 
 ### 設計上の主要判断
 
-- **段ごとに別の型を返す** — 各コンパイル段の中間表現を別の型にし、段の取り違えをコンパイル時に弾く。
-- **タイミングを型に載せる** — `[<Measure>] type gen`（世代）を導入し、`StdCell.Latency: int<gen>` と `Wire.Delay: int<gen>` を同じ次元で扱う。
-- **railway-oriented pipeline** — 各段が `'a -> Result<'b, CompileError>` を返し `>>=`（bind）で連結。どこで落ちても `CompileError` で伝播する。
-- **疎なグリッド** — `Map<Coord, CellState>`。Empty は「キー不在」として表現。
+- **段ごとに別の型を返す** — 各コンパイル段の中間表現を別の型にし、段の取り違えをコンパイル時に弾く
+- **疎なグリッド** — `Map<Coord, CellState>`。Empty は「キー不在」として表現
+- **railway-oriented pipeline** — 各段が `Result<'b, CompileError>` を返し `>>=`（bind）で連結
 
 ## ビルド
 
@@ -52,49 +97,80 @@ dotnet build src/WwHdl.fsproj
 ### Yosys で論理合成
 
 ```bash
-# design.v を Yosys で NAND+NOT に正規化して JSON 出力
-read_verilog design.v
-synth -flatten
-abc -g NAND,NOT
-write_json design.json
+# 組合せ回路
+nix develop --command yosys -p "read_verilog design.v; synth -top top -flatten; abc -g NAND; opt_clean; write_json design.json"
+
+# 順序回路（dffunmap が必要）
+nix develop --command yosys -p "read_verilog design.v; synth -top top -flatten; dffunmap; abc -g NAND; opt_clean; write_json design.json"
 ```
+
+> yosys 0.62 では `abc -g NAND,NOT` はエラー。NOT は暗黙なので `-g NAND` でよい。
+> DFF は `$_DFF_P_` のみサポート。`$_DFFE_PP0P_` 等は未対応。
 
 ### F# でコンパイル → Grid 生成
 
 ```fsharp
 open WwHdl.Library
-open WwHdl.Pipeline
+open WwHdl.PipelineWL
 
 let json = System.IO.File.ReadAllText "design.json"
 
-// compile: Grid を返す
-match compile defaultLib json with
-| Ok grid ->
-    printfn "%s" (Rule.toRle grid)   // Golly RLE 出力
-| Error e ->
-    printfn "Error: %A" e
-```
-
-### E2E シミュレーション (Rule.run)
-
-```fsharp
-// compileFull: Grid + Placement + Wire list を返す詳細版
-let Ok (grid, placement, wires) = compileFull defaultLib json
-
-// 入力ポートに Head を注入して N 世代進める
-let arrivals = Sta.computeArrival placement wires
-let g        = grid |> inject inputPorts
-let result   = Rule.run steps g
-
-// 出力ポートで Head の有無を確認 (1=Head, 0=それ以外)
-let out = Rule.get result outPort = Head
+// WireLevel コンパイル
+match compileWL defaultLib json with
+| Ok grid -> printfn "Cells: %d" (Map.count grid)
+| Error e  -> printfn "Error: %A" e
 ```
 
 ### テスト実行
 
 ```bash
-dotnet fsi src/RunTests.fsx
+dotnet build src/WwHdl.fsproj                    # build（テスト前に必須）
+dotnet fsi src/RunTests.fsx                       # F# テスト (158/158)
+web/run-test.sh                                   # WebGPU golden tests (Playwright/SiftShader)
+wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
 ```
+
+## GPU 実行
+
+F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte エンコーディングが GPU 側と共有される。
+
+- **WebGPU**: ブラウザ + WGSL compute shader、ping-pong バッファ
+- **Rust + wgpu**: ネイティブ CLI (`wgpu-runner/`)
+
+GPU 結果は F# `settle` と **byte-exact 一致**。
+
+### ベンチマーク (RTX 3060, Vulkan)
+
+| テスト | Cells | Steps | 時間 | 比較 |
+|--------|-------|-------|------|------|
+| sm83-cyc0-high | 139k | 2000 | 0.41s | SwiftShader 比 44x |
+| sm83p0-cyc0-high | 425k | 2500 | 0.46s | SwiftShader 比 130x |
+| mincpu-clk1 | 105k | 3500 | 0.39s | F# ref 比 205x |
+| sm83-mc-add-high | 139k | 2419 | 0.56s | F# ref 比 280x |
+
+## SM83 CPU テスト
+
+SM83 (Game Boy CPU) のサブセット (380 gates, 69k cells) を WireLevel で E2E コンパイル・検証している。
+
+### コンパイル
+
+```bash
+# sm83_min.json は Yosys で合成済みのファイル
+# compileWL は A* ルーティングが支配的で ~53 秒要する
+```
+
+### 検証済み命合 (4 命令 × 2 clk phase = 8 golden tests)
+
+| 命令 | A | B | PC | Flags |
+|------|---|---|-----|-------|
+| NOP | 0 | 0 | 1 | 0x0 |
+| LD_A #42 | 42 | 0 | 2 | 0x0 |
+| LD_B #17 | 42 | 17 | 3 | 0x0 |
+| ADD A,B (42+17) | 59 | 17 | 4 | 0x2 |
+
+### 重要な発見
+
+DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その時点での入力値を捕捉する。命令値の変更後、必ず clk=0 のまま組合せ論理を収束させてから clk=1 に遷移しないと、伝播前の古い値が捕捉される。
 
 ## ロードマップ
 
@@ -114,7 +190,7 @@ dotnet fsi src/RunTests.fsx
 ### ✅ M3 — ルーティング
 
 - [x] `buildGrid`: セルの bounding box を Blocked にマーク
-- [x] `leePath`: Lee 法 BFS 最短経路 (src/dst は Blocked 内でも通過)
+- [x] `leePath`: Lee 法 BFS 最短経路
 - [x] `routeAll`: 全ネット配線、`Routed(netId)` でマーク
 - [x] 4 ゲート回路が Grid になることを確認
 
@@ -122,30 +198,56 @@ dotnet fsi src/RunTests.fsx
 
 - [x] `computeArrival`: iterative propagation で ArrivalMap を計算
 - [x] `computeSlack` + `insertDelays`: スラックを `extendPath` で物理延長
-- [x] `extendPath`: パス終端から -Y 方向へジグザグ延長 (y<0 空間を使用)
+- [x] `extendPath`: パス終端から -Y 方向へジグザグ延長
 
 ### ✅ M5 — E2E 検証インフラ
 
 - [x] `compileFull` で Grid + Placement + Wire list を取得
-- [x] クロックポート識別 (`Gate.Inputs.Length` 番目以降の In ポート)
+- [x] クロックポート識別
 - [x] `runWithClocks`: クロック注入タイミングを STA の target に合わせて自動計算
 - [x] `measureDelay`: L ターンによる遅延ショートカットを WireWorld 実測で補正
-- [x] 多段 NOT チェーン (2-NOT / 3-NOT) E2E テスト 59/59 全通過
+- [x] 多段 NOT チェーン E2E テスト 59/59 全通過
 
-### 🔲 M6 — 大規模回路検証
+### ✅ M6 — WireLevel + GPU
+
+- [x] WireLevel CA ルール実装 (`WireLevel.fs`)
+- [x] WireLevel コンパイラ (`PipelineWL.fs`)
+- [x] WebGPU compute shader ( WGSL, ping-pong バッファ )
+- [x] Rust + wgpu ネイティブ CLI
+- [x] GPU golden tests 24/24 パス (byte-exact 一致)
+- [x] SM83 CPU E2E コンパイル・検証 (380 gates, 69k cells)
+- [x] SM83 multi-instruction golden tests (NOP/LD_A/LD_B/ADD)
+- [x] クロックツリー経路長均等化 (`balanceClockNet`)
+
+### 🔲 M7 — 大規模回路検証
 
 - [ ] カウンタ (4 bit)
 - [ ] レジスタ (8 bit)
 - [ ] ALU (加算器)
 - [ ] 乗算器
 
-各回路: HDL 記述 → `compile` → `toRle` → Golly 目視 + `Rule.run` 回帰テスト。
-
-### 🔲 M7 — DFF / フィードバック
+### 🔲 M8 — DFF / シーケンシャル回路拡張
 
 - [ ] DFF (D フリップフロップ): クロックゲート型 NAND+NOT 2 段で実装
 - [ ] 循環ネットのルーティング対応
-- [ ] シーケンシャル回路の E2E 検証
+- [ ] より複複雑なシーケンシャル回路の E2E 検証
+
+## テスト
+
+| モジュール | 内容 | 状態 |
+|-----------|------|------|
+| CellTest | StdCell 単体テスト | 13/13 ✅ |
+| FrontendTest | Yosys JSON パース | ✅ |
+| RoutingTest | Lee/BFS ルーティング | ✅ |
+| StaTest | タイミング分析 | ✅ |
+| E2eTest | 組合せ回路 E2E | 59/59 ✅ |
+| MultiStageTest | 多段 NOT チェーン | ✅ |
+| NandGateTest | NAND ゲート | ✅ |
+| MultiGateTest | 複数ゲート | ✅ |
+| WlSm83Test | SM83 CPU | 7/7 ✅ |
+| GPU Golden | byte-exact 一致 | 24/24 ✅ |
+
+**合計**: 158/158 通過 (mincpu.json を moon 側で追加済み)
 
 ## ライセンス
 
@@ -156,5 +258,5 @@ MIT
 - Conway's Game of Life / WireWorld のチューリング完全性
 - QFT（Quest For Tetris）プロジェクト — CA 上の汎用計算機構築
 - Golly — セルオートマトンシミュレータ
-- [suzuki-navi/domino](https://github.com/suzuki-navi/domino) — 独自 CA による論理回路ビジュアルシミュレータ。crossover セル・遅延素子・ALU まで実装済み。交差処理と遅延挿入の設計参考。
+- [suzuki-navi/domino](https://github.com/suzuki-navi/domino) — 独自 CA による論理回路ビジュアルシミュレータ
 - https://www.quinapalus.com/wi-index.html
