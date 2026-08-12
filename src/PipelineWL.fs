@@ -255,7 +255,10 @@ module PipelineWL =
                 | None ->
                     exploreMult <- exploreMult * 2
             match result with
-            | Some r -> r
+            | Some r ->
+                if exploreMult > 1 then
+                    eprintfn "[route] NetId %A ok after mult=%d" netId exploreMult
+                r
             | None -> Error (RoutingCongestion netId)
 
         // --- クロックスキュー均等化 (P1: hold 対策) -----------------------
@@ -575,6 +578,7 @@ module PipelineWL =
                 (Ok ())
 
         // 全ゲートの全入力終端を順に配線 (短いネット優先で輻輳軽減)
+        let routeSw = System.Diagnostics.Stopwatch.StartNew()
         let terminals =
             placed |> List.collect (fun p -> fst (gateTerminals p))
         let netLen (nid: NetId) (goal: Coord) =
@@ -585,7 +589,11 @@ module PipelineWL =
             | None -> System.Int32.MaxValue
         terminals
         |> List.sortBy (fun (nid, goal) -> netLen nid goal)
-        |> List.fold (fun acc (nid, goal) ->
+        |> List.mapi (fun i t -> i, t)
+        |> List.fold (fun acc (i, (nid, goal)) ->
+            if i % 100 = 0 then
+                eprintfn "[route] %d/%d (NetId %A) %d s"
+                    i terminals.Length nid (int routeSw.Elapsed.TotalSeconds)
             acc |> Result.bind (fun () -> routeOne nid goal))
             (Ok ())
         |> Result.bind (fun () ->
