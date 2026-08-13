@@ -198,7 +198,10 @@ module PipelineWL =
                              n2 <> netId && straight && perpendicular nd f2 && c <> goal
                          | Some _ -> false)
                 let bboxArea = (maxX - minX + 1) * (maxY - minY + 1)
-                let maxExplore = min (bboxArea * 8) 50000000
+                // 探索上限: 経路が存在しないネットは上限まで探索してから失敗するため、
+                // 上限を下げると「早く諦めて rip-up に回す」ことができ、最悪コストが 1/10 になる。
+                // (経路が存在するネットはヒューリスティックが効き、上限に達しない)
+                let maxExplore = min (bboxArea * 8) 5000000
                 // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、
                 // 後続ネットが交差できるセルを増やす (輻輳対策)。
                 // リトライが進むほど下げる (4→2→1) — 初回は直線優先で交差余地を
