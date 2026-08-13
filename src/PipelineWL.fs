@@ -48,14 +48,19 @@ module PipelineWL =
 
     let private gateX0 = 12
 
-    /// 回路規模 (ゲート数) に応じた配置ピッチ。
+    /// ピッチ拡大シーケンス (狭い→広い)。compileWL が基本ピッチから開始し、
+    /// 輻輳失敗時は一段ずつ広げて再試行する。
+    let private pitchSequence : (int * int) list =
+        [ (12, 10); (16, 12); (20, 14); (24, 16) ]
+
+    /// 回路規模 (ゲート数) に応じた配置ピッチ (基本ピッチ)。
     /// 大規模回路では grid 面積爆発を防ぐため縮小する。
-    /// 下限はゲート間の配線チャネルが確保できる範囲。
+    /// 12x10 は飽和が早すぎるため大規模の基本ピッチには使わない
+    /// (失敗時は pitchSequence に沿って自動拡大される)。
     let private pitchFor (nGates: int) : int * int =
         if nGates <= 200 then 24, 16
         elif nGates <= 1000 then 20, 14
-        elif nGates <= 3000 then 16, 12
-        else 12, 10
+        else 16, 12
 
     /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版)。
     let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
@@ -779,7 +784,8 @@ module PipelineWL =
                 routeWL placed pins
                 |> Result.map (fun occ -> emitWL placed pins occ, placed, pins))
 
-    /// yosys JSON → WireLevel グリッド。ピッチは回路規模から自動決定する。
+    /// yosys JSON → WireLevel グリッド。ピッチは回路規模から自動決定し、
+    /// 輻輳失敗時はより広いピッチで自動再試行する (pitchSequence)。
     let compileWL (src: string)
         : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
         frontend src
@@ -787,10 +793,24 @@ module PipelineWL =
             match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
             | Some g -> Error (UnmappableGate g.Kind)
             | None ->
-                let px, py = pitchFor nl.Gates.Length
-                let placed, pins = placeWLWithPitch px py nl
-                routeWL placed pins
-                |> Result.map (fun occ -> emitWL placed pins occ, placed, pins))
+                let startPitch = pitchFor nl.Gates.Length
+                let rec tryPitches (remaining: (int * int) list) =
+                    match remaining with
+                    | [] -> Error (RoutingCongestion (NetId 0))
+                    | (px, py) :: rest ->
+                        let placed, pins = placeWLWithPitch px py nl
+                        match routeWL placed pins with
+                        | Ok occ -> Ok (emitWL placed pins occ, placed, pins)
+                        | Error e ->
+                            match rest with
+                            | [] -> Error e
+                            | _ ->
+                                eprintfn "[pitch] %dx%d 輻輳失敗 (%A) — 広いピッチで再試行" px py e
+                                tryPitches rest
+                let pitches =
+                    pitchSequence
+                    |> List.skipWhile (fun p -> p <> startPitch)
+                tryPitches pitches)
 
     /// デバッグ用: LGrid を ASCII ダンプする (構造のみ、レベルは大文字/記号で表現しない)。
     let dumpAscii (g: LGrid) : string =
