@@ -47,11 +47,18 @@ module PipelineWL =
     // --- 配置 ---------------------------------------------------------
 
     let private gateX0 = 12
-    let private pitchX = 24
-    let private pitchY = 16
 
-    /// ゲートを JSON 宣言順に正方格子に配置する。
-    let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
+    /// 回路規模 (ゲート数) に応じた配置ピッチ。
+    /// 大規模回路では grid 面積爆発を防ぐため縮小する。
+    /// 下限はゲート間の配線チャネルが確保できる範囲。
+    let private pitchFor (nGates: int) : int * int =
+        if nGates <= 200 then 24, 16
+        elif nGates <= 1000 then 20, 14
+        elif nGates <= 3000 then 16, 12
+        else 12, 10
+
+    /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版)。
+    let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
         let n = max 1 nl.Gates.Length
         let ncols = int (ceil (sqrt (float n)))
         let placed =
@@ -66,6 +73,11 @@ module PipelineWL =
             |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
             |> Map.ofList
         placed, pins
+
+    /// 回路規模に応じたピッチで配置する。
+    let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
+        let px, py = pitchFor nl.Gates.Length
+        placeWLWithPitch px py nl
 
     // --- 終端割り当て ---------------------------------------------------
 
@@ -772,8 +784,20 @@ module PipelineWL =
         | Not | Nand | Dff -> true
         | _ -> false
 
-    /// yosys JSON → WireLevel グリッド。
+    /// yosys JSON → WireLevel グリッド (ピッチ指定版)。
     /// 戻り値: (グリッド, 配置, ピン座標)。出力ネットの観測は駆動ゲートのセルで行う。
+    let compileWLWithPitch (pitchX: int) (pitchY: int) (src: string)
+        : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
+        frontend src
+        |> Result.bind (fun nl ->
+            match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
+            | Some g -> Error (UnmappableGate g.Kind)
+            | None ->
+                let placed, pins = placeWLWithPitch pitchX pitchY nl
+                routeWL placed pins
+                |> Result.map (fun occ -> emitWL placed pins occ, placed, pins))
+
+    /// yosys JSON → WireLevel グリッド。ピッチは回路規模から自動決定する。
     let compileWL (src: string)
         : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
         frontend src
@@ -781,7 +805,8 @@ module PipelineWL =
             match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
             | Some g -> Error (UnmappableGate g.Kind)
             | None ->
-                let placed, pins = placeWL nl
+                let px, py = pitchFor nl.Gates.Length
+                let placed, pins = placeWLWithPitch px py nl
                 routeWL placed pins
                 |> Result.map (fun occ -> emitWL placed pins occ, placed, pins))
 
