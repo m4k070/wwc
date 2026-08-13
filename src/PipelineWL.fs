@@ -688,7 +688,7 @@ module PipelineWL =
                         match cellsByNet.TryGetValue n with
                         | true, cells -> cells |> Seq.forall (fun (c, _) -> not (tapSources.Contains c))
                         | _ -> false)
-                    |> Seq.truncate 10
+                    |> Seq.truncate 30
                     |> List.ofSeq
 
                 // 撤去。タップ元を含むネットは ripUpEdge が false を返すのでスキップ。
