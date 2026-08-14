@@ -461,6 +461,14 @@ module sm83_full (
                 // === NOP ===
                 8'h00: phase <= PHASE_FETCH;
 
+                // === CB prefix (0xCB) ===
+                // 次のフェッチで CB 命令 (回転/シフト/BIT/RES/SET) をデコードする。
+                // cb_prefix フラグは PHASE_FETCH2 でチェックされる。
+                8'hCB: begin
+                    cb_prefix <= 1;
+                    phase <= PHASE_FETCH;
+                end
+
                 // === HALT / STOP ===
                 8'h76, 8'h10: begin halted <= 1; phase <= PHASE_HALT; end
 
