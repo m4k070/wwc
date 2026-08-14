@@ -619,6 +619,31 @@ module PipelineWL =
         let routeSw = System.Diagnostics.Stopwatch.StartNew()
         let terminals =
             placed |> List.collect (fun p -> fst (gateTerminals p))
+
+        // --- クロック優先配線 (スキュー均等化のためのスペース確保) ---
+        // クロック終端 (Dff の S 側) を最初に配線してから balanceClocks で均等化する。
+        // 通常配線の後に均等化すると、データ配線に使われた残りスペースしかなく、
+        // 延長 (バンプ挿入) が不足して ClockSkewUnresolved になる (sm83_subset 20x14 で skew 1068)。
+        let clockTerminals =
+            placed
+            |> List.collect (fun p ->
+                match p.Gate.Kind, p.Gate.Inputs with
+                | Dff, (clkNet :: _) -> [ clkNet, toward p.Coord S ]
+                | _ -> [])
+        let clockNetIds = clockTerminals |> List.map fst |> Set.ofList
+        let clockResult =
+            let mutable cr : Result<unit, CompileError> = Ok ()
+            for (nid, goal) in clockTerminals do
+                match routeOne nid goal with
+                | Ok () -> ()
+                | Error _ -> cr <- Error (RoutingCongestion nid)
+            cr
+            |> Result.bind (fun () ->
+                match balanceClocks () with
+                | Ok x -> Ok x
+                | Error e ->
+                    eprintfn "WARN: %A — クロックスキュー非調整で続行" e
+                    Ok ())
         let netLen (nid: NetId) (goal: Coord) =
             match Map.tryFind nid driver with
             | Some p ->
@@ -712,8 +737,11 @@ module PipelineWL =
                         Error (RoutingCongestion nid)
 
         // 終端を短いネット優先でキューへ投入。routeOne 失敗時は rip-up & reroute。
+        // クロック終端は既に配線済み (clockResult) なので除外する。
         let queue = System.Collections.Generic.Queue<NetId * Coord>()
-        for (nid, goal) in terminals |> List.sortBy (fun (nid, goal) -> netLen nid goal) do
+        for (nid, goal) in terminals
+                            |> List.filter (fun (nid, _) -> not (clockNetIds.Contains nid))
+                            |> List.sortBy (fun (nid, goal) -> netLen nid goal) do
             queue.Enqueue (nid, goal)
         let totalTerminals = queue.Count
         let mutable processed = 0
@@ -736,12 +764,7 @@ module PipelineWL =
                 | Error e -> result <- Error e
         eprintfn "[route] done: %d terminals processed, %d rip-ups" processed totalRips
         result
-        |> Result.bind (fun () ->
-            match balanceClocks () with
-            | Ok x -> Ok x
-            | Error e ->
-                eprintfn "WARN: %A — クロックスキュー非調整で続行" e
-                Ok ())
+        |> Result.bind (fun () -> clockResult)
         |> Result.map (fun () -> occ)
 
     // --- 合成 -----------------------------------------------------------
