@@ -186,16 +186,23 @@ GPU 結果は F# `settle` と **byte-exact 一致**。
 
 ## SM83 CPU テスト
 
-SM83 (Game Boy CPU) のサブセット (380 gates, 69k cells) を WireLevel で E2E コンパイル・検証している。
+SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している。規模は 3 段階:
+
+| 回路 | gates | 状態 |
+|------|------|------|
+| sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
+| sm83_subset | 3,553 | ✅ 配線完走 (20x14、約 100 分、skew 46) |
+| sm83_full | 9,059 | 全命令セット (通常 256 + CB prefix 256)。配線は今後の課題 |
 
 ### コンパイル
 
 ```bash
 # sm83_min.json は Yosys で合成済みのファイル
-# compileWL は A* ルーティングが支配的で ~53 秒要する
+# compileWL はピッチを回路規模から自動決定し、輻輳失敗時は自動拡大する (16x12 → 20x14)
+# クロック終端は優先配線され、balanceClockNet がスキューを均等化する
 ```
 
-### 検証済み命合 (4 命令 × 2 clk phase = 8 golden tests)
+### 検証済み命令 (4 命令 × 2 clk phase = 8 golden tests)
 
 | 命令 | A | B | PC | Flags |
 |------|---|---|-----|-------|
@@ -255,18 +262,22 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 - [x] SM83 multi-instruction golden tests (NOP/LD_A/LD_B/ADD)
 - [x] クロックツリー経路長均等化 (`balanceClockNet`)
 
-### 🔲 M7 — 大規模回路検証
+### ✅ M7 — 大規模回路検証
 
-- [ ] カウンタ (4 bit)
-- [ ] レジスタ (8 bit)
-- [ ] ALU (加算器)
-- [ ] 乗算器
+- [x] カウンタ (4 bit) / レジスタ (8 bit) / ALU (加算器)
+- [x] 配置ピッチの動的調整 → 輻輳失敗時の自動拡大 (`pitchFor` / `pitchSequence`)
+- [x] sm83_subset 配線完走 (3,553 gates、20x14、約 100 分)
+- [x] 探索上限削減 (50M → 5M) による爆発ネットの早期確定
+- [x] rip-up 撤去対象を「ブロッカー記録ベース」に改善
+- [x] クロック優先配線 (skew 1068 → 46)
 
-### 🔲 M8 — DFF / シーケンシャル回路拡張
+### 🔲 M8 — SM83 フルセット
 
-- [ ] DFF (D フリップフロップ): クロックゲート型 NAND+NOT 2 段で実装
-- [ ] 循環ネットのルーティング対応
-- [ ] より複複雑なシーケンシャル回路の E2E 検証
+- [x] CB prefix 命令 (0xCB) のデコード有効化 (9,059 gates、`d008cbe`)
+- [ ] sm83_full の配線完走 (5〜8 時間見込み)
+- [ ] CB 命令の動作検証 (配線後に実施)
+- [ ] 配線時間の短縮 (ネット単位の並列化 / ヒューリスティック改善)
+- [ ] 通常命令「全 256」の網羅確認
 
 ## テスト
 
