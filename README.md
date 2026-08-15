@@ -130,6 +130,42 @@ web/run-test.sh                                   # WebGPU golden tests (Playwri
 wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
 ```
 
+## 開発フロー（fsx 駆動）
+
+本プロジェクトは **fsx スクリプト駆動の開発**を採用している。F# Interactive の対話的 REPL（状態累積）ではなく、**fsx ファイル全体を毎回 `dotnet fsi` で再評価**する運用。
+
+### なぜ fsx 再評価か
+
+対話的 REPL は型推論が評価順に依存して固定される（`let x = 1` の後 x は `int` に固定され再定義不可）。また状態が累積して「腐る」。fsx の「ファイル再評価」はこれを根本回避する：
+
+- 毎回クリーンな状態から**型を最初から再推論** → 型ロックなし
+- **決定的・再現可能** — LLM エージェントや CI に重要
+- **静的型（コンパイル時エラー）+ 実行時検証を同時に回せる** — 幻覚（存在しない関数・型ミスマッチ）を即検出
+
+### 開発ループ
+
+```text
+1. src/*.fs に実装（検証対象）→ dotnet build で DLL 化
+2. *.fsx に検証・実験コードを書く（#r で DLL 参照）
+3. dotnet fsi script.fsx → 型エラー + 実行結果を同時に取得
+4. 修正して再実行（1コマンドで最短ループ）
+```
+
+### fsx の分類と命名
+
+| パターン | 用途 | 例 |
+|---------|------|-----|
+| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 158/158）, `RunWl.fsx`, `RunBackfire.fsx` |
+| `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
+| `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `TestSm83Full.fsx` |
+| `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
+
+### ポイント
+
+- `#r "bin/Debug/net8.0/WwHdl.dll"` でコンパイル済み DLL を参照（`dotnet build` 後必須）
+- `#time "on"` でパフォーマンス計測（`RunProf.fsx`, `pitch_bench.fsx`）
+- 一時的なデバッグスクリプトはルートに置き、安定したものは `src/` に移動する
+
 ## GPU 実行
 
 F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte エンコーディングが GPU 側と共有される。
