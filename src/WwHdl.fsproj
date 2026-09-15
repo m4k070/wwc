@@ -13,6 +13,7 @@
     <Compile Include="Sim.fs" />
     <Compile Include="Pipeline.fs" />
     <Compile Include="PipelineWL.fs" />
+    <Compile Include="RoutedArtifact.fs" />
     <Compile Include="E2eTests.fs" />
   </ItemGroup>
 </Project>

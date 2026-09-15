@@ -1918,3 +1918,123 @@ module WlSm83InstrTest =
           testInstr "lda" "LD_A #42 (a=42 b=0 pc=2 flags=0)" (42, 0, 2, 0x0)
           testInstr "ldb" "LD_B #17 (a=42 b=17 pc=3 flags=0)" (42, 17, 3, 0x0)
           testInstr "add" "ADD A,B (a=59 b=17 pc=4 flags=0x2)" (59, 17, 4, 0x2) ]
+
+// ---------------------------------------------------------------------
+// RoutedArtifact — 配線結果の保存・再読込 (TODO Step A)
+//     counter4 を配線 → 保存 → 読込し、読み込んだ grid が
+//     再配線なしでカウンタとして動くことまで確認する。
+// ---------------------------------------------------------------------
+module RoutedArtifactTest =
+    open System
+    open System.IO
+    open Domain
+    open Netlist
+    open WireLevel
+    open PipelineWL
+    open RoutedArtifact
+
+    let private fixedProvenance : Provenance =
+        { GitCommit = "test"
+          CreatedAtUtc = DateTimeOffset (2026, 9, 15, 0, 0, 0, TimeSpan.Zero) }
+
+    let private constBitJson = """{"modules":{"top":{"ports":{
+        "clk":{"direction":"input","bits":[2]},
+        "f":{"direction":"output","bits":["0",3,"1"]}},"cells":{}}}}"""
+
+    let private inoutJson = """{"modules":{"top":{"ports":{
+        "d":{"direction":"inout","bits":[2]}},"cells":{}}}}"""
+
+    let private counterJsonPath =
+        Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "counter4.json")
+
+    let private parseTests () : (string * bool) list =
+        let constBitsKept =
+            match parseYosysPorts constBitJson with
+            | Ok ports ->
+                ports
+                |> List.exists (fun p -> p.Name = "f" && p.Bits = [ ConstBit false; NetBit (NetId 3); ConstBit true ])
+            | Error _ -> false
+        let inoutRejected =
+            match parseYosysPorts inoutJson with
+            | Error (UnsupportedPortDirection ("d", "inout")) -> true
+            | _ -> false
+        [ "RA: constant port bits keep their bit positions", constBitsKept
+          "RA: inout port is rejected explicitly", inoutRejected ]
+
+    let private compileCounter (sourceBytes: byte[]) : Result<LGrid * RoutedMeta, string> =
+        let json = Text.Encoding.UTF8.GetString sourceBytes
+        parseYosysPorts json
+        |> Result.mapError describeError
+        |> Result.bind (fun ports ->
+            compileWL json
+            |> Result.mapError (sprintf "%A")
+            |> Result.bind (fun (grid, placed, pins) ->
+                buildMeta "counter4" (sourceSha256 sourceBytes) fixedProvenance ports grid placed pins
+                |> Result.mapError describeError
+                |> Result.map (fun meta -> grid, meta)))
+
+    /// 読み込んだ grid を clk で駆動し、q が 0 → 1 → 2 と数えるか。
+    let private countsAfterLoad (grid: LGrid) (meta: RoutedMeta) : bool =
+        let clkPin = meta.Inputs |> Map.tryFind "clk" |> Option.bind List.tryHead
+        let qCells =
+            meta.Outputs
+            |> Map.tryFind "q"
+            |> Option.defaultValue []
+            |> List.choose (function
+                | CellProbe c -> Some c
+                | _ -> None)
+        match clkPin with
+        | None -> false
+        | Some _ when qCells.Length <> 4 -> false
+        | Some clk ->
+            let value g = qCells |> List.mapi (fun i c -> if levelOf g c then 1 <<< i else 0) |> List.sum
+            let driveClock v g = g |> setPin clk v |> settle 2000 |> fst
+            let g0 = grid |> driveClock false
+            let g1 = g0 |> driveClock true
+            let g2 = g1 |> driveClock false |> driveClock true
+            value g0 = 0 && value g1 = 1 && value g2 = 2
+
+    let private roundTripTests () : (string * bool) list =
+        if not (File.Exists counterJsonPath) then [ "RA: counter4.json present", false ] else
+        let sourceBytes = File.ReadAllBytes counterJsonPath
+        match compileCounter sourceBytes with
+        | Error msg ->
+            printfn "  RA_ERR: %s" msg
+            [ "RA: counter4 compile + buildMeta succeeds", false ]
+        | Ok (grid, meta) ->
+            let tempDir = Path.Combine (Path.GetTempPath (), sprintf "wwc-routed-test-%s" (Guid.NewGuid().ToString "N"))
+            try
+                save tempDir meta grid
+                match load tempDir "counter4" with
+                | Error e ->
+                    printfn "  RA_ERR: %s" (describeError e)
+                    [ "RA: load succeeds", false ]
+                | Ok (loadedGrid, loadedMeta) ->
+                    let gridSame = loadedGrid = importGrid (exportGrid grid)
+                    let metaSame = loadedMeta = meta
+                    let counts = countsAfterLoad loadedGrid loadedMeta
+                    let freshAccepted =
+                        match ensureFresh (sourceSha256 sourceBytes) loadedMeta with
+                        | Ok _ -> true
+                        | Error _ -> false
+                    let staleDetected =
+                        match ensureFresh "0000" loadedMeta with
+                        | Error (StaleSource _) -> true
+                        | _ -> false
+                    // meta と .bin の取り違え (寸法不一致) を読込時に検出できること
+                    File.WriteAllText (metaPath tempDir "counter4", metaToJson { meta with Width = meta.Width + 1 })
+                    let sizeMismatchDetected =
+                        match load tempDir "counter4" with
+                        | Error (GridSizeMismatch _) -> true
+                        | _ -> false
+                    [ "RA: loaded grid equals exported grid", gridSame
+                      "RA: meta survives JSON round trip", metaSame
+                      "RA: loaded counter4 counts 0 -> 1 -> 2 without re-routing", counts
+                      "RA: ensureFresh accepts matching source", freshAccepted
+                      "RA: ensureFresh detects changed source", staleDetected
+                      "RA: load detects meta/bin size mismatch", sizeMismatchDetected ]
+            finally
+                if Directory.Exists tempDir then Directory.Delete (tempDir, true)
+
+    let runAll () : (string * bool) list =
+        parseTests () @ roundTripTests ()

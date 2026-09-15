@@ -1,23 +1,34 @@
 # WireLevel コンパイラ TODO
 
-## 現在のテスト結果: F# 158/158 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
-(最終確認: d008cbe, 2026-08-14。mincpu.json 追加により 150 → 158)
+## 現在のテスト結果: F# 166/166 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
+(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166。
+GPU/Playwright は d008cbe, 2026-08-14 時点)
 
 ## 次の一手 (M8: SM83 フルセット)
 
 方針: 長時間配線 (subset 約 100 分 / full 5〜8 時間) の成果を捨てないよう、
 **保存 → 検証の道具を先に揃え、安い sm83_subset で全工程を通してから sm83_full に進む**。
 
-### Step A: 配線成果物の保存と再利用 (最優先 — 長時間配線の前提)
+### Step A: 配線成果物の保存と再利用 ✅ 完了 (2026-09-15)
 
-現状 `compileWL` の結果はどこにも保存されず、sm83_subset の約 100 分配線結果も残っていない。
-
-- [ ] 配線結果を保存するエクスポート (`src/ExportRouted.fsx <circuit>` 案):
-      `exportGrid` による grid .bin + placed/pins を含む meta JSON (ピン/レジスタ座標)
-- [ ] 保存済み .bin を `importGrid` で読み込み、再配線なしで検証へ進める経路
-- [ ] 壊れたスクリプトの整理: `TestSm83Subset.fsx` は存在しない `src/WwHdl.fs` を
-      `#load` し、旧 API (`grid, info`) を使っていて動かない。`TestSm83Full.fsx` は
-      結果を捨てる → Step A のエクスポートに統合して削除/置換
+- [x] `src/RoutedArtifact.fs`: 配線結果を `routed/<circuit>.bin` (exportGrid 形式) +
+      `routed/<circuit>.meta.json` として保存・再読込
+      * meta: ポート名 → ビット毎の座標 (.bin と同じ正規化座標、LSB first)、
+        元 verilog JSON の SHA-256、生成時の git commit (`+dirty` 付き)
+      * 出力ビットは `CellProbe` (ゲート出力セル/ピン) / `ConstProbe` / `Unobservable` の DU。
+        yosys の定数ビット ("0"/"1") を位置を保って保持する
+        (`Pipeline.parseYosysJson` は定数を捨てるためビット位置がずれる。sm83_min の
+        b_out[6:7]、sm83_full の flags 下位 4bit が該当)
+      * 読込時に寸法・ファイル長・プローブ先セル種別を検証、`ensureFresh` で
+        verilog JSON の変更を検出。書込は一時ファイル経由で置換
+- [x] `src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR]`: 配線 → 保存 → 再読込確認。
+      ポート解析を配線前に済ませ、meta 生成に失敗しても grid を `.rescue.bin` に退避
+- [x] `src/LoadRouted.fsx <circuit> [--dir DIR]`: 整合性・鮮度の確認 (Step B/C の雛形)。
+      終了コード 0=OK / 1=エラー / 3=verilog JSON 変更
+- [x] テスト `RoutedArtifactTest` 8 件 (counter4 を保存 → 読込後、再配線なしで 0→1→2 と数える)
+- [x] 動かなかった `TestSm83Subset.fsx` と、結果を捨てる `TestSm83Full.fsx` を削除
+- [x] `routed/*.bin` / `*.meta.json` は git 管理する (長時間配線の結果を vega/moon 間で共有するため。
+      sm83_min で 100KB、subset/full は数 MB 見込み)
 
 ### Step B: メモリバス対応の命令レベル GPU 検証
 
@@ -48,6 +59,7 @@ wgpu-runner `--program` は命令ごとにピンを静的に書き込むだけ�
       Step D の前に効果があれば full の待ち時間が減る。大規模回路から始めるピッチを
       20x14 にして、16x12 の失敗分を省く案もある (`pitchFor`)
 - [ ] sm83_min のクロックのずれを `verify_clock.fsx` で測り直す
+      (2026-09-15 の ExportRouted 実行で `ClockSkewUnresolved (NetId 2, 92)` — 旧記録 110 から改善したが未解消)
 - [ ] web/sm83_mc_*.bin の再生成 (P3 参照)
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
@@ -189,4 +201,4 @@ web/run-wl.sh mincpu --headed  # ブラウザ表示あり
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
 WireWorld 系テストは構造的制約により修正しない。現在 90 テストが WireWorld 系。
-全テスト 158/158 PASS 維持中。
+全テスト 166/166 PASS 維持中。

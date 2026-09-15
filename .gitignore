@@ -6,3 +6,7 @@
 # verilog/ は合成結果JSONも含めて管理する
 /.direnv
 /wgpu-runner/target
+# 配線成果物: .bin/.meta.json は長時間配線の結果をホスト間で共有するため管理対象。
+# ログと書込途中の一時ファイルは除外
+/routed/*.log
+/routed/*.tmp

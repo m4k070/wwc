@@ -30,7 +30,8 @@ let sk = run "WL ClockSkew"  (WwHdl.WlClockSkewTest.runAll ())
 let mc = run "WL Mincpu"     (WwHdl.WlMincpuTest.runAll ())
 let sm = run "WL SM83"      (WwHdl.WlSm83Test.runAll ())
 let si = run "WL SM83 Instr" (WwHdl.WlSm83InstrTest.runAll ())
+let ra = run "Routed Artifact" (WwHdl.RoutedArtifactTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk @ mc @ sm @ si
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk @ mc @ sm @ si @ ra
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length

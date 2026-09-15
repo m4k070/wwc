@@ -2,7 +2,7 @@
 
 任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 158/158 通過。**
+> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 166/166 通過。**
 
 ---
 
@@ -75,7 +75,9 @@ src/
   Sim.fs         # Clock-gated simulation
   Pipeline.fs    # Yosys JSON frontend + WireWorld pipeline (legacy)
   PipelineWL.fs  # Yosys Netlist → WireLevel コンパイラ (P0)
+  RoutedArtifact.fs # 配線結果 (.bin + meta JSON) の保存・再読込・鮮度確認
   E2eTests.fs    # All test modules
+routed/          # 配線成果物 (<circuit>.bin / <circuit>.meta.json)
 wgpu-runner/     # Rust + wgpu GPU シミュレータ
 web/             # WebGPU フロントエンド (WGSL compute)
 ```
@@ -125,7 +127,7 @@ match compileWL defaultLib json with
 
 ```bash
 dotnet build src/WwHdl.fsproj                    # build（テスト前に必須）
-dotnet fsi src/RunTests.fsx                       # F# テスト (158/158)
+dotnet fsi src/RunTests.fsx                       # F# テスト (166/166)
 web/run-test.sh                                   # WebGPU golden tests (Playwright/SiftShader)
 wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
 ```
@@ -155,7 +157,7 @@ wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgp
 
 | パターン | 用途 | 例 |
 |---------|------|-----|
-| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 158/158）, `RunWl.fsx`, `RunBackfire.fsx` |
+| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 166/166）, `RunWl.fsx`, `RunBackfire.fsx` |
 | `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
 | `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `TestSm83Full.fsx` |
 | `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
@@ -197,10 +199,19 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 ### コンパイル
 
 ```bash
-# sm83_min.json は Yosys で合成済みのファイル
-# compileWL はピッチを回路規模から自動決定し、輻輳失敗時は自動拡大する (16x12 → 20x14)
-# クロック終端は優先配線され、balanceClockNet がスキューを均等化する
+# 配線して routed/<circuit>.{bin,meta.json} に保存 (保存後に再読込して整合性を確認)
+dotnet fsi src/ExportRouted.fsx sm83_subset
+
+# 長時間の配線はバックグラウンドで
+nohup dotnet fsi src/ExportRouted.fsx sm83_full > routed/sm83_full.log 2>&1 &
+
+# 保存済みの結果を確認 (寸法・ピン座標の整合性、verilog JSON が配線時から変わっていないか)
+dotnet fsi src/LoadRouted.fsx sm83_subset
 ```
+
+- compileWL はピッチを回路規模から自動決定し、輻輳失敗時は自動拡大する (16x12 → 20x14)。`--pitch X Y` で固定も可能
+- クロック終端は優先配線され、balanceClockNet がスキューを均等化する
+- meta JSON はポート名 → ビット毎の座標 (LSB first) を持つ。yosys が定数に畳んだビットは `{"const":0}` として位置を保つ
 
 ### 検証済み命令 (4 命令 × 2 clk phase = 8 golden tests)
 
@@ -292,9 +303,10 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 | NandGateTest | NAND ゲート | ✅ |
 | MultiGateTest | 複数ゲート | ✅ |
 | WlSm83Test | SM83 CPU | 7/7 ✅ |
+| RoutedArtifactTest | 配線結果の保存・再読込 | 8/8 ✅ |
 | GPU Golden | byte-exact 一致 | 24/24 ✅ |
 
-**合計**: 158/158 通過 (mincpu.json を moon 側で追加済み)
+**合計**: 166/166 通過 (mincpu.json を moon 側で追加済み)
 
 ## ライセンス
 
