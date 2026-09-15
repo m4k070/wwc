@@ -1,8 +1,14 @@
 # WireLevel コンパイラ TODO
 
-## 現在のテスト結果: 150/150 passed 🎉 (GPU golden test 16/16 PASS)
-- F#: WireLevel 8, WL-Pipeline 6, WL-CNT 3, WL-REG8 3, WL-GOLDEN 5, WL-ALU 14, WL-ALU4 13, WL-SKEW 2, WL-MINCPU 3, WL-SM83 3 — 他 WireWorld 系 90
-- GPU: toggleFF, halfAdder, mincpu(2), sm83(2), sm83p0-cyc0(2), sm83p0-mc(8)
+## 現在のテスト結果: F# 158/158 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
+(最終確認: d008cbe, 2026-08-14。mincpu.json 追加により 150 → 158)
+
+## 次の一手 (M8: SM83 フルセット)
+
+- [ ] sm83_full (9,059 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 + 進行ログで監視
+- [ ] CB 命令の動作検証 (配線完走後)
+- [ ] 配線時間の短縮 (ネット単位の並列化 / ヒューリスティック改善)
+- [ ] 通常命令「全 256」の網羅確認
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
 
@@ -88,7 +94,20 @@
         DFF b[1] がクロック未接続 → レジスタビットがリセット値に固着していた
         (PipelineWL.fs: 撤去前の occ を退避し失敗時に復元)。従来の golden テストは
         b bit1=1 を通る値を一度もロードしていなかったため検出できなかった
-- [ ] web/sm83_mc_*.bin / sm83_cyc0_*.bin の再生成 — 既存 bin はクロック未接続バグ入り
+- [x] 大規模回路の配線 (2026-06-15〜08-14)。sm83_subset (3,553 gates) 配線完走:
+      * ルーティング順序最適化 (短いネット優先) + A* リトライ時の bbox マージン拡大 (bc358f0)
+      * リトライ時の転回ペナルティ低減 4→2→1 (a2b64f5)
+      * Rip-up & reroute: 輻輳ネットの経路を実際に塞いだ「ブロッカー」を撤去して
+        再配線、失敗時は occ 復元 (679f792, 6cc7704)
+      * A* 探索上限 50M → 5M: 経路なしネットを早く諦めて rip-up に回す (dc5c367)
+      * 配置ピッチの動的決定 `pitchFor` (≤200: 24x16 / ≤1000: 20x14 / ≤3000: 16x12 /
+        >3000: 16x12) と輻輳失敗時の自動拡大 `pitchSequence` 12x10→16x12→20x14→24x16
+        (0c3e39b, 0fe4566)。sm83_subset は 16x12 で失敗 → 20x14 で完走
+      * クロック優先配線: クロック終端を先に配線・均等化してからデータ配線 (12de255)。
+        sm83_subset skew 1068 → 46
+      * 検証スクリプト: verify_clock.fsx (skew 実測), pitch_bench.fsx / pitch_route.fsx
+- [x] sm83_full に CB prefix (0xCB) デコード追加 (d008cbe)。8,379 → 9,059 gates、yosys 合成成功
+- [ ] web/sm83_mc_*.bin (2026-06-13 生成) の再生成 — クロック未接続バグ入り
       回路のもの (F#/GPU 一致テストとしては有効だが回路として b[1] 欠陥あり)
 - [ ] GB エミュレータ統合 (バス/割込みブリッジ)
 
@@ -113,17 +132,21 @@ web/run-wl.sh mincpu --headed  # ブラウザ表示あり
 
 ## 既知の問題
 
-- `verilog/sm83_p0.json` / `sm83_p0.v` が紛失 (ExportSm83P0*.fsx / TestSm83.fsx の
-  4 本が参照、再エクスポート不可)。web/ の sm83p0 系 .bin は既存分のみ
-- コミット 399b9c8 に混入した PipelineWL.fs の高速化 WIP (Dictionary 化 +
-  trySimplePath) は未完成でビルド不能だったため、8db9be0 版に復元した上で
-  クロック配線修正を適用した (WIP コードは git 履歴 399b9c8 に残存)
-- クロックスキュー未解消 WARN は sm83_min で残存 (残差 110 gen)。接続は保たれる
-  ようになったが、スキュー起因の hold 違反リスクは将来の大規模回路で要注意
+- 大規模回路の配線が遅い: sm83_subset で約 100〜120 分 (20x14)、sm83_full は 5〜8 時間見込み。
+  16x12 で輻輳失敗 → 拡大再試行のため、失敗分の時間も上乗せされる
+- ピッチ拡大に伴い cross 率が上昇 (12x10 で約 22%、sm83_subset 20x14 で約 31%)
+- クロックスキュー: クロック優先配線 (12de255) で大幅改善 (sm83_subset skew 46)。
+  sm83_min の旧 WARN (残差 110 gen) は優先配線後に未再計測 → verify_clock.fsx で要確認
+
+### 解消済み
+
+- `verilog/sm83_p0.json` / `sm83_p0.v` の紛失 → 復元済み (2674330)
+- 399b9c8 に混入した PipelineWL.fs 高速化 WIP (trySimplePath) → trySimplePath は
+  配線資源を食い RoutingCongestion を起こすため削除 (2674330)
 
 ---
 
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
 WireWorld 系テストは構造的制約により修正しない。現在 90 テストが WireWorld 系。
-全テスト 150/150 PASS 維持中。
+全テスト 158/158 PASS 維持中。
