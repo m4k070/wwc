@@ -5,10 +5,50 @@
 
 ## 次の一手 (M8: SM83 フルセット)
 
-- [ ] sm83_full (9,059 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 + 進行ログで監視
-- [ ] CB 命令の動作検証 (配線完走後)
-- [ ] 配線時間の短縮 (ネット単位の並列化 / ヒューリスティック改善)
-- [ ] 通常命令「全 256」の網羅確認
+方針: 長時間配線 (subset 約 100 分 / full 5〜8 時間) の成果を捨てないよう、
+**保存 → 検証の道具を先に揃え、安い sm83_subset で全工程を通してから sm83_full に進む**。
+
+### Step A: 配線成果物の保存と再利用 (最優先 — 長時間配線の前提)
+
+現状 `compileWL` の結果はどこにも保存されず、sm83_subset の約 100 分配線結果も残っていない。
+
+- [ ] 配線結果を保存するエクスポート (`src/ExportRouted.fsx <circuit>` 案):
+      `exportGrid` による grid .bin + placed/pins を含む meta JSON (ピン/レジスタ座標)
+- [ ] 保存済み .bin を `importGrid` で読み込み、再配線なしで検証へ進める経路
+- [ ] 壊れたスクリプトの整理: `TestSm83Subset.fsx` は存在しない `src/WwHdl.fs` を
+      `#load` し、旧 API (`grid, info`) を使っていて動かない。`TestSm83Full.fsx` は
+      結果を捨てる → Step A のエクスポートに統合して削除/置換
+
+### Step B: メモリバス対応の命令レベル GPU 検証
+
+sm83_subset / sm83_full は外部メモリバス (addr → data_in, mem_write) を持つ。
+wgpu-runner `--program` は命令ごとにピンを静的に書き込むだけなので、フェッチに対応できない。
+
+- [ ] wgpu-runner にメモリモデルを追加: 各フェーズで addr/mem_read を読み、
+      ROM/RAM イメージから data_in を供給、mem_write 時に書き込む
+- [ ] program JSON を「メモリイメージ + 実行サイクル数 + 期待レジスタ値」形式に拡張
+- [ ] 期待値の参照モデル: sm83_subset.v / sm83_full.v の写像 (Sm83MinModel と同様、
+      Verilog の癖に合わせる)
+
+### Step C: sm83_subset で全工程を通す
+
+- [ ] sm83_subset を配線 (約 100 分、バックグラウンド) → Step A で保存
+- [ ] Step B の仕組みで subset 命令の GPU 検証 (LD/ALU/INC/DEC/JP/メモリ読み書き)
+
+### Step D: sm83_full
+
+- [ ] sm83_full (9,059 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 +
+      進行ログで監視し、Step A で必ず保存。16x12 で失敗 → 20x14 再試行の時間も含む
+- [ ] CB 命令の動作検証
+- [ ] 通常命令「全 256」の網羅確認 (参照モデルとの一致で機械判定)
+
+### 並行して進められる改善 (必須ではない)
+
+- [ ] 配線時間の短縮 (ネット単位の並列化 / ヒューリスティック改善)。
+      Step D の前に効果があれば full の待ち時間が減る。大規模回路から始めるピッチを
+      20x14 にして、16x12 の失敗分を省く案もある (`pitchFor`)
+- [ ] sm83_min のクロックのずれを `verify_clock.fsx` で測り直す
+- [ ] web/sm83_mc_*.bin の再生成 (P3 参照)
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
 
