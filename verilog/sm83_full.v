@@ -473,20 +473,20 @@ module sm83_full (
                 8'h76, 8'h10: begin halted <= 1; phase <= PHASE_HALT; end
 
                 // === LD r, n (即値 8bit) ===
-                8'h06: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h0E: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h16: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h1E: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h26: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h2E: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h36: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h3E: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h06: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h0E: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h16: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h1E: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h26: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h2E: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h36: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h3E: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
 
                 // === LD rr, nn (即値 16bit) ===
-                8'h01: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h11: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h21: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h31: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h01: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h11: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h21: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h31: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
 
                 // === LD A, (BC/DE) / LD A, (HL±) ===
                 8'h0A: begin addr <= {b, c}; mem_read <= 1; phase <= PHASE_MEM_DATA; end
@@ -510,20 +510,20 @@ module sm83_full (
                 8'h77: begin addr <= {h, l}; data_out <= a; mem_write <= 1; phase <= PHASE_FETCH; end
 
                 // === LD A, (nn) / LD (nn), A / LD (nn), SP ===
-                8'hFA: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hEA: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h08: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hFA: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hEA: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h08: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
 
                 // === LDH ===
-                8'hE0: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hF0: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hE0: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hF0: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
                 8'hE2: begin addr <= {8'hFF, c}; data_out <= a; mem_write <= 1; phase <= PHASE_FETCH; end
                 8'hF2: begin addr <= {8'hFF, c}; mem_read <= 1; phase <= PHASE_MEM_DATA; end
 
                 // === LD SP, HL / LD HL, SP+e8 ===
                 8'hF9: begin sp <= {h, l}; phase <= PHASE_FETCH; end
-                8'hF8: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hE8: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hF8: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hE8: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
 
                 // === ADD/ADC/SUB/SBC/AND/XOR/OR/CP A, r ===
                 8'h80, 8'h81, 8'h82, 8'h83, 8'h84, 8'h85, 8'h87: begin
@@ -620,28 +620,28 @@ module sm83_full (
                     phase <= PHASE_FETCH; end
 
                 // === JP nn / JP cc, nn ===
-                8'hC3: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hC2: begin if (f[7]==0) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hCA: begin if (f[7]==1) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hD2: begin if (f[4]==0) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hDA: begin if (f[4]==1) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hC3: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hC2: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hCA: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hD2: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hDA: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
 
                 // === JP (HL) ===
                 8'hE9: begin pc <= {h, l}; phase <= PHASE_FETCH; end
 
                 // === JR n / JR cc, n ===
-                8'h18: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h20: begin if (f[7]==0) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'h28: begin if (f[7]==1) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'h30: begin if (f[4]==0) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'h38: begin if (f[4]==1) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'h18: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'h20: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'h28: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'h30: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'h38: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
 
                 // === CALL nn / CALL cc, nn ===
-                8'hCD: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hC4: begin if (f[7]==0) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hCC: begin if (f[7]==1) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hD4: begin if (f[4]==0) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hDC: begin if (f[4]==1) begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hCD: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hC4: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hCC: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hD4: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hDC: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
 
                 // === RST n ===
                 8'hC7: begin rst_push(8'h00); end
@@ -675,14 +675,14 @@ module sm83_full (
                 8'hFB: begin phase <= PHASE_FETCH; end
 
                 // === ALU n (即値) ===
-                8'hC6: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hCE: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hD6: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hDE: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hE6: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hEE: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hF6: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hFE: begin addr <= pc; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hC6: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hCE: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hD6: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hDE: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hE6: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hEE: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hF6: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
+                8'hFE: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
 
                 // === LD r, r' / LD r,(HL) / LD (HL),r ===
                 default: begin
@@ -880,7 +880,7 @@ module sm83_full (
                 8'hC3, 8'hC2, 8'hCA, 8'hD2, 8'hDA,
                 8'hCD, 8'hC4, 8'hCC, 8'hD4, 8'hDC,
                 8'hFA, 8'hEA, 8'h08: begin
-                    addr <= pc; mem_read <= 1; phase <= PHASE_IMM2; end
+                    addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM2; end
 
                 // ALU n
                 8'hC6: begin operand <= val; do_alu(ALU_ADD); phase <= PHASE_FETCH; end
