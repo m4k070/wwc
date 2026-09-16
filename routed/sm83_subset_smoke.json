@@ -15,5 +15,6 @@
     "a_out": 66,
     "pc_out": 258
   },
-  "trace": true
+  "trace": true,
+  "golden": "sm83_subset_smoke.golden.json"
 }

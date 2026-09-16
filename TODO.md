@@ -1,7 +1,7 @@
 # WireLevel コンパイラ TODO
 
-## 現在のテスト結果: F# 177/177 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
-(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166、NetlistSimTest 追加で 177。
+## 現在のテスト結果: F# 187/187 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
+(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166、NetlistSimTest 追加で 177、TestbenchTest 追加で 187。
 GPU/Playwright は d008cbe, 2026-08-14 時点)
 
 ## 次の一手 (M8: SM83 フルセット)
@@ -47,8 +47,16 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
       subset/full がエラーなくコンパイル (subset 3417 組合せ + 136 DFF、full 8891 + 168)
       * subset smoke 3 周期が GPU トレースと全項目一致 (addr/mem_read/din/pc/a)
       * subset のフェッチ不具合を確定: `LD A,0x42` の後 addr=0x0101 のまま NOP を読み続ける
-- [ ] B-2 `src/Testbench.fs` + `src/ExportGolden.fsx`: `--memory` と同じプログラム JSON と
-      メモリ契約 (DESIGN-VERIFY.md §5.2) で golden を生成。smoke の `expect` が NetlistSim でも通ること
+- [x] B-2 `src/Testbench.fs` + `src/ExportGolden.fsx` (2026-09-16): `--memory` と同じプログラム JSON と
+      メモリ契約 (DESIGN-VERIFY.md §5.2) で NetlistSim を回し golden を生成。routed meta と verilog JSON の
+      SHA-256 が一致しなければ中止 (終了コード 3)。`routed/sm83_subset_smoke.golden.json` を生成 (expect 2/2)
+      * テスト `TestbenchTest` 10 件 (`src/TestbenchTests.fs`): メモリモデル、プログラム読込、バス解決、golden 形式、
+        subset smoke が GPU トレースと周期ごとに一致 (data_in/pc/a)、**sm83_full が SM83 仕様どおり動く**
+      * GPU トレースの `addr` は clk=0 settle 時点、golden の出力は clk=1 settle 後。時点が違うので比べない
+      * E2eTests.fs に置くと最上位の値の初期化 (alu4 配線など) に巻き込まれ単独実行が 160 秒 → 別ファイルで 0.6 秒
+- [x] sm83_full.v の即値読出 off-by-one を修正 (2026-09-16、B-2 の仕様テストで発見)。
+      `exec_normal` / `exec_imm` の `addr <= pc` 43 か所 → `addr <= pc + 1`。再合成で 9,059 → 9,155 gates。
+      合成手順は SM83.md に記録
 - [ ] B-3b `--memory` に golden 照合: 全周期の全出力と `data_in` を比較し、最初の不一致で停止しダンプ。
       1 セル壊した .bin で不一致を検出できること
 - [ ] 決定待ち: プログラム・ROM を `routed/` から `programs/` に分けるか (DESIGN-VERIFY.md §8 Q2)
@@ -65,7 +73,7 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
 
 ### Step D: sm83_full
 
-- [ ] sm83_full (9,059 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 +
+- [ ] sm83_full (9,155 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 +
       進行ログで監視し、Step A で必ず保存。16x12 で失敗 → 20x14 再試行の時間も含む
 - [ ] CB 命令の動作検証
 - [ ] 通常命令「全 256」の網羅確認 (参照モデルとの一致で機械判定)
@@ -218,4 +226,4 @@ web/run-wl.sh mincpu --headed  # ブラウザ表示あり
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
 WireWorld 系テストは構造的制約により修正しない。現在 90 テストが WireWorld 系。
-全テスト 177/177 PASS 維持中。
+全テスト 187/187 PASS 維持中。

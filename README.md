@@ -2,7 +2,7 @@
 
 任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 177/177 通過。**
+> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 187/187 通過。**
 
 ---
 
@@ -77,6 +77,7 @@ src/
   PipelineWL.fs  # Yosys Netlist → WireLevel コンパイラ (P0)
   RoutedArtifact.fs # 配線結果 (.bin + meta JSON) の保存・再読込・鮮度確認
   NetlistSim.fs  # ゲートレベル周期シミュレータ (CA と同じ規則、検証の期待値生成用)
+  Testbench.fs   # メモリバス TB (runner --memory と同じプログラム JSON、golden 生成)
   E2eTests.fs    # All test modules
 routed/          # 配線成果物 (<circuit>.bin / <circuit>.meta.json)
 wgpu-runner/     # Rust + wgpu GPU シミュレータ
@@ -128,7 +129,7 @@ match compileWL defaultLib json with
 
 ```bash
 dotnet build src/WwHdl.fsproj                    # build（テスト前に必須）
-dotnet fsi src/RunTests.fsx                       # F# テスト (177/177)
+dotnet fsi src/RunTests.fsx                       # F# テスト (187/187)
 web/run-test.sh                                   # WebGPU golden tests (Playwright/SiftShader)
 wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
 ```
@@ -158,7 +159,7 @@ wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgp
 
 | パターン | 用途 | 例 |
 |---------|------|-----|
-| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 177/177）, `RunWl.fsx`, `RunBackfire.fsx` |
+| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 187/187）, `RunWl.fsx`, `RunBackfire.fsx` |
 | `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
 | `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `src/LoadRouted.fsx` |
 | `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
@@ -195,7 +196,7 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 |------|------|------|
 | sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
 | sm83_subset | 3,553 | ✅ 配線完走 (20x14、約 100 分、skew 46) |
-| sm83_full | 9,059 | 全命令セット (通常 256 + CB prefix 256)。配線は今後の課題 |
+| sm83_full | 9,155 | 全命令セット (通常 256 + CB prefix 256)。NetlistSim 上で LD/HALT/RAM 書込が仕様どおり動くことを確認。配線は今後の課題 |
 
 ### コンパイル
 
@@ -286,6 +287,7 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 ### 🔲 M8 — SM83 フルセット
 
 - [x] CB prefix 命令 (0xCB) のデコード有効化 (9,059 gates、`d008cbe`)
+- [x] 即値読出の off-by-one 修正 (FETCH2/IMM で加算前の pc を addr に出していた。9,155 gates)
 - [ ] sm83_full の配線完走 (5〜8 時間見込み)
 - [ ] CB 命令の動作検証 (配線後に実施)
 - [ ] 配線時間の短縮 (ネット単位の並列化 / ヒューリスティック改善)
@@ -306,9 +308,10 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 | WlSm83Test | SM83 CPU | 7/7 ✅ |
 | RoutedArtifactTest | 配線結果の保存・再読込 | 8/8 ✅ |
 | NetlistSimTest | ゲートレベルシミュレータ (sm83_min 20 命令ほか) | 11/11 ✅ |
+| TestbenchTest | メモリバス TB (subset smoke の GPU 照合、full の仕様テスト) | 10/10 ✅ |
 | GPU Golden | byte-exact 一致 | 24/24 ✅ |
 
-**合計**: 177/177 通過 (mincpu.json を moon 側で追加済み)
+**合計**: 187/187 通過 (mincpu.json を moon 側で追加済み)
 
 ## ライセンス
 

@@ -19,7 +19,7 @@
 |---|---|---|
 | バスは同期式 | `addr` / `mem_read` / `mem_write` / `data_out` はすべてレジスタ出力。`data_in` は posedge で取り込まれる | 1 クロック周期単位で入出力を扱える |
 | **sm83_subset の RTL はフェッチが壊れている** (B-1 の NetlistSim で確定、2026-09-16) | FETCH で `pc` は進むが、NOP・`LD r,n` などの後に `addr_r` を更新しない。ROM `3E 42 3E 17 06 05 80 76` は `LD A,0x42` の後 addr=0x0101 のまま `mem_read=0` → NOP を読み続け、pc だけ進んで a=0x42 で止まる (本物の SM83 なら a=0x1C) | 本物の SM83 の動作を期待値にできない。**直さない (§8 Q1 で決定)** |
-| sm83_full のフェッチは正常 | `PHASE_FETCH` で `addr <= pc`、`PHASE_FETCH2` で `data_in` を読む 2 段階 | CPU としての意味の検証は full で行う |
+| sm83_full のフェッチは正常。ただし即値読出に off-by-one があった (2026-09-16 修正) | `PHASE_FETCH` で `addr <= pc`、`PHASE_FETCH2` で `data_in` を読む 2 段階。`exec_normal` / `exec_imm` は `pc <= pc + 1` と同じ周期に `addr <= pc` を出しており、opcode 自身の番地から即値を読んでいた → `addr <= pc + 1` に修正 (B-2 の仕様テストで発見) | CPU としての意味の検証は full で行う。手書きの期待値 (SM83 仕様) による仕様テストも NetlistSim 上で持つ |
 | ゲートは 3 種類だけ | subset/full は `$_NAND_` / `$_NOT_` / `$_DFF_P_` のみ (sm83_min は `$_DFF_PP0_`、R は無視) | ゲートレベルのシミュレータは小さく書ける |
 | Verilog シミュレータ | iverilog / verilator はない。`yosys sim` (`-clock` `-reset` `-n` `-vcd`) は flake にある | RTL 側の参照は yosys で取れる |
 | GPU の収束判定が重い | `run_until_settled` は判定のたびにグリッド全体 (w×h×4 byte) を 2 回読み戻す | subset 1197x1126 (約 1.35M セル) で周期あたり秒単位になりうる (§7 B-6) |
@@ -151,6 +151,7 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
   "circuit": "sm83_subset",
   "program": "sm83_subset_smoke",
   "sourceSha256": "…",
+  "romSha256": "…",
   "rstPulses": 2,
   "cycles": [
     { "dataIn": 62, "outputs": { "a_out": 1, "addr": 257, "data_out": 0, "mem_read": 1, "mem_write": 0, "pc_out": 257 } }
@@ -158,8 +159,10 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
 }
 ```
 
-- `sourceSha256` を routed meta と照合し、古い配線結果に新しい golden を当てる事故を防ぐ
-- `cycles[k].dataIn` は §5.2 手順 3 の値、`outputs` は手順 6 の値。リセット周期は含めない
+- `sourceSha256` を routed meta と照合し、古い配線結果に新しい golden を当てる事故を防ぐ。
+  `romSha256` はプログラムの ROM と照合し、ROM を変えたのに golden を作り直していない状態を検出する
+- `cycles[k].dataIn` は §5.2 手順 3 の値、`outputs` は手順 6 (clk=1 settle 後) の値。リセット周期は含めない。
+  runner の `trace` 表示の `addr` は手順 2 (clk=0 settle 時点) の値なので、golden の `outputs.addr` とは時点が違う
 - 出力はポート単位の整数 (LSB first)。runner は meta の probe に従って読み、
   `Unobservable` のビットは比較から除外する
 

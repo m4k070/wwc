@@ -1,0 +1,43 @@
+{
+  "format": "wwc-golden/1",
+  "circuit": "sm83_subset",
+  "program": "sm83_subset_smoke",
+  "sourceSha256": "88c6cd5e4ccab4034bcfa8a4883a7cf534a2536b6cd54f7c10b954a4a444b0fe",
+  "romSha256": "43d3e59cf5af156fea341a761c72dc5a9ddf707732318dfd772b4d8cd297df43",
+  "rstPulses": 2,
+  "cycles": [
+    {
+      "dataIn": 62,
+      "outputs": {
+        "a_out": 1,
+        "addr": 257,
+        "data_out": 0,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 66,
+      "outputs": {
+        "a_out": 66,
+        "addr": 257,
+        "data_out": 0,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 66,
+        "addr": 257,
+        "data_out": 0,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 258
+      }
+    }
+  ]
+}
