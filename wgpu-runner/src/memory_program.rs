@@ -17,6 +17,7 @@
 //     "checkInterval": 256,
 //     "expect": { "a_out": 66, "pc_out": 264 },  // meta の outputs にあるポート名
 //     "expectMem": { "49152": 42 },        // RAM 絶対アドレス (10進 or "0xC000" 16進) → 値
+//     "golden": "prog.golden.json",        // optional: ExportGolden.fsx の出力と全周期を照合
 //     "trace": false
 //   }
 //
@@ -24,13 +25,17 @@
 // mem_write なら書込 → mem_read なら data_in=mem[addr]、そうでなければ 0 → clk=0 settle →
 // clk=1 settle」。
 //
-// 設定ミス (expect の未知ポート名・値の幅超え・meta と grid の座標ずれ) は GPU 実行前に
+// golden を指定すると、周期ごとに data_in と全出力 (clk=1 settle 後) を NetlistSim の結果と
+// 比べ、最初に食い違った周期で止める (DESIGN-VERIFY.md §6.2)。
+//
+// 設定ミス (expect の未知ポート名・値の幅超え・meta と grid の座標ずれ・古い golden) は GPU 実行前に
 // エラーにする。収束しなかった周期は結果が信用できないので失敗として扱う (終了コード 1)。
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::gpu::{load_bin, save_bin, GpuSim};
 use crate::memory::{Memory, MemoryConfig, RomSource};
@@ -56,6 +61,9 @@ pub enum OutputProbe {
 /// RoutedArtifact.fs (CurrentFormatVersion) が書く meta JSON の形式バージョン。
 const META_FORMAT_VERSION: u32 = 1;
 
+/// Testbench.fs (GoldenFormat) が書く golden JSON の形式。
+const GOLDEN_FORMAT: &str = "wwc-golden/1";
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutedMeta {
@@ -63,9 +71,8 @@ pub struct RoutedMeta {
     pub circuit: String,
     pub width: u32,
     pub height: u32,
-    /// 元 verilog JSON の SHA-256。B-3b (golden 照合) で golden 側と突き合わせる
+    /// 元 verilog JSON の SHA-256。golden の sourceSha256 と突き合わせる
     #[serde(default)]
-    #[allow(dead_code)]
     pub source_sha256: Option<String>,
     #[serde(default)]
     pub gate_count: u32,
@@ -73,6 +80,27 @@ pub struct RoutedMeta {
     pub dff_count: u32,
     pub inputs: BTreeMap<String, Vec<Xy>>,
     pub outputs: BTreeMap<String, Vec<OutputProbe>>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GoldenCycle {
+    /// この周期で書くべき data_in (§5.2 手順 3)
+    pub data_in: u64,
+    /// clk=1 settle 後の全出力 (§5.2 手順 6)
+    pub outputs: BTreeMap<String, u64>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Golden {
+    pub format: String,
+    pub circuit: String,
+    pub program: String,
+    pub source_sha256: String,
+    pub rom_sha256: String,
+    pub rst_pulses: u32,
+    pub cycles: Vec<GoldenCycle>,
 }
 
 fn default_rst_pulses() -> u32 { 2 }
@@ -97,6 +125,8 @@ pub struct MemoryProgram {
     pub expect: Option<BTreeMap<String, u64>>,
     #[serde(default)]
     pub expect_mem: Option<BTreeMap<String, u8>>,
+    #[serde(default)]
+    pub golden: Option<String>,
     #[serde(default)]
     pub trace: bool,
 }
@@ -135,7 +165,7 @@ fn read_bit(cells: &[u8], w: u32, probe: &OutputProbe) -> u64 {
     match probe {
         OutputProbe::Cell { x, y } => (cells[(*y * w + *x) as usize] & 1) as u64,
         OutputProbe::Const { value } => (*value & 1) as u64,
-        // validate_expect で比較対象から外している。トレース表示では 0 として扱う
+        // expect / golden の比較では observable_mask で除外する。トレース表示では 0 として扱う
         OutputProbe::Unobservable { .. } => 0,
     }
 }
@@ -146,8 +176,23 @@ fn read_bus(cells: &[u8], w: u32, probes: &[OutputProbe]) -> u64 {
         .sum()
 }
 
+/// 比較に使えるビット (Unobservable 以外) のマスク。
+fn observable_mask(probes: &[OutputProbe]) -> u64 {
+    probes.iter().enumerate()
+        .filter(|(_, p)| !matches!(p, OutputProbe::Unobservable { .. }))
+        .fold(0u64, |mask, (i, _)| mask | (1u64 << i))
+}
+
 fn fmt_val(name: &str, v: u64) -> String {
     if name.contains("flag") { format!("0x{v:X}") } else { format!("{v:#x} ({v})") }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn short_hash(s: &str) -> &str {
+    &s[..s.len().min(12)]
 }
 
 fn parse_addr_spec(spec: &str) -> Result<u16> {
@@ -222,6 +267,64 @@ fn validate_expect(outputs: &BTreeMap<String, Vec<OutputProbe>>, expect: &BTreeM
     Ok(())
 }
 
+/// golden がこの配線結果・ROM・プログラムに対して作られたものかを実行前に検査する。
+fn validate_golden(golden: &Golden, meta: &RoutedMeta, rst_pulses: u32, cycles: u32, rom_sha256: &str) -> Result<()> {
+    anyhow::ensure!(golden.format == GOLDEN_FORMAT,
+        "golden format '{}' is not supported (expected {GOLDEN_FORMAT})", golden.format);
+    anyhow::ensure!(golden.circuit == meta.circuit,
+        "golden circuit '{}' != meta circuit '{}'", golden.circuit, meta.circuit);
+    let meta_sha = meta.source_sha256.as_deref()
+        .context("meta has no sourceSha256 — cannot check that golden matches the routed grid")?;
+    anyhow::ensure!(golden.source_sha256 == meta_sha,
+        "golden sourceSha256 {}… != meta {}… — the netlist changed; re-route or regenerate golden",
+        short_hash(&golden.source_sha256), short_hash(meta_sha));
+    anyhow::ensure!(golden.rom_sha256 == rom_sha256,
+        "golden romSha256 {}… != ROM {}… — regenerate golden (src/ExportGolden.fsx)",
+        short_hash(&golden.rom_sha256), short_hash(rom_sha256));
+    anyhow::ensure!(golden.rst_pulses == rst_pulses,
+        "golden rstPulses {} != program rstPulses {rst_pulses}", golden.rst_pulses);
+    anyhow::ensure!(golden.cycles.len() == cycles as usize,
+        "golden has {} cycles but program runs {cycles}", golden.cycles.len());
+    let meta_ports: Vec<&str> = meta.outputs.keys().map(String::as_str).collect();
+    for (k, cycle) in golden.cycles.iter().enumerate() {
+        let golden_ports: Vec<&str> = cycle.outputs.keys().map(String::as_str).collect();
+        anyhow::ensure!(golden_ports == meta_ports,
+            "golden cycle {k} outputs {golden_ports:?} != meta outputs {meta_ports:?}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct PortMismatch {
+    port: String,
+    expected: u64,
+    got: u64,
+    /// 食い違ったビット位置 (LSB = 0)
+    bits: Vec<usize>,
+}
+
+/// 全出力ポートを期待値と比べる (観測不能ビットは除外)。ポートの存在は validate_golden で検査済み。
+fn diff_outputs(
+    outputs: &BTreeMap<String, Vec<OutputProbe>>,
+    cells: &[u8],
+    w: u32,
+    expected: &BTreeMap<String, u64>,
+) -> Vec<PortMismatch> {
+    outputs.iter()
+        .filter_map(|(name, probes)| {
+            let mask = observable_mask(probes);
+            let exp = expected.get(name).copied().unwrap_or(0) & mask;
+            let got = read_bus(cells, w, probes) & mask;
+            if exp == got {
+                return None;
+            }
+            let diff = exp ^ got;
+            let bits = (0..probes.len()).filter(|i| (diff >> i) & 1 == 1).collect();
+            Some(PortMismatch { port: name.clone(), expected: exp, got, bits })
+        })
+        .collect()
+}
+
 pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let prog: MemoryProgram = serde_json::from_str(
         &fs::read_to_string(prog_path).with_context(|| format!("reading {prog_path:?}"))?
@@ -269,6 +372,21 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
 
     let rom_src = parse_rom_source(&prog.memory.rom, &dir)?;
     let rom = rom_src.load().context("loading ROM")?;
+    let rom_sha256 = sha256_hex(&rom);
+
+    let golden: Option<Golden> = match &prog.golden {
+        Some(spec) => {
+            let path = dir.join(spec);
+            let g: Golden = serde_json::from_str(
+                &fs::read_to_string(&path).with_context(|| format!("reading golden {path:?}"))?
+            ).with_context(|| format!("parsing golden {path:?}"))?;
+            validate_golden(&g, &meta, prog.rst_pulses, prog.cycles, &rom_sha256)?;
+            println!("Golden: {} ({} cycles, program={})", path.display(), g.cycles.len(), g.program);
+            Some(g)
+        }
+        None => None,
+    };
+
     let cfg = MemoryConfig {
         ram_base: prog.memory.ram_base.unwrap_or(0xC000) as u16,
         ram_size: prog.memory.ram_size.unwrap_or(8192),
@@ -299,6 +417,9 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
 
     let mut last_cells: Vec<u8> = init_cells.clone();
     let mut trace_lines: Vec<String> = Vec::new();
+    // golden と一致した周期数と、最初に食い違った周期の報告
+    let mut golden_matched = 0u32;
+    let mut divergence: Option<Vec<String>> = None;
 
     for cycle in 0..prog.cycles {
         // 1) clk=0 settle
@@ -351,16 +472,48 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
             let f = d.join(format!("cycle{:03}_hi.bin", cycle));
             save_bin(&f, w, h, &last_cells)?;
         }
+
+        // 4) golden 照合 (data_in と clk=1 settle 後の全出力)
+        if let Some(g) = &golden {
+            let expected = &g.cycles[cycle as usize];
+            let mut report: Vec<String> = Vec::new();
+            if expected.data_in != data_in_value {
+                report.push(format!("data_in: expected {:#04X} got {:#04X} (bus addr={:#06X} mem_read={} — memory model or bus diverged)",
+                    expected.data_in, data_in_value, addr, mem_read as u8));
+            }
+            for m in diff_outputs(&meta.outputs, &last_cells, w, &expected.outputs) {
+                report.push(format!("{}: expected {:#X} got {:#X} (bits {:?})", m.port, m.expected, m.got, m.bits));
+            }
+            if report.is_empty() {
+                golden_matched += 1;
+            } else {
+                report.push(format!("settle: setup={g_lo}g data_in={g_wait}g high={g_hi}g"));
+                if let Some(d) = &opts.dump_dir {
+                    let lo = d.join(format!("diverge_cycle{cycle:03}_setup.bin"));
+                    let hi = d.join(format!("diverge_cycle{cycle:03}_high.bin"));
+                    save_bin(&lo, w, h, &cells_lo)?;
+                    save_bin(&hi, w, h, &last_cells)?;
+                    report.push(format!("dumped {} / {}", lo.display(), hi.display()));
+                }
+                report.insert(0, format!("cycle {cycle}"));
+                divergence = Some(report);
+                // 以降は data_in の前提が崩れているので比較を続ける意味がない
+                break;
+            }
+        }
     }
 
     if prog.trace {
         for l in &trace_lines { println!("{l}"); }
     }
 
-    // 4) 期待値比較 (ポート名・幅は validate_expect で検査済み)
+    // 5) 期待値比較 (ポート名・幅は validate_expect で検査済み)。
+    //    golden と食い違って途中で止めた場合、最終状態に届いていないので比較しない
+    //    (止めた周期の値との不一致は二次的で、原因調査の邪魔になる)
     let mut passed_checks = 0u32;
     let mut mismatches: Vec<String> = Vec::new();
-    if let Some(expect) = &prog.expect {
+    let stopped_early = divergence.is_some();
+    if let Some(expect) = prog.expect.as_ref().filter(|_| !stopped_early) {
         for (name, &exp) in expect {
             let got = read_bus(&last_cells, w, &meta.outputs[name]);
             if got == exp {
@@ -370,7 +523,7 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
             }
         }
     }
-    for (spec, addr, exp) in &expect_mem {
+    for (spec, addr, exp) in expect_mem.iter().filter(|_| !stopped_early) {
         let got = mem.read(*addr);
         if got == *exp {
             passed_checks += 1;
@@ -380,17 +533,28 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     }
 
     println!();
+    if golden.is_some() {
+        println!("golden: {golden_matched}/{} cycles match", prog.cycles);
+    }
     let total_checks = passed_checks + mismatches.len() as u32;
-    if total_checks > 0 {
+    if stopped_early && (prog.expect.is_some() || !expect_mem.is_empty()) {
+        println!("expect checks: skipped (stopped at golden divergence)");
+    } else if total_checks > 0 {
         println!("expect checks: {passed_checks}/{total_checks} passed");
     }
     for u in &unsettled {
         eprintln!("UNSETTLED: {u} (maxStepsPerPhase={})", prog.max_steps_per_phase);
     }
+    if let Some(report) = &divergence {
+        eprintln!("DIVERGED from golden at {}", report[0]);
+        for line in &report[1..] {
+            eprintln!("  {line}");
+        }
+    }
     for m in &mismatches {
         eprintln!("MISMATCH: {m}");
     }
-    if !mismatches.is_empty() || !unsettled.is_empty() {
+    if !mismatches.is_empty() || !unsettled.is_empty() || divergence.is_some() {
         return Ok(1);
     }
     Ok(0)
@@ -412,13 +576,16 @@ mod tests {
         ]);
     }
 
-    #[test]
-    fn parses_meta_field_names_written_by_routed_artifact() {
-        let json = r#"{"formatVersion":1,"circuit":"c","sourceSha256":"ab","gitCommit":"g",
+    fn sample_meta_json() -> &'static str {
+        r#"{"formatVersion":1,"circuit":"c","sourceSha256":"ab","gitCommit":"g",
             "createdAtUtc":"2026-09-16T00:00:00+00:00","width":2,"height":1,"origin":{"x":0,"y":0},
             "gateCount":5,"dffCount":2,"inputs":{"clk":[{"x":0,"y":0}]},
-            "outputs":{"b_out":[{"x":1,"y":0},{"const":0}]}}"#;
-        let meta: RoutedMeta = serde_json::from_str(json).unwrap();
+            "outputs":{"b_out":[{"x":1,"y":0},{"const":0}],"flag":[{"unobservable":3}]}}"#
+    }
+
+    #[test]
+    fn parses_meta_field_names_written_by_routed_artifact() {
+        let meta: RoutedMeta = serde_json::from_str(sample_meta_json()).unwrap();
         assert_eq!(meta.format_version, 1);
         assert_eq!((meta.gate_count, meta.dff_count), (5, 2));
         assert_eq!(meta.source_sha256.as_deref(), Some("ab"));
@@ -476,5 +643,68 @@ mod tests {
         assert_eq!(parse_addr_spec("49152").unwrap(), 0xC000);
         assert_eq!(parse_addr_spec("0xC000").unwrap(), 0xC000);
         assert!(parse_addr_spec("C000").is_err());
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    fn sample_golden(rom_sha: &str) -> Golden {
+        let json = format!(r#"{{"format":"wwc-golden/1","circuit":"c","program":"p","sourceSha256":"ab",
+            "romSha256":"{rom_sha}","rstPulses":2,
+            "cycles":[{{"dataIn":62,"outputs":{{"b_out":1,"flag":0}}}}]}}"#);
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn validate_golden_accepts_matching_golden() {
+        let meta: RoutedMeta = serde_json::from_str(sample_meta_json()).unwrap();
+        assert!(validate_golden(&sample_golden("r"), &meta, 2, 1, "r").is_ok());
+    }
+
+    #[test]
+    fn validate_golden_rejects_stale_inputs() {
+        let meta: RoutedMeta = serde_json::from_str(sample_meta_json()).unwrap();
+        let cases: [(&str, u32, u32, &str); 3] = [
+            ("romSha256", 2, 1, "other-rom"),
+            ("rstPulses", 1, 1, "r"),
+            ("cycles", 2, 5, "r"),
+        ];
+        for (needle, rst, cycles, rom) in cases {
+            let err = validate_golden(&sample_golden("r"), &meta, rst, cycles, rom).unwrap_err().to_string();
+            assert!(err.contains(needle), "expected '{needle}' in: {err}");
+        }
+        let mut stale = sample_golden("r");
+        stale.source_sha256 = "zz".into();
+        let err = validate_golden(&stale, &meta, 2, 1, "r").unwrap_err().to_string();
+        assert!(err.contains("sourceSha256"), "{err}");
+    }
+
+    #[test]
+    fn validate_golden_rejects_port_set_mismatch() {
+        let meta: RoutedMeta = serde_json::from_str(sample_meta_json()).unwrap();
+        let mut g = sample_golden("r");
+        g.cycles[0].outputs.remove("flag");
+        let err = validate_golden(&g, &meta, 2, 1, "r").unwrap_err().to_string();
+        assert!(err.contains("outputs"), "{err}");
+    }
+
+    #[test]
+    fn diff_outputs_reports_bits_and_ignores_unobservable() {
+        // (0,0) = level 0, (1,0) = level 1
+        let cells = [0b011_00_000u8, 0b011_00_001u8];
+        let outputs = BTreeMap::from([
+            ("p".to_string(), vec![OutputProbe::Cell { x: 0, y: 0 }, OutputProbe::Cell { x: 1, y: 0 }]),
+            ("u".to_string(), vec![OutputProbe::Unobservable { unobservable: 1 }]),
+        ]);
+        // p: expected 0b01, got 0b10 → bits 0 and 1 differ. u: expected 1 but unobservable → ignored
+        let expected = BTreeMap::from([("p".to_string(), 0b01u64), ("u".to_string(), 1u64)]);
+        assert_eq!(diff_outputs(&outputs, &cells, 2, &expected), vec![
+            PortMismatch { port: "p".into(), expected: 0b01, got: 0b10, bits: vec![0, 1] },
+        ]);
+        let matching = BTreeMap::from([("p".to_string(), 0b10u64), ("u".to_string(), 0u64)]);
+        assert!(diff_outputs(&outputs, &cells, 2, &matching).is_empty());
     }
 }

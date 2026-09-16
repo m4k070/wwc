@@ -57,8 +57,15 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
 - [x] sm83_full.v の即値読出 off-by-one を修正 (2026-09-16、B-2 の仕様テストで発見)。
       `exec_normal` / `exec_imm` の `addr <= pc` 43 か所 → `addr <= pc + 1`。再合成で 9,059 → 9,155 gates。
       合成手順は SM83.md に記録
-- [ ] B-3b `--memory` に golden 照合: 全周期の全出力と `data_in` を比較し、最初の不一致で停止しダンプ。
-      1 セル壊した .bin で不一致を検出できること
+- [x] B-3b `--memory` に golden 照合 (2026-09-16): プログラムの `"golden"` で有効化。
+      起動時に形式・回路名・`sourceSha256` (meta)・`romSha256` (実 ROM から計算)・rstPulses・周期数・出力ポート集合を検査。
+      周期ごとに `data_in` と clk=1 settle 後の全出力 (観測不能ビット除外) を比べ、最初の食い違いで停止し
+      ポート・期待値/実測値・食い違ったビット位置を表示、`--dump-dir` でその周期の setup/high グリッドを保存。
+      停止時は最終状態の expect 照合を飛ばす。`cargo test` 13 件
+      * sm83_subset smoke: golden 3/3 周期一致 (RTX 3060)
+      * **検証器の検証**: a_out[6] の DFF の D 入力セルを空にした .bin → cycle 1 で
+        `a_out: expected 0x42 got 0x2 (bits [6])` と壊したビットだけを指摘して停止
+      * `romSha256` を書き換えた golden は GPU 実行前にエラー
 - [ ] 決定待ち: プログラム・ROM を `routed/` から `programs/` に分けるか (DESIGN-VERIFY.md §8 Q2)
 - [ ] B-5 RTL との照合 (`yosys sim -vcd`)。B-4 は Step C
 - [ ] B-6 GPU 収束判定の高速化 (subset の実測で必要なら)
