@@ -1,0 +1,19 @@
+{
+  "circuit": "sm83_subset",
+  "meta": "../routed/sm83_subset.meta.json",
+  "init": "../routed/sm83_subset.bin",
+  "memory": {
+    "rom": "../routed/rom_sm83_subset_smoke.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 3,
+  "maxStepsPerPhase": 12000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 66,
+    "pc_out": 258
+  },
+  "trace": true
+}
