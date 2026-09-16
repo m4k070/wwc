@@ -30,16 +30,29 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
 - [x] `routed/*.bin` / `*.meta.json` は git 管理する (長時間配線の結果を vega/moon 間で共有するため。
       sm83_min で 100KB、subset/full は数 MB 見込み)
 
-### Step B: メモリバス対応の命令レベル GPU 検証
+### Step B: メモリバス対応の命令レベル GPU 検証 — 設計: [DESIGN-VERIFY.md](DESIGN-VERIFY.md)
 
-sm83_subset / sm83_full は外部メモリバス (addr → data_in, mem_write) を持つ。
-wgpu-runner `--program` は命令ごとにピンを静的に書き込むだけなので、フェッチに対応できない。
+方針: 期待値は手書きモデルではなく**合成済みネットリストのゲートレベルシミュレーション**。
+プログラム JSON を F# と runner `--memory` で共有し、F# が生成した golden と全周期を照合する。
 
-- [ ] wgpu-runner にメモリモデルを追加: 各フェーズで addr/mem_read を読み、
-      ROM/RAM イメージから data_in を供給、mem_write 時に書き込む
-- [ ] program JSON を「メモリイメージ + 実行サイクル数 + 期待レジスタ値」形式に拡張
-- [ ] 期待値の参照モデル: sm83_subset.v / sm83_full.v の写像 (Sm83MinModel と同様、
-      Verilog の癖に合わせる)
+- [x] wgpu-runner `--memory` (ROM/RAM 駆動のスモーク) と sm83_subset スモーク 2/2 PASS (2406b0a, a1d8501)
+- [x] B-3a `--memory` の堅牢化 (2026-09-16): meta の定数/観測不能ビットの読込、`expect` の未知ポート名・
+      値の幅超え・観測不能ビットを GPU 実行前にエラー、未収束周期 (リセット・data_in 伝播含む) を失敗扱い、
+      meta のフィールド名 (`gateCount` 等) と `formatVersion` の確認。`cargo test` 8 件、smoke 2/2 PASS 維持
+- [ ] smoke の cycle 0 high が 12001 世代 (`maxStepsPerPhase=12000` の最後の判定でようやく収束)。
+      上限に余裕がないので 20000 程度に上げる
+- [ ] B-1 `src/NetlistSim.fs`: NAND/NOT/DFF の周期シミュレータ。counter4 / alu4 /
+      sm83_min (既存 20 命令の期待値) で検証。subset のフェッチ不具合を確定させる
+- [ ] B-2 `src/Testbench.fs` + `src/ExportGolden.fsx`: `--memory` と同じプログラム JSON と
+      メモリ契約 (DESIGN-VERIFY.md §5.2) で golden を生成。smoke の `expect` が NetlistSim でも通ること
+- [ ] B-3b `--memory` に golden 照合: 全周期の全出力と `data_in` を比較し、最初の不一致で停止しダンプ。
+      1 セル壊した .bin で不一致を検出できること
+- [ ] 決定待ち: プログラム・ROM を `routed/` から `programs/` に分けるか (DESIGN-VERIFY.md §8 Q2)
+- [ ] B-5 RTL との照合 (`yosys sim -vcd`)。B-4 は Step C
+- [ ] B-6 GPU 収束判定の高速化 (subset の実測で必要なら)
+- [x] 決定 (2026-09-15): sm83_subset の RTL フェッチ不具合 (FETCH 後に `addr_r` を更新しない) は
+      直さない。subset は CA とネットリストの一致検証専用とし、CPU としての意味の検証は full で行う
+      (DESIGN-VERIFY.md §8 Q1)
 
 ### Step C: sm83_subset で全工程を通す
 
