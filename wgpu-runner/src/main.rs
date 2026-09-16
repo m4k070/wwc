@@ -1,4 +1,6 @@
 mod gpu;
+mod memory;
+mod memory_program;
 mod program;
 
 use std::env;
@@ -9,6 +11,7 @@ use gpu::{load_bin, save_bin, GpuSim};
 fn print_usage() {
     eprintln!("Usage: wgpu-runner <input.bin> [--steps N] [--output out.bin] [--batch B]");
     eprintln!("       wgpu-runner --program prog.json [--dump-regs] [--dump-dir DIR] [--batch B]");
+    eprintln!("       wgpu-runner --memory prog.json [--batch B] [--dump-dir DIR]   # メモリバスモード (Step B)");
 }
 
 fn main() -> Result<()> {
@@ -23,6 +26,7 @@ fn main() -> Result<()> {
     let mut output = None;
     let mut batch = 128u32;
     let mut program_path: Option<PathBuf> = None;
+    let mut memory_path: Option<PathBuf> = None;
     let mut dump_regs = false;
     let mut dump_dir: Option<PathBuf> = None;
 
@@ -33,6 +37,7 @@ fn main() -> Result<()> {
             "--output" => { i += 1; output = Some(PathBuf::from(&args[i])); }
             "--batch" => { i += 1; batch = args[i].parse().context("--batch must be a number")?; }
             "--program" => { i += 1; program_path = Some(PathBuf::from(&args[i])); }
+            "--memory" => { i += 1; memory_path = Some(PathBuf::from(&args[i])); }
             "--dump-regs" => { dump_regs = true; }
             "--dump-dir" => { i += 1; dump_dir = Some(PathBuf::from(&args[i])); }
             s if s.starts_with('-') => { anyhow::bail!("unknown flag {s}"); }
@@ -45,6 +50,13 @@ fn main() -> Result<()> {
     if let Some(prog) = program_path {
         let opts = program::ProgOpts { batch, dump_regs, dump_dir };
         let code = program::run_program(&prog, &opts)?;
+        std::process::exit(code);
+    }
+
+    // ---- メモリバスモード (Step B: ROM/RAM 駆動シミュレーション) ----
+    if let Some(prog) = memory_path {
+        let opts = memory_program::MemProgOpts { batch, dump_dir };
+        let code = memory_program::run_memory_program(&prog, &opts)?;
         std::process::exit(code);
     }
 
