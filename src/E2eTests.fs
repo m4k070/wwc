@@ -2038,3 +2038,197 @@ module RoutedArtifactTest =
 
     let runAll () : (string * bool) list =
         parseTests () @ roundTripTests ()
+
+// ---------------------------------------------------------------------
+// NetlistSim — ゲートレベル周期シミュレータ (TODO Step B-1)
+//     CA と同じ規則で評価できることを、既知の結果と照合して確かめる:
+//       counter4 のカウント、alu4 の全 1024 入力、
+//       sm83_min の 20 命令 (web/sm83_min_program.json、GPU で 20/20 検証済みの期待値)
+// ---------------------------------------------------------------------
+module NetlistSimTest =
+    open System.IO
+    open System.Text.Json
+    open Netlist
+    open RoutedArtifact
+    open NetlistSim
+
+    let private verilogPath (name: string) =
+        Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", name + ".json")
+
+    let private loadCircuit (name: string) : Result<CompiledNetlist * YosysPortBits list, string> =
+        let path = verilogPath name
+        if not (File.Exists path) then Error (sprintf "%s not found" path) else
+        let json = File.ReadAllText path
+        match Pipeline.frontend json, parseYosysPorts json with
+        | Error e, _ -> Error (sprintf "frontend: %A" e)
+        | _, Error e -> Error (RoutedArtifact.describeError e)
+        | Ok nl, Ok ports ->
+            compile nl
+            |> Result.mapError describeSimError
+            |> Result.map (fun c -> c, ports)
+
+    let private findPort (ports: YosysPortBits list) (name: string) =
+        ports |> List.find (fun p -> p.Name = name)
+
+    /// 複数ポートへの書込をまとめて 1 回の apply にする。
+    let private drive (c: CompiledNetlist) (writes: (YosysPortBits * uint64) list) (s: SimState) =
+        let inputs =
+            writes
+            |> List.map (fun (port, value) -> portInputs port value)
+            |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m) Map.empty
+        apply c inputs s
+
+    let private net = NetId
+    let private gate id kind inputs output =
+        { Id = id; Kind = kind; Inputs = inputs |> List.map NetId; Output = NetId output }
+    let private netlistOf gates inputs clock =
+        { Gates = gates
+          PrimaryInputs = inputs |> List.map NetId
+          PrimaryOutputs = []
+          ClockNet = clock |> Option.map NetId }
+
+    let private errorTests () : (string * bool) list =
+        let loop = netlistOf [ gate 0 Nand [ 1; 3 ] 2; gate 1 Nand [ 2; 1 ] 3 ] [ 1 ] None
+        let undriven = netlistOf [ gate 0 Nand [ 1; 9 ] 2 ] [ 1 ] None
+        let gatedClock = netlistOf [ gate 0 Not [ 1 ] 5; gate 1 Dff [ 5; 1 ] 2 ] [ 1 ] (Some 1)
+        let unsupported = netlistOf [ gate 0 And [ 1; 1 ] 2 ] [ 1 ] None
+        // DFF + NOT のトグル: DFF を通る閉路は組合せ閉路ではない
+        let toggle = netlistOf [ gate 0 Dff [ 1; 3 ] 2; gate 1 Not [ 2 ] 3 ] [ 1 ] (Some 1)
+        let toggleSequence =
+            match compile toggle with
+            | Error _ -> None
+            | Ok c ->
+                let clock v s = apply c (Map.ofList [ net 1, v ]) s
+                let q (s: SimState) = s.Values.[c.NetIndex.[net 2]]
+                initial c
+                |> clock false
+                |> Result.bind (clock true)
+                |> Result.bind (fun s1 ->
+                    s1 |> clock false |> Result.bind (clock true)
+                    |> Result.bind (fun s2 ->
+                        s2 |> clock false |> Result.bind (clock true)
+                        |> Result.map (fun s3 -> [ q s1; q s2; q s3 ])))
+                |> Result.toOption
+        let writesNonInput =
+            match compile toggle with
+            | Ok c ->
+                match apply c (Map.ofList [ net 2, true ]) (initial c) with
+                | Error (NotPrimaryInput (NetId 2)) -> true
+                | _ -> false
+            | Error _ -> false
+        [ "NSIM: combinational loop is rejected",
+          (match compile loop with Error (CombinationalLoop nets) -> Set.ofList nets = Set.ofList [ net 2; net 3 ] | _ -> false)
+          "NSIM: undriven gate input is rejected",
+          (match compile undriven with Error (UndrivenNet (0, NetId 9)) -> true | _ -> false)
+          "NSIM: DFF clocked by a non-clock net is rejected",
+          (match compile gatedClock with Error (GatedClock (1, NetId 5)) -> true | _ -> false)
+          "NSIM: unsupported gate kind is rejected",
+          (match compile unsupported with Error (UnsupportedGate (0, And)) -> true | _ -> false)
+          "NSIM: DFF+NOT toggles 1,0,1 on rising edges", toggleSequence = Some [ true; false; true ]
+          "NSIM: writing a non-input net is rejected", writesNonInput ]
+
+    let private counterTest () : (string * bool) list =
+        match loadCircuit "counter4" with
+        | Error msg -> [ sprintf "NSIM: counter4 loads (%s)" msg, false ]
+        | Ok (c, ports) ->
+            let clk = findPort ports "clk"
+            let q = findPort ports "q"
+            let rec run n (s: SimState) acc =
+                if n = 0 then Ok (List.rev acc)
+                else
+                    s
+                    |> drive c [ clk, 0UL ]
+                    |> Result.bind (drive c [ clk, 1UL ])
+                    |> Result.bind (fun s' -> readPort c s' q |> Result.bind (fun v -> run (n - 1) s' (v :: acc)))
+            let observed = run 17 (initial c) []
+            let expected = [ for i in 1 .. 17 -> uint64 (i % 16) ]
+            [ "NSIM: counter4 counts 1..15, wraps to 0, then 1", observed = Ok expected ]
+
+    let private alu4Test () : (string * bool) list =
+        match loadCircuit "alu4" with
+        | Error msg -> [ sprintf "NSIM: alu4 loads (%s)" msg, false ]
+        | Ok (c, ports) ->
+            let portA, portB, portOp, portY = findPort ports "A", findPort ports "B", findPort ports "op", findPort ports "Y"
+            let expectedY (a: uint64) (b: uint64) (op: uint64) =
+                match op with
+                | 0UL -> (a + b) &&& 15UL
+                | 1UL -> a &&& b
+                | 2UL -> a ||| b
+                | _ -> a ^^^ b
+            let mismatches =
+                [ for op in 0UL .. 3UL do
+                    for a in 0UL .. 15UL do
+                        for b in 0UL .. 15UL do
+                            let got =
+                                initial c
+                                |> drive c [ portA, a; portB, b; portOp, op ]
+                                |> Result.bind (fun s -> readPort c s portY)
+                            if got <> Ok (expectedY a b op) then
+                                yield sprintf "A=%d B=%d op=%d: expected %d got %A" a b op (expectedY a b op) got ]
+            for m in mismatches |> List.truncate 3 do
+                printfn "  NSIM_ALU4: %s" m
+            [ sprintf "NSIM: alu4 matches A+B/AND/OR/XOR for all 1024 inputs (%d mismatches)" mismatches.Length,
+              mismatches.IsEmpty ]
+
+    type private Sm83MinExpect = { Desc: string; Inst: uint64; A: uint64; B: uint64; Pc: uint64; Flags: uint64 }
+
+    let private loadSm83MinProgram (path: string) : Sm83MinExpect list =
+        use doc = JsonDocument.Parse (File.ReadAllText path)
+        [ for step in doc.RootElement.GetProperty("steps").EnumerateArray () do
+            let expect = step.GetProperty "expect"
+            let u (name: string) = expect.GetProperty(name).GetUInt64 ()
+            yield { Desc = step.GetProperty("desc").GetString ()
+                    Inst = step.GetProperty("pins").GetProperty("inst").GetUInt64 ()
+                    A = u "a"; B = u "b"; Pc = u "pc"; Flags = u "flags" } ]
+
+    /// wgpu-runner --program と ExportSm83MinInstr.fsx の手順を再現する:
+    ///   初期化: rst=1,clk=0 で settle → rst=0 で settle
+    ///   各命令: inst を書き clk=0 で settle → clk=1 で settle → レジスタ読出
+    let private sm83MinTest () : (string * bool) list =
+        let programPath = Path.Combine (__SOURCE_DIRECTORY__, "..", "web", "sm83_min_program.json")
+        match loadCircuit "sm83_min" with
+        | Error msg -> [ sprintf "NSIM: sm83_min loads (%s)" msg, false ]
+        | Ok _ when not (File.Exists programPath) -> [ "NSIM: web/sm83_min_program.json present", false ]
+        | Ok (c, ports) ->
+            let p = findPort ports
+            let clk, rst, inst = p "clk", p "rst", p "inst"
+            let steps = loadSm83MinProgram programPath
+            let afterReset =
+                initial c
+                |> drive c [ rst, 1UL; clk, 0UL ]
+                |> Result.bind (drive c [ rst, 0UL ])
+            let results =
+                steps
+                |> List.scan
+                    (fun (state: Result<SimState, SimError>, _) step ->
+                        let next =
+                            state
+                            |> Result.bind (drive c [ inst, step.Inst; clk, 0UL ])
+                            |> Result.bind (drive c [ clk, 1UL ])
+                        let observed =
+                            next
+                            |> Result.bind (fun s ->
+                                [ "a_out"; "b_out"; "pc_out"; "flags_out" ]
+                                |> List.map (fun name -> readPort c s (p name))
+                                |> List.fold (fun acc r -> Result.bind (fun vs -> Result.map (fun v -> vs @ [ v ]) r) acc) (Ok []))
+                        let ok = observed = Ok [ step.A; step.B; step.Pc; step.Flags ]
+                        if not ok then
+                            printfn "  NSIM_SM83MIN: %s expected a=%d b=%d pc=%d flags=0x%X, got %A"
+                                step.Desc step.A step.B step.Pc step.Flags observed
+                        next, ok)
+                    (afterReset, true)
+                |> List.tail
+            let passed = results |> List.filter snd |> List.length
+            [ sprintf "NSIM: sm83_min matches GPU-verified expectations (%d/%d instructions)" passed steps.Length,
+              passed = steps.Length && steps.Length = 20 ]
+
+    let private largeCircuitCompileTests () : (string * bool) list =
+        [ for name in [ "sm83_subset"; "sm83_full" ] do
+            match loadCircuit name with
+            | Ok (c, _) ->
+                yield sprintf "NSIM: %s compiles (%d comb gates, %d DFFs)" name c.CombGates.Length c.Dffs.Length, true
+            | Error msg ->
+                yield sprintf "NSIM: %s compiles (%s)" name msg, false ]
+
+    let runAll () : (string * bool) list =
+        errorTests () @ counterTest () @ alu4Test () @ sm83MinTest () @ largeCircuitCompileTests ()

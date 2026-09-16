@@ -1,7 +1,7 @@
 # WireLevel コンパイラ TODO
 
-## 現在のテスト結果: F# 166/166 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
-(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166。
+## 現在のテスト結果: F# 177/177 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
+(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166、NetlistSimTest 追加で 177。
 GPU/Playwright は d008cbe, 2026-08-14 時点)
 
 ## 次の一手 (M8: SM83 フルセット)
@@ -41,8 +41,13 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
       meta のフィールド名 (`gateCount` 等) と `formatVersion` の確認。`cargo test` 8 件、smoke 2/2 PASS 維持
 - [ ] smoke の cycle 0 high が 12001 世代 (`maxStepsPerPhase=12000` の最後の判定でようやく収束)。
       上限に余裕がないので 20000 程度に上げる
-- [ ] B-1 `src/NetlistSim.fs`: NAND/NOT/DFF の周期シミュレータ。counter4 / alu4 /
-      sm83_min (既存 20 命令の期待値) で検証。subset のフェッチ不具合を確定させる
+- [x] B-1 `src/NetlistSim.fs` (2026-09-16): NAND/NOT/DFF の周期シミュレータ。CA と同じ規則
+      (入力 0 本の NAND は 0、DFF は clk 立ち上がりで D、初期値 0) で、`apply` 1 回 = CA の settle 1 回。
+      閉路・未駆動入力・主クロック以外のクロック・未対応ゲートは明示的なエラー。
+      テスト `NetlistSimTest` 11 件: counter4、alu4 全 1024 入力、**sm83_min 20/20 (GPU 検証済みの期待値と一致)**、
+      subset/full がエラーなくコンパイル (subset 3417 組合せ + 136 DFF、full 8891 + 168)
+      * subset smoke 3 周期が GPU トレースと全項目一致 (addr/mem_read/din/pc/a)
+      * subset のフェッチ不具合を確定: `LD A,0x42` の後 addr=0x0101 のまま NOP を読み続ける
 - [ ] B-2 `src/Testbench.fs` + `src/ExportGolden.fsx`: `--memory` と同じプログラム JSON と
       メモリ契約 (DESIGN-VERIFY.md §5.2) で golden を生成。smoke の `expect` が NetlistSim でも通ること
 - [ ] B-3b `--memory` に golden 照合: 全周期の全出力と `data_in` を比較し、最初の不一致で停止しダンプ。
@@ -214,4 +219,4 @@ web/run-wl.sh mincpu --headed  # ブラウザ表示あり
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
 WireWorld 系テストは構造的制約により修正しない。現在 90 テストが WireWorld 系。
-全テスト 166/166 PASS 維持中。
+全テスト 177/177 PASS 維持中。

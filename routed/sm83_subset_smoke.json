@@ -9,7 +9,7 @@
   },
   "rstPulses": 2,
   "cycles": 3,
-  "maxStepsPerPhase": 12000,
+  "maxStepsPerPhase": 20000,
   "checkInterval": 256,
   "expect": {
     "a_out": 66,

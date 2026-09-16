@@ -2,7 +2,7 @@
 
 任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 166/166 通過。**
+> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 177/177 通過。**
 
 ---
 
@@ -76,6 +76,7 @@ src/
   Pipeline.fs    # Yosys JSON frontend + WireWorld pipeline (legacy)
   PipelineWL.fs  # Yosys Netlist → WireLevel コンパイラ (P0)
   RoutedArtifact.fs # 配線結果 (.bin + meta JSON) の保存・再読込・鮮度確認
+  NetlistSim.fs  # ゲートレベル周期シミュレータ (CA と同じ規則、検証の期待値生成用)
   E2eTests.fs    # All test modules
 routed/          # 配線成果物 (<circuit>.bin / <circuit>.meta.json)
 wgpu-runner/     # Rust + wgpu GPU シミュレータ
@@ -127,7 +128,7 @@ match compileWL defaultLib json with
 
 ```bash
 dotnet build src/WwHdl.fsproj                    # build（テスト前に必須）
-dotnet fsi src/RunTests.fsx                       # F# テスト (166/166)
+dotnet fsi src/RunTests.fsx                       # F# テスト (177/177)
 web/run-test.sh                                   # WebGPU golden tests (Playwright/SiftShader)
 wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
 ```
@@ -157,7 +158,7 @@ wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgp
 
 | パターン | 用途 | 例 |
 |---------|------|-----|
-| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 166/166）, `RunWl.fsx`, `RunBackfire.fsx` |
+| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 177/177）, `RunWl.fsx`, `RunBackfire.fsx` |
 | `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
 | `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `TestSm83Full.fsx` |
 | `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
@@ -304,9 +305,10 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 | MultiGateTest | 複数ゲート | ✅ |
 | WlSm83Test | SM83 CPU | 7/7 ✅ |
 | RoutedArtifactTest | 配線結果の保存・再読込 | 8/8 ✅ |
+| NetlistSimTest | ゲートレベルシミュレータ (sm83_min 20 命令ほか) | 11/11 ✅ |
 | GPU Golden | byte-exact 一致 | 24/24 ✅ |
 
-**合計**: 166/166 通過 (mincpu.json を moon 側で追加済み)
+**合計**: 177/177 通過 (mincpu.json を moon 側で追加済み)
 
 ## ライセンス
 
