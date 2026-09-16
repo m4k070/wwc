@@ -160,7 +160,7 @@ wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgp
 |---------|------|-----|
 | `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 177/177）, `RunWl.fsx`, `RunBackfire.fsx` |
 | `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
-| `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `TestSm83Full.fsx` |
+| `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `src/LoadRouted.fsx` |
 | `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
 
 ### ポイント

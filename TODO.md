@@ -39,8 +39,7 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
 - [x] B-3a `--memory` の堅牢化 (2026-09-16): meta の定数/観測不能ビットの読込、`expect` の未知ポート名・
       値の幅超え・観測不能ビットを GPU 実行前にエラー、未収束周期 (リセット・data_in 伝播含む) を失敗扱い、
       meta のフィールド名 (`gateCount` 等) と `formatVersion` の確認。`cargo test` 8 件、smoke 2/2 PASS 維持
-- [ ] smoke の cycle 0 high が 12001 世代 (`maxStepsPerPhase=12000` の最後の判定でようやく収束)。
-      上限に余裕がないので 20000 程度に上げる
+- [x] smoke の `maxStepsPerPhase` を 12000 → 20000 (cycle 0 high が 12079 世代で、旧上限では未収束だった)
 - [x] B-1 `src/NetlistSim.fs` (2026-09-16): NAND/NOT/DFF の周期シミュレータ。CA と同じ規則
       (入力 0 本の NAND は 0、DFF は clk 立ち上がりで D、初期値 0) で、`apply` 1 回 = CA の settle 1 回。
       閉路・未駆動入力・主クロック以外のクロック・未対応ゲートは明示的なエラー。
