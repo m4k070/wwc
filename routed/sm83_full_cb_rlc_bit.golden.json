@@ -1,0 +1,2290 @@
+{
+  "format": "wwc-golden/1",
+  "circuit": "sm83_full",
+  "program": "sm83_full_cb_rlc_bit",
+  "sourceSha256": "51977d1386d30c8019356a4bf4551a9e4e2a6c2e74b142b5e1c7e220932da587",
+  "romSha256": "3f19cb2e63b8dab61902f5e68637ddeac8d07f823295453df5cef5fdfb4e7c9a",
+  "rstPulses": 2,
+  "cycles": [
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 1,
+        "addr": 256,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 256,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 62,
+      "outputs": {
+        "a_out": 1,
+        "addr": 257,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 257,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 129,
+      "outputs": {
+        "a_out": 129,
+        "addr": 257,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 258,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 129,
+        "addr": 258,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 258,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 203,
+      "outputs": {
+        "a_out": 129,
+        "addr": 258,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 259,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 129,
+        "addr": 259,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 259,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 7,
+      "outputs": {
+        "a_out": 3,
+        "addr": 259,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 16,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 260,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 260,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 16,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 260,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 203,
+      "outputs": {
+        "a_out": 3,
+        "addr": 260,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 16,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 261,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 261,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 16,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 261,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 127,
+      "outputs": {
+        "a_out": 3,
+        "addr": 261,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 262,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 262,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 262,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 118,
+      "outputs": {
+        "a_out": 3,
+        "addr": 262,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    },
+    {
+      "dataIn": 0,
+      "outputs": {
+        "a_out": 3,
+        "addr": 0,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 0,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 65534
+      }
+    }
+  ]
+}

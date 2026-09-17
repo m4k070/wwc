@@ -160,31 +160,44 @@ module sm83_full (
     wire [7:0] add8, sub8, and8, xor8, or8, inc8, dec8;
     wire       add8_h, add8_c, sub8_h, sub8_c, inc8_h, dec8_h;
 
-    assign add8   = a + operand;
-    assign sub8   = a - operand;
-    assign and8   = a & operand;
-    assign xor8   = a ^ operand;
-    assign or8    = a | operand;
-    assign inc8   = operand + 1;
-    assign dec8   = operand - 1;
+    // ALU / INC / DEC の右辺。呼び出し側の `operand <= X` は同じ周期のノンブロッキング代入で
+    // まだ反映されていないため、operand レジスタではなくその周期の値を組み合わせ回路で選ぶ。
+    //   PHASE_FETCH2 (レジスタ版): opcode = data_in から対象レジスタを選ぶ
+    //   PHASE_IMM (即値版) / PHASE_MEM_DATA ((HL) 版): data_in
+    wire [7:0] alu_rhs    = (phase == PHASE_FETCH2) ? read_r8(data_in[2:0]) : data_in;
+    wire [7:0] incdec_src = (phase == PHASE_FETCH2) ? read_r8(data_in[5:3]) : data_in;
 
-    assign add8_h = (a[3:0] + operand[3:0]) > 4'hF;
-    assign add8_c = ({1'b0, a} + {1'b0, operand}) > 9'hFF;
-    assign sub8_h = a[3:0] < operand[3:0];
-    assign sub8_c = a < operand;
-    assign inc8_h = (operand[3:0] == 4'hF);
-    assign dec8_h = (operand[3:0] == 4'h0);
+    assign add8   = a + alu_rhs;
+    assign sub8   = a - alu_rhs;
+    assign and8   = a & alu_rhs;
+    assign xor8   = a ^ alu_rhs;
+    assign or8    = a | alu_rhs;
+    assign inc8   = incdec_src + 1;
+    assign dec8   = incdec_src - 1;
+
+    // ニブル和は 5bit で比較する (4bit 同士の和を 4'hF と比べると桁あふれして常に偽になる)
+    assign add8_h = ({1'b0, a[3:0]} + {1'b0, alu_rhs[3:0]}) > 5'hF;
+    assign add8_c = ({1'b0, a} + {1'b0, alu_rhs}) > 9'hFF;
+    assign sub8_h = a[3:0] < alu_rhs[3:0];
+    assign sub8_c = a < alu_rhs;
+    assign inc8_h = (incdec_src[3:0] == 4'hF);
+    assign dec8_h = (incdec_src[3:0] == 4'h0);
 
     wire ci = f[4];
 
     wire [7:0] adc8, sbc8;
     wire       adc8_h, adc8_c, sbc8_h, sbc8_c;
-    assign adc8   = a + operand + ci;
-    assign sbc8   = a - operand - ci;
-    assign adc8_h = (a[3:0] + operand[3:0] + ci) > 4'hF;
-    assign adc8_c = ({1'b0, a} + {1'b0, operand} + ci) > 9'hFF;
-    assign sbc8_h = a[3:0] < (operand[3:0] + ci);
-    assign sbc8_c = a < (operand + ci);
+    assign adc8   = a + alu_rhs + ci;
+    assign sbc8   = a - alu_rhs - ci;
+    assign adc8_h = ({1'b0, a[3:0]} + {1'b0, alu_rhs[3:0]} + {4'b0, ci}) > 5'hF;
+    assign adc8_c = ({1'b0, a} + {1'b0, alu_rhs} + {8'b0, ci}) > 9'hFF;
+    // 右辺 + キャリーが桁あふれしないよう 1bit 広げて比較する
+    assign sbc8_h = {1'b0, a[3:0]} < ({1'b0, alu_rhs[3:0]} + {4'b0, ci});
+    assign sbc8_c = {1'b0, a} < ({1'b0, alu_rhs} + {8'b0, ci});
+
+    // 命令の次の番地。FETCH2 / IMM / IMM2 では pc <= pc + 1 と同じ周期に使うため、
+    // 戻り番地として積む値は pc ではなく pc + 1
+    wire [15:0] pc_plus1 = pc + 16'd1;
 
     // 16bit ADD HL, rr
     wire [15:0] add16_r;
@@ -338,8 +351,9 @@ module sm83_full (
                 // PHASE_IMM2
                 // =====================================================
                 PHASE_IMM2: begin
-                    exec_imm2(data_in);
+                    // 後に書いたノンブロッキング代入が勝つので、exec_imm2 の pc 代入 (JP 先など) を後に置く
                     pc <= pc + 1;
+                    exec_imm2(data_in);
                 end
 
                 // =====================================================
@@ -374,6 +388,11 @@ module sm83_full (
                     addr <= sp - 1;
                     data_out <= operand;
                     mem_write <= 1;
+                    if (push2_pending) begin
+                        // RST: 戻り番地を積み終えたらベクタへ
+                        pc <= call_target;
+                        push2_pending <= 0;
+                    end
                     phase <= PHASE_FETCH;
                 end
 
@@ -395,11 +414,13 @@ module sm83_full (
                 PHASE_POP: begin
                     operand <= data_in;
                     sp <= sp + 1;
-                    mem_read <= 0;
+                    addr <= sp + 1;     // 上位バイトを読む
+                    mem_read <= 1;
                     phase <= PHASE_POP2;
                 end
 
                 PHASE_POP2: begin
+                    sp <= sp + 1;
                     exec_pop(data_in);
                     phase <= PHASE_FETCH;
                 end
@@ -849,10 +870,10 @@ module sm83_full (
         begin
             sp <= sp - 1;
             addr <= sp - 1;
-            data_out <= pc[15:8];
+            data_out <= pc_plus1[15:8];
             mem_write <= 1;
             call_target <= {8'h00, vec};
-            operand <= pc[7:0];  // low byte for second push
+            operand <= pc_plus1[7:0];  // low byte for second push
             push2_pending <= 1;
             phase <= PHASE_MEM_WRITE2;
         end
@@ -943,10 +964,10 @@ module sm83_full (
                 8'hCD, 8'hC4, 8'hCC, 8'hD4, 8'hDC: begin
                     // CALL: push PC[15:8] first
                     call_target <= {hi, operand};
-                    operand <= pc[15:8];  // temp store high byte of return addr
+                    operand <= pc_plus1[7:0];  // 戻り番地の下位バイト (PHASE_CALL_PUSH で積む)
                     sp <= sp - 1;
                     addr <= sp - 1;
-                    data_out <= pc[15:8];
+                    data_out <= pc_plus1[15:8];
                     mem_write <= 1;
                     phase <= PHASE_CALL_PUSH;
                 end
@@ -983,31 +1004,32 @@ module sm83_full (
                     if ((ir & 8'hC0) == 8'h40 && ir[2:0] == 3'b110) begin
                         ld_rr(ir[5:3], val);
                     end
-                    // ALU (HL) — 再実行
-                    else if ((ir & 8'hF8) == 8'h86) begin
+                    // ALU (HL) — opcode の完全一致で判定する
+                    // (旧: (ir & 8'hF8) == 8'h86 は 0x86 & 0xF8 = 0x80 なので決して成立しなかった)
+                    else if (ir == 8'h86) begin
                         // ADD A, (HL)
                         operand <= val;
                         do_alu(ALU_ADD);
                     end
-                    else if ((ir & 8'hF8) == 8'h8E) begin
+                    else if (ir == 8'h8E) begin
                         operand <= val; do_alu(ALU_ADC);
                     end
-                    else if ((ir & 8'hF8) == 8'h96) begin
+                    else if (ir == 8'h96) begin
                         operand <= val; do_alu(ALU_SUB);
                     end
-                    else if ((ir & 8'hF8) == 8'h9E) begin
+                    else if (ir == 8'h9E) begin
                         operand <= val; do_alu(ALU_SBC);
                     end
-                    else if ((ir & 8'hF8) == 8'hA6) begin
+                    else if (ir == 8'hA6) begin
                         operand <= val; do_alu(ALU_AND);
                     end
-                    else if ((ir & 8'hF8) == 8'hAE) begin
+                    else if (ir == 8'hAE) begin
                         operand <= val; do_alu(ALU_XOR);
                     end
-                    else if ((ir & 8'hF8) == 8'hB6) begin
+                    else if (ir == 8'hB6) begin
                         operand <= val; do_alu(ALU_OR);
                     end
-                    else if ((ir & 8'hBE) == 8'hBE) begin
+                    else if (ir == 8'hBE) begin
                         operand <= val; do_alu(ALU_CP);
                     end
                     // INC/DEC (HL)

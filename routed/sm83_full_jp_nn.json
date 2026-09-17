@@ -1,0 +1,21 @@
+{
+  "circuit": "sm83_full",
+  "comment": "JP 0x0110; (飛ばされる LD A,0x11; HALT) / 0x0110: LD A,0x22; HALT — 期待値は SM83 仕様から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_jp_nn.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 34,
+    "pc_out": 275
+  },
+  "golden": "sm83_full_jp_nn.golden.json",
+  "trace": true
+}

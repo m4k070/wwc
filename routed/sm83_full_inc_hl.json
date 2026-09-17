@@ -1,0 +1,25 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD HL,0xC000; LD (HL),0xFF; LD C,0x55; INC (HL) (0x00, Z H、C=1 保持); HALT — 期待値は SM83 仕様から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_inc_hl.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 1,
+    "f_out": 176,
+    "pc_out": 265
+  },
+  "golden": "sm83_full_inc_hl.golden.json",
+  "trace": true,
+  "expectMem": {
+    "0xC000": 0
+  }
+}

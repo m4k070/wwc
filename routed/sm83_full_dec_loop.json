@@ -1,0 +1,22 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD B,5; loop: DEC B; JR NZ,loop; HALT (最後の DEC 1→0: Z N、C=1 保持) — 期待値は SM83 仕様から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_dec_loop.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "b_out": 0,
+    "f_out": 208,
+    "pc_out": 262
+  },
+  "golden": "sm83_full_dec_loop.golden.json",
+  "trace": true
+}

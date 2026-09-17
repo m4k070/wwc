@@ -104,34 +104,36 @@ module TestbenchTest =
             [ "TB: sm83_subset smoke matches the GPU trace cycle by cycle (data_in/pc/a)", observed = gpuSmokeTrace
               "TB: sm83_subset smoke expectations pass on NetlistSim", mismatches.IsEmpty ]
 
-    /// SM83 の仕様から決めた期待値: LD HL,0xC000; LD A,0x42; LD (HL),A; HALT
-    let private fullSemanticTest () : (string * bool) list =
-        let rom = Array.append (Array.zeroCreate 0x100) [| 0x21uy; 0x00uy; 0xC0uy; 0x3Euy; 0x42uy; 0x77uy; 0x76uy |]
-        let program : MemoryProgram =
-            { ProgramName = "sm83_full_ld_mem"
-              Circuit = Some "sm83_full"
-              MetaPath = ""
-              InitPath = ""
-              Rom = RomBase64 ""
-              Memory = defaultMemoryConfig
-              RstPulses = 2
-              Cycles = 20
-              Expect = Map.ofList [ "a_out", 0x42UL; "h_out", 0xC0UL; "l_out", 0x00UL; "pc_out", 0x0107UL ]
-              ExpectMem = Map.ofList [ 0xC000us, 0x42uy ]
-              GoldenPath = "" }
-        let outcome =
-            loadCircuit "sm83_full"
-            |> Result.bind (fun (c, ports) ->
-                resolveBus ports
-                |> Result.bind (fun bus -> run c ports bus (createMemory rom program.Memory) program.RstPulses program.Cycles)
-                |> Result.mapError describeTestbenchError)
-        match outcome with
-        | Error msg -> [ sprintf "TB: sm83_full LD/HALT program runs (%s)" msg, false ]
-        | Ok result ->
-            let mismatches = checkExpectations program result
-            for m in mismatches do
-                printfn "  TB_FULL: %s" m
-            [ "TB: sm83_full executes LD HL,nn / LD A,n / LD (HL),A / HALT per SM83 spec (a, HL, pc, RAM)", mismatches.IsEmpty ]
+    /// routed/sm83_full_*.json の仕様テスト (期待値は SM83 仕様から手で導いたもの) を NetlistSim で実行する。
+    /// RTL を直したら再合成してこのテストを回す。1 プログラム = 1 テスト項目
+    let private fullSpecProgramTests () : (string * bool) list =
+        let programPaths =
+            Directory.GetFiles (repoPath "routed", "sm83_full_*.json")
+            |> Array.filter (fun p -> not (p.EndsWith ".golden.json"))
+            |> Array.sort
+            |> List.ofArray
+        match loadCircuit "sm83_full" with
+        | Error msg -> [ sprintf "TB: sm83_full loads (%s)" msg, false ]
+        | Ok _ when programPaths.IsEmpty -> [ "TB: routed/sm83_full_*.json spec programs present", false ]
+        | Ok (c, ports) ->
+            match resolveBus ports with
+            | Error e -> [ sprintf "TB: sm83_full bus resolves (%s)" (describeTestbenchError e), false ]
+            | Ok bus ->
+                [ for path in programPaths do
+                    let name = Path.GetFileNameWithoutExtension path
+                    let outcome =
+                        parseProgram path (File.ReadAllText path)
+                        |> Result.bind (fun program ->
+                            loadRom program.Rom
+                            |> Result.bind (fun rom ->
+                                run c ports bus (createMemory rom program.Memory) program.RstPulses program.Cycles)
+                            |> Result.map (fun result -> checkExpectations program result, program.Expect.Count + program.ExpectMem.Count))
+                    match outcome with
+                    | Error e -> yield sprintf "TB-SPEC: %s runs (%s)" name (describeTestbenchError e), false
+                    | Ok (mismatches, checks) ->
+                        for m in mismatches do
+                            printfn "  TB_SPEC %s: %s" name m
+                        yield sprintf "TB-SPEC: %s matches SM83 spec (%d checks)" name checks, mismatches.IsEmpty ]
 
     let private goldenJsonTest () : (string * bool) list =
         let info : GoldenInfo =
@@ -148,4 +150,4 @@ module TestbenchTest =
           && first.GetProperty("outputs").GetProperty("addr").GetUInt64 () = 256UL ]
 
     let runAll () : (string * bool) list =
-        memoryTests () @ parseTests () @ busTests () @ subsetSmokeTest () @ fullSemanticTest () @ goldenJsonTest ()
+        memoryTests () @ parseTests () @ busTests () @ subsetSmokeTest () @ goldenJsonTest () @ fullSpecProgramTests ()

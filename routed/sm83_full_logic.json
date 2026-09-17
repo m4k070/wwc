@@ -1,0 +1,23 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD A,0xF0; LD B,0x3C; LD C,0x55; AND B (0x30); XOR 0xFF (0xCF); OR 0x01 (0xCF, F=0); HALT — 期待値は SM83 仕様から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_logic.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 207,
+    "b_out": 60,
+    "f_out": 0,
+    "pc_out": 268
+  },
+  "golden": "sm83_full_logic.golden.json",
+  "trace": true
+}

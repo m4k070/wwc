@@ -1,0 +1,27 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD SP,0xD000; LD BC,0x1234; PUSH BC; POP DE; HALT — 期待値は SM83 仕様から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_push_pop.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "d_out": 18,
+    "e_out": 52,
+    "sp_out": 53248,
+    "pc_out": 265
+  },
+  "golden": "sm83_full_push_pop.golden.json",
+  "trace": true,
+  "expectMem": {
+    "0xCFFF": 18,
+    "0xCFFE": 52
+  }
+}
