@@ -1,0 +1,30 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD SP,0xD000; IE=1; IF=1; HALT; RST 0x38; HALT / 0x0038: INC B; XOR A; LDH (0x0F),A; RET。HALT バグで RST の戻り番地は RST 自身 (0x010A) になり、RST が 2 回走る (B=2)。2 回目の戻り番地は 0x010B / ベクタ 0x40/48/50/58/60 = INC B/C/D/E/H; RETI — 期待値は SM83 仕様 (Pan Docs) から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_int_halt_bug_rst.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 0,
+    "b_out": 2,
+    "f_out": 128,
+    "sp_out": 53248,
+    "pc_out": 268
+  },
+  "expectMem": {
+    "0xCFFF": 1,
+    "0xCFFE": 11,
+    "0xFF0F": 0,
+    "0xFFFF": 1
+  },
+  "golden": "sm83_full_int_halt_bug_rst.golden.json",
+  "trace": true
+}

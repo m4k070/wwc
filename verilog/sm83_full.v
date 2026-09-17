@@ -49,7 +49,12 @@ module sm83_full (
     // ----------------------------------------------------------------
     reg       ime;
     reg       ei_delay;  // EI の次の命令の実行開始時に IME を立てる (EI の効果は 1 命令遅れる)
+    reg       ime_from_ei;  // 実行中の命令の開始時に EI の効果で IME が立った (HALT バグの判定では IME=0 とみなす)
     reg       halted;
+    // HALT バグ (Pan Docs): IME=0 で要因がある状態の HALT は停止せず、pc は HALT 自身を指したまま。
+    // 次のフェッチは HALT の次のバイトを読むので、そのバイトが 2 回読まれる。
+    // EI 直後の HALT ではそのまま割込みを受け付け、戻り番地は HALT 自身になる
+    reg       halt_bug;
 
     // 割込みの優先度は bit0 (VBlank) が最上位。受け付けるのは irq の最下位の 1
     wire [4:0] irq_ack_onehot = irq & (~irq + 5'd1);
@@ -280,8 +285,10 @@ module sm83_full (
             pc <= 16'h0100;
             ime <= 0;
             ei_delay <= 0;
+            ime_from_ei <= 0;
             int_ack <= 0;
             halted <= 0;
+            halt_bug <= 0;
             ir <= 0;
             cb_ir <= 0;
             cb_prefix <= 0;
@@ -310,19 +317,25 @@ module sm83_full (
                         // 割込み受付: IME を下ろし、要因をホストに知らせて IF から下ろしてもらう。
                         // pc は次に実行するはずだった命令 (HALT 中なら HALT の次) を指している
                         halted <= 0;
+                        halt_bug <= 0;  // HALT バグ中なら pc は HALT 自身を指しており、それが戻り番地になる
                         ime <= 0;
                         ei_delay <= 0;
+                        ime_from_ei <= 0;
                         int_ack <= irq_ack_onehot;
                         operand <= irq_vector;
                         phase <= PHASE_INT_ACK;
                     end else begin
                         // IME=0 で要因があれば HALT を抜けて次の命令へ (HALT バグは再現しない)
                         halted <= 0;
+                        ime_from_ei <= ei_delay;
                         if (ei_delay) begin
                             ime <= 1;
                             ei_delay <= 0;
                         end
-                        addr <= pc;
+                        // HALT バグ中は pc が HALT 自身を指すので、その次のバイトを読む。FETCH2 の pc <= pc + 1 で
+                        // pc は HALT の次になり、次の命令のフェッチで同じバイトをもう一度読む
+                        addr <= halt_bug ? pc + 1 : pc;
+                        halt_bug <= 0;
                         mem_read <= 1;
                         phase <= PHASE_FETCH2;
                     end
@@ -512,7 +525,16 @@ module sm83_full (
 
                 // === HALT / STOP ===
                 // HALT / STOP: PHASE_FETCH で割込み要因を待つ (STOP は 2 バイト命令として扱う)
-                8'h76: begin halted <= 1; phase <= PHASE_FETCH; end
+                8'h76: begin
+                    if ((!ime || ime_from_ei) && irq != 0) begin
+                        // HALT バグ: 停止せず、pc を HALT 自身に留める (FETCH2 の pc <= pc + 1 を上書き)
+                        halt_bug <= 1;
+                        pc <= pc;
+                    end else begin
+                        halted <= 1;
+                    end
+                    phase <= PHASE_FETCH;
+                end
                 8'h10: begin halted <= 1; pc <= pc + 2; phase <= PHASE_FETCH; end
 
                 // === LD r, n (即値 8bit) ===

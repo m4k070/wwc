@@ -1,6 +1,6 @@
 {
   "circuit": "sm83_full",
-  "comment": "LD SP,0xD000; IE=1; IF=1; DI; HALT; INC E; XOR A; LDH (0x0F),A; HALT。IME=0 でも要因があれば HALT はすぐ抜けて次の命令へ進み、ハンドラは走らない (B=0) / ベクタ 0x40/48/50/58/60 = INC B/C/D/E/H; RETI — 期待値は SM83 仕様から手で導いた",
+  "comment": "LD SP,0xD000; IE=1; IF=1; DI; HALT; INC E; XOR A; LDH (0x0F),A; HALT。IME=0 で要因がある HALT は停止せず HALT バグで次のバイトを 2 回読むので INC E が 2 回走る (E=0xDA)。ハンドラは走らない (B=0) / ベクタ 0x40/48/50/58/60 = INC B/C/D/E/H; RETI — 期待値は SM83 仕様 (Pan Docs) から手で導いた",
   "meta": "sm83_full.meta.json",
   "init": "sm83_full.bin",
   "memory": {
@@ -15,7 +15,7 @@
   "expect": {
     "a_out": 0,
     "b_out": 0,
-    "e_out": 217,
+    "e_out": 218,
     "f_out": 128,
     "sp_out": 53248,
     "pc_out": 272

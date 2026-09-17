@@ -1,0 +1,30 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD SP,0xD000; IE=1; IF=1; EI; HALT。EI 直後の HALT は HALT バグの条件で、割込みは受け付けるが戻り番地は HALT 自身 (0x010A)。ハンドラ (INC B; RETI) の後 HALT を再実行し、要因が消えているので停止する / ベクタ 0x40/48/50/58/60 = INC B/C/D/E/H; RETI — 期待値は SM83 仕様 (Pan Docs) から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_int_halt_bug_ei.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 1,
+    "b_out": 1,
+    "f_out": 16,
+    "sp_out": 53248,
+    "pc_out": 267
+  },
+  "expectMem": {
+    "0xCFFF": 1,
+    "0xCFFE": 10,
+    "0xFF0F": 0,
+    "0xFFFF": 1
+  },
+  "golden": "sm83_full_int_halt_bug_ei.golden.json",
+  "trace": true
+}

@@ -1,7 +1,7 @@
 # WireLevel コンパイラ TODO
 
-## 現在のテスト結果: F# 220/220 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
-(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166、NetlistSimTest 追加で 177、TestbenchTest 追加で 187、sm83_full 仕様テスト 16 本で 202、差分テストの回帰 12 本で 214、割込み (メモリ I/O テスト 3 + 仕様テスト 3) で 220。
+## 現在のテスト結果: F# 222/222 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
+(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166、NetlistSimTest 追加で 177、TestbenchTest 追加で 187、sm83_full 仕様テスト 16 本で 202、差分テストの回帰 12 本で 214、割込み (メモリ I/O テスト 3 + 仕様テスト 3) で 220、HALT バグの仕様テスト 2 本で 222。
 GPU/Playwright は d008cbe, 2026-08-14 時点)
 
 ## 次の一手 (M8: SM83 フルセット)
@@ -94,16 +94,18 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
 - [x] gbfs の CPU との差分テスト `src/DiffTestGbfs.fsx` (2026-09-17): 494 命令 × 4 パターン (境界値入り)。
       1 回目 52 命令食い違い → すべて RTL の誤り (JR、条件分岐の不成立、ADD HL/ADD SP のフラグ、LD (nn),SP、CB (HL))。
       修正後 494 命令すべて一致。代表 12 件を `routed/sm83_full_diff_*.json` に書き出し TestbenchTest の回帰テストへ。
-      gbfs 側の ADD の Z フラグ不具合も修正 (gbfs のテスト 220/220)。10,650 gates
+      gbfs 側の ADD の Z フラグ不具合も修正 (gbfs のテスト 222/222)。10,650 gates
 - [x] 割込みの実装 (2026-09-17): IE/IF は CPU の外、ポート irq[4:0] / int_ack[4:0]。EI の 1 命令遅延、DI、RETI、HALT 復帰。
       Testbench.fs と wgpu-runner のメモリモデルに IF/IE/HRAM と割込み手順を追加 (DESIGN-VERIFY.md §5.2〜5.3.1)。
       手書き仕様テスト 3 本、gbfs 差分に LDH と割込みシナリオを追加。10,654 gates
 - [x] gbfs の EI を 1 命令遅延に修正 (2026-09-17、gbfs の CpuState.ImeScheduled)。修正後、gbfs は仕様テスト 31/31、
       割込みシナリオ 200 本すべてが RTL (NetlistSim) と一致
-- [ ] 差分テストの残り: STOP、HALT バグ (どちらのモデルも未実装)
+- [x] HALT バグを RTL と gbfs に実装 (2026-09-17、Pan Docs 準拠)。仕様テスト 2 本追加、int_halt_wake_di の期待値を修正。
+      gbfs 参照モデル 33/33、割込みシナリオ 200 本一致。10,767 gates
+- [ ] STOP (ジョイパッド入力線で復帰。周辺回路の仕様を決めてから。GB ソフトでの使用は稀)
 - [x] 通常命令「全 256」の網羅確認 — 上記差分テストで未定義 opcode・STOP・LDH を除き網羅
 
-- [ ] sm83_full (10,654 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 +
+- [ ] sm83_full (10,767 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 +
       進行ログで監視し、Step A で必ず保存。16x12 で失敗 → 20x14 再試行の時間も含む
 - [ ] CB 命令の動作検証
 
@@ -255,4 +257,4 @@ web/run-wl.sh mincpu --headed  # ブラウザ表示あり
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
 WireWorld 系テストは構造的制約により修正しない。現在 90 テストが WireWorld 系。
-全テスト 220/220 PASS 維持中。
+全テスト 222/222 PASS 維持中。
