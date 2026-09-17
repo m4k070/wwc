@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use crate::gpu::{load_bin, save_bin, GpuSim};
 use crate::memory::{Memory, MemoryConfig, RomSource};
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Clone, Copy, Debug)]
 pub struct Xy { pub x: u32, pub y: u32 }
 
 /// RoutedArtifact.fs の OutputProbe に対応する (meta JSON の表現で区別する)。
@@ -87,6 +87,9 @@ pub struct RoutedMeta {
 pub struct GoldenCycle {
     /// この周期で書くべき data_in (§5.2 手順 3)
     pub data_in: u64,
+    /// この周期で書くべき irq (IE & IF)。割込みポートのない回路・古い golden では 0
+    #[serde(default)]
+    pub irq: u64,
     /// clk=1 settle 後の全出力 (§5.2 手順 6)
     pub outputs: BTreeMap<String, u64>,
 }
@@ -220,6 +223,21 @@ fn required_input<'a>(meta: &'a RoutedMeta, name: &str) -> Result<&'a Vec<Xy>> {
 
 fn required_output<'a>(meta: &'a RoutedMeta, name: &str) -> Result<&'a Vec<OutputProbe>> {
     meta.outputs.get(name).with_context(|| format!("meta.outputs must contain '{name}'"))
+}
+
+/// 割込みポート: irq (入力 5bit、= IE & IF) と int_ack (出力 5bit、受け付けた割込みの one-hot)。
+/// どちらもない回路 (sm83_subset) では None。片方だけならエラー。
+fn interrupt_ports(meta: &RoutedMeta) -> Result<Option<(Vec<Xy>, Vec<OutputProbe>)>> {
+    match (meta.inputs.get("irq"), meta.outputs.get("int_ack")) {
+        (None, None) => Ok(None),
+        (Some(irq), Some(ack)) => {
+            anyhow::ensure!(irq.len() == 5, "irq must be 5 bits (got {})", irq.len());
+            anyhow::ensure!(ack.len() == 5, "int_ack must be 5 bits (got {})", ack.len());
+            Ok(Some((irq.clone(), ack.clone())))
+        }
+        (Some(_), None) => anyhow::bail!("meta has irq but no int_ack — interrupt ports must come in pairs"),
+        (None, Some(_)) => anyhow::bail!("meta has int_ack but no irq — interrupt ports must come in pairs"),
+    }
 }
 
 /// meta の入力座標が Pin セル、出力 probe が Pin/Nand/Dff セルを指しているか。
@@ -359,6 +377,7 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     // トレース表示用。無ければ "-" と表示する
     let pc_probes = meta.outputs.get("pc_out").cloned();
     let a_probes = meta.outputs.get("a_out").cloned();
+    let interrupts = interrupt_ports(&meta)?;
 
     if let Some(expect) = &prog.expect {
         validate_expect(&meta.outputs, expect)?;
@@ -436,8 +455,20 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
         if mem_write {
             mem.write(addr as u16, data_out as u8);
         }
+        // 割込みの受付 (int_ack) を IF に反映してから読出と irq を決める (F# Testbench と同じ順序)
+        if let Some((_, ack_probes)) = &interrupts {
+            mem.acknowledge_interrupts(read_bus(&cells_lo, w, ack_probes) as u8);
+        }
         let data_in_value = if mem_read { mem.read(addr as u16) as u64 } else { 0 };
         set_bus(&mut sim, &data_in, data_in_value);
+        let irq_value = match &interrupts {
+            Some((irq_pins, _)) => {
+                let pending = mem.pending_interrupts() as u64;
+                set_bus(&mut sim, irq_pins, pending);
+                pending
+            }
+            None => 0,
+        };
 
         // data_in 変化を posedge 前に伝播させる (setup settle)。クロックとデータの
         // 競合を避ける — clk パルスは DFF に到達するまで数十世代かかる。
@@ -462,8 +493,8 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
                     .unwrap_or_else(|| "-".into())
             };
             trace_lines.push(format!(
-                "cycle {cycle:3}: addr={:#06X} mem_read={} mem_write={} dout={:#04X} din={:#04X} pc={} a={} setup={}g({:.1}s) data_in={}g high={}g({:.1}s)",
-                addr, mem_read as u8, mem_write as u8, data_out, data_in_value,
+                "cycle {cycle:3}: addr={:#06X} mem_read={} mem_write={} dout={:#04X} din={:#04X} irq={:#04X} pc={} a={} setup={}g({:.1}s) data_in={}g high={}g({:.1}s)",
+                addr, mem_read as u8, mem_write as u8, data_out, data_in_value, irq_value,
                 fmt_opt(&pc_probes, 6), fmt_opt(&a_probes, 4),
                 g_lo, spent_lo.elapsed().as_secs_f32(), g_wait, g_hi, spent_hi.elapsed().as_secs_f32(),
             ));
@@ -480,6 +511,10 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
             if expected.data_in != data_in_value {
                 report.push(format!("data_in: expected {:#04X} got {:#04X} (bus addr={:#06X} mem_read={} — memory model or bus diverged)",
                     expected.data_in, data_in_value, addr, mem_read as u8));
+            }
+            if expected.irq != irq_value {
+                report.push(format!("irq: expected {:#04X} got {:#04X} (IE={:#04X} IF={:#04X} — memory model or int_ack diverged)",
+                    expected.irq, irq_value, mem.interrupt_enable, mem.interrupt_flag));
             }
             for m in diff_outputs(&meta.outputs, &last_cells, w, &expected.outputs) {
                 report.push(format!("{}: expected {:#X} got {:#X} (bits {:?})", m.port, m.expected, m.got, m.bits));
@@ -689,6 +724,33 @@ mod tests {
         g.cycles[0].outputs.remove("flag");
         let err = validate_golden(&g, &meta, 2, 1, "r").unwrap_err().to_string();
         assert!(err.contains("outputs"), "{err}");
+    }
+
+    fn meta_with_ports(inputs: &str, outputs: &str) -> RoutedMeta {
+        serde_json::from_str(&format!(
+            r#"{{"formatVersion":1,"circuit":"c","width":1,"height":1,"inputs":{{{inputs}}},"outputs":{{{outputs}}}}}"#
+        )).unwrap()
+    }
+
+    #[test]
+    fn interrupt_ports_are_optional_but_must_come_in_pairs() {
+        let five_in = (0..5).map(|i| format!(r#"{{"x":{i},"y":0}}"#)).collect::<Vec<_>>().join(",");
+        let five_out = five_in.clone();
+        let none = meta_with_ports(r#""clk":[{"x":0,"y":0}]"#, r#""addr":[{"x":0,"y":0}]"#);
+        assert!(interrupt_ports(&none).unwrap().is_none());
+        let both = meta_with_ports(&format!(r#""irq":[{five_in}]"#), &format!(r#""int_ack":[{five_out}]"#));
+        assert!(interrupt_ports(&both).unwrap().is_some());
+        let only_irq = meta_with_ports(&format!(r#""irq":[{five_in}]"#), r#""addr":[{"x":0,"y":0}]"#);
+        assert!(interrupt_ports(&only_irq).unwrap_err().to_string().contains("pairs"));
+        let narrow = meta_with_ports(r#""irq":[{"x":0,"y":0}]"#, &format!(r#""int_ack":[{five_out}]"#));
+        assert!(interrupt_ports(&narrow).unwrap_err().to_string().contains("5 bits"));
+    }
+
+    #[test]
+    fn golden_irq_defaults_to_zero_for_old_goldens() {
+        let old: GoldenCycle = serde_json::from_str(r#"{"dataIn":1,"outputs":{}}"#).unwrap();
+        let new: GoldenCycle = serde_json::from_str(r#"{"dataIn":1,"irq":6,"outputs":{}}"#).unwrap();
+        assert_eq!((old.irq, new.irq), (0, 6));
     }
 
     #[test]

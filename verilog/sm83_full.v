@@ -5,6 +5,8 @@
 // ポート構成:
 //   clk, rst, data_in[7:0] が入力
 //   addr[15:0], data_out[7:0], mem_read, mem_write が外部メモリバス
+//   irq[4:0]: 割込み要因 (= IE & IF)。IE (0xFFFF) / IF (0xFF0F) は CPU の外 (ホストのメモリ) に置く
+//   int_ack[4:0]: 受け付けた割込みの one-hot (1 周期)。ホストはこのビットを IF から下ろす
 //   a_out/b_out/.../pc_out/sp_out がレジスタ値のデバッグ出力
 module sm83_full (
     input  wire        clk,
@@ -14,6 +16,8 @@ module sm83_full (
     output reg  [7:0]  data_out,
     output reg         mem_read,
     output reg         mem_write,
+    input  wire [4:0]  irq,
+    output reg  [4:0]  int_ack,
     output wire [7:0]  a_out,
     output wire [7:0]  b_out,
     output wire [7:0]  c_out,
@@ -44,10 +48,12 @@ module sm83_full (
     // 割り込み制御
     // ----------------------------------------------------------------
     reg       ime;
-    reg       ime_next;
-    reg [4:0] ie;
-    reg [4:0] int_flag;
+    reg       ei_delay;  // EI の次の命令の実行開始時に IME を立てる (EI の効果は 1 命令遅れる)
     reg       halted;
+
+    // 割込みの優先度は bit0 (VBlank) が最上位。受け付けるのは irq の最下位の 1
+    wire [4:0] irq_ack_onehot = irq & (~irq + 5'd1);
+    wire [7:0] irq_vector = irq[0] ? 8'h40 : irq[1] ? 8'h48 : irq[2] ? 8'h50 : irq[3] ? 8'h58 : 8'h60;
 
     // ----------------------------------------------------------------
     // 内部ステート
@@ -273,9 +279,8 @@ module sm83_full (
             sp <= 16'hFFFE;
             pc <= 16'h0100;
             ime <= 0;
-            ime_next <= 0;
-            ie <= 0;
-            int_flag <= 0;
+            ei_delay <= 0;
+            int_ack <= 0;
             halted <= 0;
             ir <= 0;
             cb_ir <= 0;
@@ -291,24 +296,32 @@ module sm83_full (
         end else begin
             mem_read <= 0;
             mem_write <= 0;
-            ime <= ime_next;
+            int_ack <= 0;
 
             case (phase)
                 // =====================================================
                 // PHASE_FETCH
                 // =====================================================
                 PHASE_FETCH: begin
-                    if (halted) begin
-                        if ((ie & int_flag) != 0) begin
-                            halted <= 0;
-                            if (ime) begin
-                                phase <= PHASE_INT_ACK;
-                            end
-                        end
-                        addr <= 0;
-                    end else if (ime && (ie & int_flag) != 0) begin
+                    if (halted && irq == 0) begin
+                        // HALT 中: 割込み要因 (IE & IF) が来るまで待つ
+                        phase <= PHASE_FETCH;
+                    end else if (ime && irq != 0) begin
+                        // 割込み受付: IME を下ろし、要因をホストに知らせて IF から下ろしてもらう。
+                        // pc は次に実行するはずだった命令 (HALT 中なら HALT の次) を指している
+                        halted <= 0;
+                        ime <= 0;
+                        ei_delay <= 0;
+                        int_ack <= irq_ack_onehot;
+                        operand <= irq_vector;
                         phase <= PHASE_INT_ACK;
                     end else begin
+                        // IME=0 で要因があれば HALT を抜けて次の命令へ (HALT バグは再現しない)
+                        halted <= 0;
+                        if (ei_delay) begin
+                            ime <= 1;
+                            ei_delay <= 0;
+                        end
                         addr <= pc;
                         mem_read <= 1;
                         phase <= PHASE_FETCH2;
@@ -321,7 +334,6 @@ module sm83_full (
                 PHASE_FETCH2: begin
                     ir <= data_in;
                     pc <= pc + 1;
-                    if (data_in != 8'hFB) ime_next <= ime;
 
                     if (cb_prefix) begin
                         cb_ir <= data_in;
@@ -442,12 +454,7 @@ module sm83_full (
                 // PHASE_INT_ACK
                 // =====================================================
                 PHASE_INT_ACK: begin
-                    if (int_flag[0]) begin int_flag[0] <= 0; operand <= 8'h40;
-                    end else if (int_flag[1]) begin int_flag[1] <= 0; operand <= 8'h48;
-                    end else if (int_flag[2]) begin int_flag[2] <= 0; operand <= 8'h50;
-                    end else if (int_flag[3]) begin int_flag[3] <= 0; operand <= 8'h58;
-                    end else begin int_flag[4] <= 0; operand <= 8'h60; end
-                    ime <= 0; ime_next <= 0;
+                    // ベクタは PHASE_FETCH で operand に決めてある。戻り番地の上位バイトを積む
                     sp <= sp - 1;
                     addr <= sp - 1;
                     data_out <= pc[15:8];
@@ -504,7 +511,9 @@ module sm83_full (
                 end
 
                 // === HALT / STOP ===
-                8'h76, 8'h10: begin halted <= 1; phase <= PHASE_HALT; end
+                // HALT / STOP: PHASE_FETCH で割込み要因を待つ (STOP は 2 バイト命令として扱う)
+                8'h76: begin halted <= 1; phase <= PHASE_FETCH; end
+                8'h10: begin halted <= 1; pc <= pc + 2; phase <= PHASE_FETCH; end
 
                 // === LD r, n (即値 8bit) ===
                 8'h06: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
@@ -705,8 +714,9 @@ module sm83_full (
                     addr <= sp; mem_read <= 1; phase <= PHASE_POP; end
 
                 // === DI / EI ===
-                8'hF3: begin ime_next <= 0; ime <= 0; phase <= PHASE_FETCH; end
-                8'hFB: begin phase <= PHASE_FETCH; end
+                // DI は即時。EI は次の命令の実行開始時に IME を立てる (EI; DI なら割込みは起きない)
+                8'hF3: begin ime <= 0; ei_delay <= 0; phase <= PHASE_FETCH; end
+                8'hFB: begin ei_delay <= 1; phase <= PHASE_FETCH; end
 
                 // === ALU n (即値) ===
                 8'hC6: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
@@ -1074,8 +1084,12 @@ module sm83_full (
         begin
             case (ir)
                 // RET / RETI / RET cc
-                8'hC9, 8'hD9: begin
+                8'hC9: begin
                     pc <= {hi, operand}; end
+                8'hD9: begin
+                    // RETI: IME は遅延なしで立てる
+                    pc <= {hi, operand};
+                    ime <= 1; end
                 8'hC0, 8'hC8, 8'hD0, 8'hD8: begin
                     pc <= {hi, operand}; end
                 // POP rr

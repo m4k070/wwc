@@ -2,7 +2,7 @@
 
 任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 214/214 通過。**
+> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 220/220 通過。**
 
 ---
 
@@ -129,7 +129,7 @@ match compileWL defaultLib json with
 
 ```bash
 dotnet build src/WwHdl.fsproj                    # build（テスト前に必須）
-dotnet fsi src/RunTests.fsx                       # F# テスト (214/214)
+dotnet fsi src/RunTests.fsx                       # F# テスト (220/220)
 web/run-test.sh                                   # WebGPU golden tests (Playwright/SiftShader)
 wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
 wgpu-runner/memory-test.sh [program.json ...]     # メモリバス CPU の golden 照合 + 検証器の検証 (subset smoke/call_stack/pc_carry)
@@ -161,7 +161,7 @@ dotnet fsi src/DiffTestGbfs.fsx [--variants N]    # sm83_full ネットリスト
 
 | パターン | 用途 | 例 |
 |---------|------|-----|
-| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 214/214）, `RunWl.fsx`, `RunBackfire.fsx` |
+| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 220/220）, `RunWl.fsx`, `RunBackfire.fsx` |
 | `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
 | `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `src/LoadRouted.fsx` |
 | `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
@@ -198,7 +198,7 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 |------|------|------|
 | sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
 | sm83_subset | 3,553 | ✅ 配線完走 (20x14、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
-| sm83_full | 10,650 | 全命令セット (通常 256 + CB prefix 256)。gbfs の CPU との差分テストで 494 命令すべて一致 (NetlistSim)。配線は今後の課題 |
+| sm83_full | 10,654 | 全命令セット (通常 256 + CB prefix 256) + 割込み (irq / int_ack)。gbfs の CPU との差分テストで全命令一致 (NetlistSim)。配線は今後の課題 |
 
 ### コンパイル
 
@@ -292,6 +292,7 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 - [x] 即値読出の off-by-one 修正 (FETCH2/IMM で加算前の pc を addr に出していた。9,155 gates)
 - [x] 仕様テスト 16 本で RTL 不具合 7 件を修正 (ALU/INC/DEC の右辺、H/C フラグ幅、POP/RET、CALL/RST、JP、ALU (HL)。9,958 gates)
 - [x] gbfs との差分テストで RTL 不具合 6 分類を修正し、494 命令すべて一致 (10,650 gates)
+- [x] 割込み (IE/IF は CPU の外、EI の 1 命令遅延、RETI、HALT 復帰) を実装 (10,654 gates)
 - [ ] sm83_full の配線完走 (5〜8 時間見込み)
 - [ ] CB 命令の動作検証 (配線後に実施)
 - [ ] 配線時間の短縮 (ネット単位の並列化 / ヒューリスティック改善)
@@ -312,10 +313,10 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 | WlSm83Test | SM83 CPU | 7/7 ✅ |
 | RoutedArtifactTest | 配線結果の保存・再読込 | 8/8 ✅ |
 | NetlistSimTest | ゲートレベルシミュレータ (sm83_min 20 命令ほか) | 11/11 ✅ |
-| TestbenchTest | メモリバス TB (subset smoke の GPU 照合) + sm83_full 仕様テスト 28 本 (手書き 16 + gbfs 差分の回帰 12) | 37/37 ✅ |
+| TestbenchTest | メモリバス TB (I/O・割込み含む) + sm83_full 仕様テスト 31 本 (手書き 19 + gbfs 差分の回帰 12) | 43/43 ✅ |
 | GPU Golden | byte-exact 一致 | 24/24 ✅ |
 
-**合計**: 214/214 通過 (mincpu.json を moon 側で追加済み)
+**合計**: 220/220 通過 (mincpu.json を moon 側で追加済み)
 
 ## ライセンス
 

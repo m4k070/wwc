@@ -27,7 +27,18 @@ module TestbenchTest =
         [ "TB: memory reads ROM, RAM (initially 0), and 0xFF elsewhere",
           readMemory m 0x0123us = 0x23uy && readMemory m 0xC000us = 0uy && readMemory m 0x8000us = 0xFFuy
           "TB: memory writes only the RAM window (ROM write ignored, original unchanged)",
-          readMemory written 0xC010us = 0x5Auy && readMemory written 0x0010us = 0x10uy && readMemory m 0xC010us = 0uy ]
+          readMemory written 0xC010us = 0x5Auy && readMemory written 0x0010us = 0x10uy && readMemory m 0xC010us = 0uy
+          "TB: memory I/O holds IF (0xFF0F), IE (0xFFFF), and HRAM (0xFF80-0xFFFE)",
+          (let io = writeMemory (writeMemory (writeMemory m 0xFF0Fus 0x06uy) 0xFFFFus 0x05uy) 0xFF90us 0x77uy
+           readMemory io 0xFF0Fus = 0x06uy && readMemory io 0xFFFFus = 0x05uy && readMemory io 0xFF90us = 0x77uy
+           && readMemory io 0xFF10us = 0xFFuy)
+          "TB: pending interrupts are IE & IF & 0x1F, and ack clears only the acknowledged bit",
+          (let io = writeMemory (writeMemory m 0xFF0Fus 0xE6uy) 0xFFFFus 0x07uy
+           pendingInterrupts io = 0x06uy && (acknowledgeInterrupts io 0x02uy).InterruptFlag = 0xE4uy)
+          "TB: RAM window overlapping I/O takes precedence (sm83_subset_call_stack uses 0xF000-0xFFFF)",
+          (let overlap = createMemory rom { RamBase = 0xF000; RamSize = 4096 }
+           let w = writeMemory overlap 0xFF0Fus 0x1Fuy
+           readMemory w 0xFF0Fus = 0x1Fuy && w.InterruptFlag = 0uy) ]
 
     let private parseTests () : (string * bool) list =
         let smokePath = repoPath "routed/sm83_subset_smoke.json"
@@ -138,7 +149,7 @@ module TestbenchTest =
     let private goldenJsonTest () : (string * bool) list =
         let info : GoldenInfo =
             { GoldenCircuit = "c"; GoldenProgram = "p"; SourceSha256 = "s"; RomSha256 = "r"; RstPulses = 2 }
-        let cycles = [ { DataIn = 62UL; Outputs = Map.ofList [ "addr", 256UL; "a_out", 1UL ] } ]
+        let cycles = [ { DataIn = 62UL; Irq = 0UL; Outputs = Map.ofList [ "addr", 256UL; "a_out", 1UL ] } ]
         use doc = JsonDocument.Parse (goldenToJson info cycles)
         let root = doc.RootElement
         let first = root.GetProperty("cycles").[0]

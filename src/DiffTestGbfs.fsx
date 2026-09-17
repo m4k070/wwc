@@ -5,7 +5,7 @@
 // 前提: dotnet build src/WwHdl.fsproj と
 //       (cd ../gbfs && nix develop -c dotnet build src/gbfs.Lib/gbfs.Lib.fsproj -c Release)
 //
-// 使い方: dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46,...]
+// 使い方: dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46,...] [--interrupts N]
 //
 // 方式:
 //   各 opcode (通常命令のうち比較可能なもの + CB 256 命令) について、乱数でレジスタを初期化する前置きと
@@ -17,7 +17,12 @@
 //     0x0400: 前置き LD SP,nn / LD BC,AF値; PUSH BC; POP AF / LD BC,nn / LD DE,nn / LD HL,nn / JP 0x0600
 //     0x0600: テスト対象の命令 (直後は HALT)
 //
-//   比較から除外する命令: STOP、HALT (終端として使う)、未定義 opcode、I/O 領域に触る LDH (E0/F0/E2/F2)
+//   比較から除外する命令: STOP、HALT (終端として使う)、未定義 opcode。LDH (E0/F0/E2/F2) の番地は HRAM に向ける
+//
+//   割込みシナリオ (--interrupts N、既定 200): IE / IF / A を乱数で設定し、EI / DI / NOP / HALT / INC A /
+//   「IF に書いて要因を立てる」を乱数で並べ、最後に DI; XOR A; LDH (0x0F),A; HALT で要因を消して止める。
+//   ベクタ 0x40/48/50/58/60 には INC B/C/D/E/H; RETI を置き、どの割込みが何回走ったかをレジスタで観測する。
+//   gbfs は途中の HALT で止まらないよう固定命令数だけ step し、IF / IE / HRAM も比べる
 //
 // gbfs 自体は外部テスト ROM で検証されていないため、最初に手書き仕様テスト (routed/sm83_full_*.json) を
 // gbfs でも実行し、参照モデルとしての最低限の正しさを確かめる。食い違いの最終判定は SM83 仕様 (Pan Docs) で行う。
@@ -38,7 +43,9 @@ type Options =
       Only: Set<int> option
       /// 一致したケースを routed/sm83_full_diff_<opcode>.json の仕様テストとして書き出す命令
       /// (期待値は gbfs の結果。SM83 仕様で判定済みの命令にだけ使う)
-      Export: Set<int> }
+      Export: Set<int>
+      /// 割込みシナリオの本数 (0 で省略)
+      Interrupts: int }
 
 let parseArgs (args: string list) : Result<Options, string> =
     let parseHex (s: string) =
@@ -52,14 +59,26 @@ let parseArgs (args: string list) : Result<Options, string> =
         | "--seed" :: n :: tail -> go { opts with Seed = int n } tail
         | "--only" :: list :: tail -> go { opts with Only = Some (list.Split ',' |> Array.map parseHex |> Set.ofArray) } tail
         | "--export" :: list :: tail -> go { opts with Export = list.Split ',' |> Array.map parseHex |> Set.ofArray } tail
+        | "--interrupts" :: n :: tail -> go { opts with Interrupts = int n } tail
         | other :: _ -> Error (sprintf "不明な引数: %s" other)
-    go { Variants = 4; Seed = 20260917; Only = None; Export = Set.empty } args
+    go { Variants = 4; Seed = 20260917; Only = None; Export = Set.empty; Interrupts = 200 } args
 
 // --- CPU 状態のスナップショット ------------------------------------------------
 
 type Snapshot =
     { Regs: (string * int) list   // A F B C D E H L SP PC の順
-      Wram: byte[] }
+      Wram: byte[]
+      Hram: byte[]
+      InterruptFlag: int
+      InterruptEnable: int }
+
+/// 比較対象のメモリ (WRAM / IF / HRAM / IE) を番地で読む。それ以外は None
+let snapshotMemory (s: Snapshot) (addr: int) : int option =
+    if addr >= 0xC000 && addr < 0xE000 then Some (int s.Wram.[addr - 0xC000])
+    elif addr = 0xFF0F then Some s.InterruptFlag
+    elif addr = 0xFFFF then Some s.InterruptEnable
+    elif addr >= 0xFF80 && addr < 0xFFFF then Some (int s.Hram.[addr - 0xFF80])
+    else None
 
 let regNames = [ "A"; "F"; "B"; "C"; "D"; "E"; "H"; "L"; "SP"; "PC" ]
 
@@ -75,27 +94,48 @@ let diffSnapshots (expected: Snapshot) (actual: Snapshot) : string list =
         [ for i in 0 .. expected.Wram.Length - 1 do
             if expected.Wram.[i] <> actual.Wram.[i] then
                 yield sprintf "mem[0x%04X]: gbfs=0x%02X netlist=0x%02X" (0xC000 + i) expected.Wram.[i] actual.Wram.[i] ]
-    let shownWram = wramDiffs |> List.truncate 4
-    let more = if wramDiffs.Length > 4 then [ sprintf "... WRAM 差分ほか %d 件" (wramDiffs.Length - 4) ] else []
-    regDiffs @ shownWram @ more
+    let ioDiffs =
+        [ if expected.InterruptFlag <> actual.InterruptFlag then
+              yield sprintf "IF: gbfs=0x%02X netlist=0x%02X" expected.InterruptFlag actual.InterruptFlag
+          if expected.InterruptEnable <> actual.InterruptEnable then
+              yield sprintf "IE: gbfs=0x%02X netlist=0x%02X" expected.InterruptEnable actual.InterruptEnable
+          for i in 0 .. expected.Hram.Length - 1 do
+              if expected.Hram.[i] <> actual.Hram.[i] then
+                  yield sprintf "mem[0x%04X]: gbfs=0x%02X netlist=0x%02X" (0xFF80 + i) expected.Hram.[i] actual.Hram.[i] ]
+    let memDiffs = wramDiffs @ ioDiffs
+    let shownMem = memDiffs |> List.truncate 4
+    let more = if memDiffs.Length > 4 then [ sprintf "... メモリ差分ほか %d 件" (memDiffs.Length - 4) ] else []
+    regDiffs @ shownMem @ more
 
 // --- gbfs ------------------------------------------------------------------
 
 let gbfsMaxSteps = 1000
 
-let runGbfs (rom: byte[]) : Snapshot * bool =
-    let s0 = gbfs.Lib.Decoder.createState () |> gbfs.Lib.Decoder.loadRomToState rom
-    let s = gbfs.Lib.Decoder.run gbfsMaxSteps s0
+let gbfsSnapshot (s: gbfs.Lib.Decoder.CpuState) : Snapshot =
     let r8 reg = int (gbfs.Lib.Cpu.getRegisterValue (gbfs.Lib.Cpu.R8 reg) s.Regs)
-    let snapshot =
-        { Regs =
-            [ "A", r8 gbfs.Lib.Cpu.Reg8.A; "F", r8 gbfs.Lib.Cpu.Reg8.F
-              "B", r8 gbfs.Lib.Cpu.Reg8.B; "C", r8 gbfs.Lib.Cpu.Reg8.C
-              "D", r8 gbfs.Lib.Cpu.Reg8.D; "E", r8 gbfs.Lib.Cpu.Reg8.E
-              "H", r8 gbfs.Lib.Cpu.Reg8.H; "L", r8 gbfs.Lib.Cpu.Reg8.L
-              "SP", int s.Regs.SP; "PC", int s.Regs.PC ]
-          Wram = Array.copy s.Mem.Wram }
-    snapshot, s.Halted
+    { Regs =
+        [ "A", r8 gbfs.Lib.Cpu.Reg8.A; "F", r8 gbfs.Lib.Cpu.Reg8.F
+          "B", r8 gbfs.Lib.Cpu.Reg8.B; "C", r8 gbfs.Lib.Cpu.Reg8.C
+          "D", r8 gbfs.Lib.Cpu.Reg8.D; "E", r8 gbfs.Lib.Cpu.Reg8.E
+          "H", r8 gbfs.Lib.Cpu.Reg8.H; "L", r8 gbfs.Lib.Cpu.Reg8.L
+          "SP", int s.Regs.SP; "PC", int s.Regs.PC ]
+      Wram = Array.copy s.Mem.Wram
+      Hram = Array.copy s.Mem.Hram
+      InterruptFlag = int s.Mem.Io.[0x0F]
+      InterruptEnable = int s.Mem.Ie }
+
+let loadGbfs (rom: byte[]) =
+    gbfs.Lib.Decoder.createState () |> gbfs.Lib.Decoder.loadRomToState rom
+
+/// HALT に着くまで実行する (命令単位の差分テスト用)
+let runGbfs (rom: byte[]) : Snapshot * bool =
+    let s = gbfs.Lib.Decoder.run gbfsMaxSteps (loadGbfs rom)
+    gbfsSnapshot s, s.Halted
+
+/// 固定命令数だけ step する (途中の HALT で止めない。HALT 中の step は割込み要因を待つ)
+let runGbfsSteps (steps: int) (rom: byte[]) : Snapshot * bool =
+    let s = Seq.fold (fun st _ -> gbfs.Lib.Decoder.step st) (loadGbfs rom) (seq { 1 .. steps })
+    gbfsSnapshot s, s.Halted
 
 // --- NetlistSim ------------------------------------------------------------
 
@@ -108,16 +148,23 @@ let loadFull () =
     c, ports, bus
 
 let netlistCycles = 150
+let interruptNetlistCycles = 300
+let interruptGbfsSteps = 400
 
-let runNetlist (c, ports, bus) (rom: byte[]) : Result<Snapshot, string> =
-    match run c ports bus (createMemory rom defaultMemoryConfig) 2 netlistCycles with
+let runNetlistCycles (cycles: int) (c, ports, bus) (rom: byte[]) : Result<Snapshot, string> =
+    match run c ports bus (createMemory rom defaultMemoryConfig) 2 cycles with
     | Error e -> Error (describeTestbenchError e)
     | Ok result ->
         let o name = int result.FinalOutputs.[name]
         Ok { Regs =
                [ "A", o "a_out"; "F", o "f_out"; "B", o "b_out"; "C", o "c_out"; "D", o "d_out"
                  "E", o "e_out"; "H", o "h_out"; "L", o "l_out"; "SP", o "sp_out"; "PC", o "pc_out" ]
-             Wram = result.Memory.Ram }
+             Wram = result.Memory.Ram
+             Hram = result.Memory.Hram
+             InterruptFlag = int result.Memory.InterruptFlag
+             InterruptEnable = int result.Memory.InterruptEnable }
+
+let runNetlist circuit rom = runNetlistCycles netlistCycles circuit rom
 
 // --- 参照モデル (gbfs) の確認: 手書き仕様テストを gbfs でも実行する ------------------
 
@@ -137,7 +184,8 @@ let checkGbfsAgainstSpecPrograms () : bool =
             | Error e -> yield Path.GetFileNameWithoutExtension path, [ describeTestbenchError e ]
             | Ok (program, rom) ->
                 let padded = Array.append rom (Array.zeroCreate (max 0 (0x8000 - rom.Length)))
-                let snapshot, halted = runGbfs padded
+                // 途中に HALT を持つプログラム (割込み) もあるので固定命令数だけ進める。どれも最後は要因のない HALT で止まる
+                let snapshot, halted = runGbfsSteps interruptGbfsSteps padded
                 let regs = Map.ofList snapshot.Regs
                 let problems =
                     [ if not halted then yield "HALT に到達しない"
@@ -145,8 +193,10 @@ let checkGbfsAgainstSpecPrograms () : bool =
                           let got = regs.[portToReg.[port]]
                           if uint64 got <> expected then yield sprintf "%s: expected 0x%X gbfs 0x%X" port expected got
                       for KeyValue (addr, expected) in program.ExpectMem do
-                          let got = snapshot.Wram.[int addr - 0xC000]
-                          if got <> expected then yield sprintf "mem[0x%04X]: expected 0x%02X gbfs 0x%02X" addr expected got ]
+                          match snapshotMemory snapshot (int addr) with
+                          | None -> yield sprintf "mem[0x%04X]: 比較対象外の番地" addr
+                          | Some got when got <> int expected -> yield sprintf "mem[0x%04X]: expected 0x%02X gbfs 0x%02X" addr expected got
+                          | Some _ -> () ]
                 yield program.ProgramName, problems ]
     for (name, problems) in results do
         if problems.IsEmpty then printfn "  OK    %s" name
@@ -159,8 +209,7 @@ let checkGbfsAgainstSpecPrograms () : bool =
 
 let excludedOpcodes =
     set [ 0x10; 0x76; 0xCB                                                   // STOP, HALT (終端), CB は別扱い
-          0xD3; 0xDB; 0xDD; 0xE3; 0xE4; 0xEB; 0xEC; 0xED; 0xF4; 0xFC; 0xFD  // 未定義
-          0xE0; 0xF0; 0xE2; 0xF2 ]                                          // LDH: I/O 領域
+          0xD3; 0xDB; 0xDD; 0xE3; 0xE4; 0xEB; 0xEC; 0xED; 0xF4; 0xFC; 0xFD ] // 未定義
 
 let immediate8 =
     set [ 0x06; 0x0E; 0x16; 0x1E; 0x26; 0x2E; 0x36; 0x3E
@@ -194,12 +243,15 @@ let buildCase (rng: Random) (opcode: int) : TestCase =
     let sp = rng.Next (0xC100, 0xDF00)
     let a, f = byteR (), byteR () &&& 0xF0
     let bc, de = (if pointsToWram then wramPointer (), wramPointer () else rng.Next 65536, rng.Next 65536)
+    // LDH (C) 系は C を HRAM (0xFF80-0xFFFE) に向ける。IF / IE に書くと HALT が要因で起き続けるため避ける
+    let bc = if opcode = 0xE2 || opcode = 0xF2 then (bc &&& 0xFF00) ||| rng.Next (0x80, 0xFF) else bc
     let hl = if opcode = 0xE9 then romTarget () elif pointsToWram then wramPointer () else rng.Next 65536
     let lo (v: int) = byte (v &&& 0xFF)
     let hi (v: int) = byte ((v >>> 8) &&& 0xFF)
     let instruction =
         if isCb then [| 0xCBuy; byte (opcode &&& 0xFF) |]
         elif immediate8.Contains opcode then [| byte opcode; byte (byteR ()) |]
+        elif opcode = 0xE0 || opcode = 0xF0 then [| byte opcode; byte (rng.Next (0x80, 0xFF)) |]   // LDH (n): HRAM
         elif relativeJumps.Contains opcode then
             // 命令自身 (0x0600-0x0601) に戻る JR -2 / JR -1 は無限ループになるので避ける
             let offsets = [| for e in -128 .. 127 do if e <> -2 && e <> -1 then yield e |]
@@ -265,12 +317,55 @@ let exportSpecProgram (case: TestCase) (expected: Snapshot) =
 
 // --- 実行 ---------------------------------------------------------------------
 
-let runDiffTest (opts: Options) : int =
-    let gbfsOk = checkGbfsAgainstSpecPrograms ()
-    if not gbfsOk then
-        printfn "WARN: gbfs が手書き仕様テストに合格しない。以降の差分は gbfs 側の誤りも疑うこと\n"
-    let circuit = loadFull ()
-    let rng = Random opts.Seed
+// --- 割込みシナリオ -------------------------------------------------------------
+
+/// ベクタごとに「対応するレジスタを +1 して RETI」。どの割込みが何回走ったかをレジスタで観測する
+let interruptHandlers =
+    [ 0x40, [| 0x04uy; 0xD9uy |]   // INC B; RETI
+      0x48, [| 0x0Cuy; 0xD9uy |]   // INC C; RETI
+      0x50, [| 0x14uy; 0xD9uy |]   // INC D; RETI
+      0x58, [| 0x1Cuy; 0xD9uy |]   // INC E; RETI
+      0x60, [| 0x24uy; 0xD9uy |] ] // INC H; RETI
+
+let buildInterruptCase (rng: Random) (index: int) : TestCase =
+    let sp = rng.Next (0xC100, 0xDF00)
+    // IE の上位 3bit は irq に効かないことも確かめる
+    let ie = rng.Next 32 ||| (if rng.Next 4 = 0 then 0xE0 else 0)
+    let iflag = rng.Next 32
+    let a = rng.Next 256
+    let pick () =
+        match rng.Next 6 with
+        | 0 -> [| 0xFBuy |]                                         // EI
+        | 1 -> [| 0xF3uy |]                                         // DI
+        | 2 -> [| 0x00uy |]                                         // NOP
+        | 3 -> [| 0x76uy |]                                         // HALT
+        | 4 -> [| 0x3Cuy |]                                         // INC A
+        | _ -> [| 0x3Euy; byte (rng.Next 32); 0xE0uy; 0x0Fuy |]     // LD A,n; LDH (0x0F),A (要因を立てる)
+    let sequence = Array.concat [ for _ in 1 .. rng.Next (1, 7) -> pick () ]
+    // 要因を消してから止める。要因が残ると IME=0 でも HALT がすぐ起きて先へ進んでしまう
+    let terminator = [| 0xF3uy; 0xAFuy; 0xE0uy; 0x0Fuy; 0x76uy |]   // DI; XOR A; LDH (0x0F),A; HALT
+    let lo (v: int) = byte (v &&& 0xFF)
+    let hi (v: int) = byte ((v >>> 8) &&& 0xFF)
+    let prelude =
+        [| 0x31uy; lo sp; hi sp                       // LD SP,sp
+           0x3Euy; byte ie; 0xE0uy; 0xFFuy            // LD A,ie; LDH (0xFF),A
+           0x3Euy; byte iflag; 0xE0uy; 0x0Fuy         // LD A,if; LDH (0x0F),A
+           0x3Euy; byte a                             // LD A,a
+           0xC3uy; 0x00uy; 0x06uy |]                  // JP 0x0600
+    let rom = Array.create 0x8000 0x76uy
+    for (vector, handler) in interruptHandlers do
+        Array.blit handler 0 rom vector handler.Length
+    Array.blit [| 0xC3uy; 0x00uy; 0x04uy |] 0 rom 0x0100 3
+    Array.blit prelude 0 rom 0x0400 prelude.Length
+    let body = Array.append sequence terminator
+    Array.blit body 0 rom 0x0600 body.Length
+    { Opcode = index
+      Instruction = sequence
+      Preset = sprintf "IE=%02X IF=%02X A=%02X SP=%04X" ie iflag a sp
+      Rom = rom }
+
+/// 命令ごとの差分テスト。食い違いがなければ true
+let runOpcodeDiffTest (opts: Options) circuit (rng: Random) : bool =
     let opcodes =
         [ for op in 0x00 .. 0xFF do if not (excludedOpcodes.Contains op) then yield op
           for op in 0x00 .. 0xFF do yield 0xCB00 + op ]
@@ -297,8 +392,8 @@ let runDiffTest (opts: Options) : int =
                 yield opcode, failing.Length, List.head failing ]
     printfn "所要 %.1f 秒\n" sw.Elapsed.TotalSeconds
     if failures.IsEmpty then
-        printfn "全 %d 命令が gbfs と一致" opcodes.Length
-        0
+        printfn "全 %d 命令が gbfs と一致\n" opcodes.Length
+        true
     else
         printfn "食い違い: %d / %d 命令" failures.Length opcodes.Length
         for (opcode, count, (case, diffs)) in failures do
@@ -307,14 +402,52 @@ let runDiffTest (opts: Options) : int =
             for d in diffs do
                 printfn "        %s" d
         let failedLabels = failures |> List.map (fun (op, _, _) -> opcodeLabel op) |> String.concat ", "
-        printfn "\n食い違った命令: %s" failedLabels
-        1
+        printfn "\n食い違った命令: %s\n" failedLabels
+        false
+
+/// 割込みシナリオの差分テスト。食い違いがなければ true
+let runInterruptDiffTest (opts: Options) circuit (rng: Random) : bool =
+    printfn "=== 割込みシナリオ: %d 本 (gbfs %d 命令、netlist %d 周期) ===" opts.Interrupts interruptGbfsSteps interruptNetlistCycles
+    let sw = Diagnostics.Stopwatch.StartNew ()
+    let failures =
+        [ for index in 1 .. opts.Interrupts do
+            let case = buildInterruptCase rng index
+            let expected, _ = runGbfsSteps interruptGbfsSteps case.Rom
+            match runNetlistCycles interruptNetlistCycles circuit case.Rom with
+            | Error msg -> yield case, [ sprintf "netlist error: %s" msg ]
+            | Ok actual ->
+                let diffs = diffSnapshots expected actual
+                if not diffs.IsEmpty then yield case, diffs ]
+    printfn "所要 %.1f 秒\n" sw.Elapsed.TotalSeconds
+    if failures.IsEmpty then
+        printfn "全 %d シナリオが gbfs と一致" opts.Interrupts
+        true
+    else
+        let withEi = failures |> List.filter (fun (case, _) -> case.Instruction |> Array.contains 0xFBuy) |> List.length
+        printfn "食い違い: %d / %d シナリオ (うち命令列に EI を含むもの %d)" failures.Length opts.Interrupts withEi
+        for (case, diffs) in failures |> List.truncate 12 do
+            let bytes = case.Instruction |> Array.map (sprintf "%02X") |> String.concat " "
+            printfn "  [#%d] 命令列 %s  初期値 %s" case.Opcode bytes case.Preset
+            for d in diffs do
+                printfn "        %s" d
+        if failures.Length > 12 then printfn "  ... ほか %d シナリオ" (failures.Length - 12)
+        false
+
+let runDiffTest (opts: Options) : int =
+    let gbfsOk = checkGbfsAgainstSpecPrograms ()
+    if not gbfsOk then
+        printfn "WARN: gbfs が手書き仕様テストに合格しない。以降の差分は gbfs 側の誤りも疑うこと\n"
+    let circuit = loadFull ()
+    let rng = Random opts.Seed
+    let opcodesOk = runOpcodeDiffTest opts circuit rng
+    let interruptsOk = opts.Interrupts = 0 || runInterruptDiffTest opts circuit (Random (opts.Seed + 1))
+    if opcodesOk && interruptsOk then 0 else 1
 
 let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46]"
+        eprintfn "使い方: dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46] [--interrupts N]"
         2
     | Ok opts -> runDiffTest opts
 

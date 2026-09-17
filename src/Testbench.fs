@@ -9,10 +9,13 @@ namespace WwHdl
 //
 // 契約 (runner の memory_program.rs / memory.rs と一致させる):
 //   リセット: rstPulses 回「rst=1, clk=0 で settle → clk=1 で settle」
-//   1 周期:   clk=0 で settle (最初の周期は rst=0 も反映) → addr/mem_read/mem_write/data_out を読む
-//             → mem_write なら書込 → mem_read なら data_in=mem[addr]、そうでなければ 0
-//             → data_in を書いて settle → clk=1 で settle → 全出力を読む
-//   メモリ:   ROM (0 から ROM 長) → RAM 窓 (ramBase から ramSize) → それ以外は 0xFF。書込は RAM 窓のみ
+//   1 周期:   clk=0 で settle (最初の周期は rst=0 も反映) → addr/mem_read/mem_write/data_out/int_ack を読む
+//             → mem_write なら書込 → int_ack のビットを IF から下ろす
+//             → mem_read なら data_in=mem[addr]、そうでなければ 0。irq = IE & IF & 0x1F
+//             → data_in と irq を書いて settle → clk=1 で settle → 全出力を読む
+//   メモリ:   ROM (0 から ROM 長) → RAM 窓 (ramBase から ramSize) → I/O (IF 0xFF0F、HRAM 0xFF80-0xFFFE、
+//             IE 0xFFFF) → それ以外は 0xFF。書込は RAM 窓と I/O のみ
+//   割込み:   IE / IF は CPU の外 (このメモリモデル) に置く。回路に irq / int_ack ポートがなければ扱わない
 // ---------------------------------------------------------------------
 module Testbench =
     open System
@@ -27,36 +30,76 @@ module Testbench =
 
     let defaultMemoryConfig : MemoryConfig = { RamBase = 0xC000; RamSize = 8192 }
 
+    [<Literal>]
+    let InterruptFlagAddress = 0xFF0F
+    [<Literal>]
+    let InterruptEnableAddress = 0xFFFF
+    [<Literal>]
+    let HramBase = 0xFF80
+    [<Literal>]
+    let HramSize = 0x7F
+
     type MemoryImage =
         { Rom: byte[]
           Ram: byte[]
-          Config: MemoryConfig }
+          Config: MemoryConfig
+          /// 0xFF80-0xFFFE
+          Hram: byte[]
+          /// IF (0xFF0F)。書いたバイトをそのまま保持する (gbfs と同じ。実機は上位 3bit が 1 で読める)
+          InterruptFlag: byte
+          /// IE (0xFFFF)
+          InterruptEnable: byte }
 
     let createMemory (rom: byte[]) (config: MemoryConfig) : MemoryImage =
         { Rom = Array.copy rom
           Ram = Array.zeroCreate config.RamSize
-          Config = config }
+          Config = config
+          Hram = Array.zeroCreate HramSize
+          InterruptFlag = 0uy
+          InterruptEnable = 0uy }
 
     let private ramOffset (m: MemoryImage) (addr: uint16) : int option =
         let a = int addr
         if a >= m.Config.RamBase && a < m.Config.RamBase + m.Ram.Length then Some (a - m.Config.RamBase)
         else None
 
+    let private isHram (a: int) = a >= HramBase && a < HramBase + HramSize
+
     let readMemory (m: MemoryImage) (addr: uint16) : byte =
-        if int addr < m.Rom.Length then m.Rom.[int addr]
+        let a = int addr
+        if a < m.Rom.Length then m.Rom.[a]
         else
             match ramOffset m addr with
             | Some i -> m.Ram.[i]
+            | None when a = InterruptFlagAddress -> m.InterruptFlag
+            | None when a = InterruptEnableAddress -> m.InterruptEnable
+            | None when isHram a -> m.Hram.[a - HramBase]
             | None -> 0xFFuy
 
-    /// RAM 窓への書込だけ反映した新しいイメージを返す (ROM への書込は無視)。
+    /// RAM 窓と I/O (IF / HRAM / IE) への書込を反映した新しいイメージを返す (ROM への書込は無視)。
+    /// RAM 窓が I/O 領域と重なる場合は RAM 窓を優先する。
     let writeMemory (m: MemoryImage) (addr: uint16) (value: byte) : MemoryImage =
+        let a = int addr
         match ramOffset m addr with
         | Some i ->
             let ram = Array.copy m.Ram
             ram.[i] <- value
             { m with Ram = ram }
+        | None when a = InterruptFlagAddress -> { m with InterruptFlag = value }
+        | None when a = InterruptEnableAddress -> { m with InterruptEnable = value }
+        | None when isHram a ->
+            let hram = Array.copy m.Hram
+            hram.[a - HramBase] <- value
+            { m with Hram = hram }
         | None -> m
+
+    /// CPU の irq 入力に渡す値 (IE & IF の割込み要因 5bit)。
+    let pendingInterrupts (m: MemoryImage) : byte =
+        m.InterruptEnable &&& m.InterruptFlag &&& 0x1Fuy
+
+    /// CPU が受け付けた割込み (int_ack の one-hot) のビットを IF から下ろす。
+    let acknowledgeInterrupts (m: MemoryImage) (ack: byte) : MemoryImage =
+        if ack = 0uy then m else { m with InterruptFlag = m.InterruptFlag &&& ~~~ack }
 
     // --- プログラム JSON ------------------------------------------------------
 
@@ -85,6 +128,7 @@ module Testbench =
         | MissingBusPort of port: string
         | BusPortDirection of port: string * expected: PortDirection
         | BusPortWidth of port: string * expected: int * actual: int
+        | IncompleteInterruptPorts of present: string
         | SimulationFailed of SimError
 
     let describeTestbenchError (e: TestbenchError) : string =
@@ -94,6 +138,7 @@ module Testbench =
         | MissingBusPort port -> sprintf "バスポート %s が回路にない" port
         | BusPortDirection (port, expected) -> sprintf "バスポート %s の方向が %A ではない" port expected
         | BusPortWidth (port, expected, actual) -> sprintf "バスポート %s の幅が %d ではなく %d" port expected actual
+        | IncompleteInterruptPorts present -> sprintf "割込みポートは irq と int_ack の両方が必要 (%s だけがある)" present
         | SimulationFailed e -> sprintf "シミュレーション失敗: %s" (describeSimError e)
 
     let private traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
@@ -183,6 +228,12 @@ module Testbench =
 
     // --- バス ---------------------------------------------------------------
 
+    type InterruptPorts =
+        { /// 入力: IE & IF (5bit)
+          Irq: YosysPortBits
+          /// 出力: 受け付けた割込みの one-hot (1 周期だけ立つ)
+          IntAck: YosysPortBits }
+
     type BusPorts =
         { Clock: YosysPortBits
           Reset: YosysPortBits
@@ -190,7 +241,9 @@ module Testbench =
           Addr: YosysPortBits
           DataOut: YosysPortBits
           MemRead: YosysPortBits
-          MemWrite: YosysPortBits }
+          MemWrite: YosysPortBits
+          /// 割込みを持たない回路 (sm83_subset) では None
+          Interrupt: InterruptPorts option }
 
     /// runner (memory_program.rs) と同じポート名で、方向と幅を確認して解決する。
     let resolveBus (ports: YosysPortBits list) : Result<BusPorts, TestbenchError> =
@@ -208,18 +261,31 @@ module Testbench =
           "mem_read", OutputPort, 1
           "mem_write", OutputPort, 1 ]
         |> traverse find
-        |> Result.map (fun resolved ->
-            match resolved with
-            | [ clk; rst; dataIn; addr; dataOut; memRead; memWrite ] ->
-                { Clock = clk; Reset = rst; DataIn = dataIn; Addr = addr
-                  DataOut = dataOut; MemRead = memRead; MemWrite = memWrite }
-            | other -> invalidOp (sprintf "traverse は入力と同数を返すはず (got %d)" other.Length))
+        |> Result.bind (fun resolved ->
+            let hasPort name = ports |> List.exists (fun p -> p.Name = name)
+            let interrupt =
+                match hasPort "irq", hasPort "int_ack" with
+                | false, false -> Ok None
+                | true, true ->
+                    find ("irq", InputPort, 5)
+                    |> Result.bind (fun irq -> find ("int_ack", OutputPort, 5) |> Result.map (fun ack -> Some { Irq = irq; IntAck = ack }))
+                | true, false -> Error (IncompleteInterruptPorts "irq")
+                | false, true -> Error (IncompleteInterruptPorts "int_ack")
+            interrupt
+            |> Result.map (fun interrupt ->
+                match resolved with
+                | [ clk; rst; dataIn; addr; dataOut; memRead; memWrite ] ->
+                    { Clock = clk; Reset = rst; DataIn = dataIn; Addr = addr
+                      DataOut = dataOut; MemRead = memRead; MemWrite = memWrite; Interrupt = interrupt }
+                | other -> invalidOp (sprintf "traverse は入力と同数を返すはず (got %d)" other.Length)))
 
     // --- 実行 ---------------------------------------------------------------
 
     type CycleRecord =
         { /// この周期で書いた data_in
           DataIn: uint64
+          /// この周期で書いた irq (割込みポートがなければ 0)
+          Irq: uint64
           /// clk=1 で settle した後の全出力ポート
           Outputs: Map<string, uint64> }
 
@@ -273,19 +339,34 @@ module Testbench =
             else
                 // runner は rst=0 を書いた直後に最初の clk=0 settle を行う
                 let lowWrites = if k = 0 then [ bus.Reset, 0UL; bus.Clock, 0UL ] else [ bus.Clock, 0UL ]
-                match applyPorts c lowWrites s |> Result.bind (fun sLow -> readBus c bus sLow |> Result.map (fun b -> sLow, b)) with
+                let readLow sLow =
+                    readBus c bus sLow
+                    |> Result.bind (fun b ->
+                        match bus.Interrupt with
+                        | Some ports -> readPort c sLow ports.IntAck |> Result.map (fun ack -> sLow, b, byte ack)
+                        | None -> Ok (sLow, b, 0uy))
+                match applyPorts c lowWrites s |> Result.bind readLow with
                 | Error e -> Error e
-                | Ok (sLow, (addr, memRead, memWrite, dataOut)) ->
+                | Ok (sLow, (addr, memRead, memWrite, dataOut), intAck) ->
+                    // 書込 → 割込み受付で IF を下ろす → 読出 (runner の memory_program.rs と同じ順序)
                     let mem' = if memWrite then writeMemory mem addr dataOut else mem
-                    let dataIn = if memRead then uint64 (readMemory mem' addr) else 0UL
+                    let mem'' = acknowledgeInterrupts mem' intAck
+                    let dataIn = if memRead then uint64 (readMemory mem'' addr) else 0UL
+                    let irq = uint64 (pendingInterrupts mem'')
+                    let inputWrites =
+                        match bus.Interrupt with
+                        | Some ports -> [ bus.DataIn, dataIn; ports.Irq, irq ]
+                        | None -> [ bus.DataIn, dataIn ]
+                    let recordedIrq = if bus.Interrupt.IsSome then irq else 0UL
                     let high =
                         sLow
-                        |> applyPorts c [ bus.DataIn, dataIn ]
+                        |> applyPorts c inputWrites
                         |> Result.bind (applyPorts c [ bus.Clock, 1UL ])
                         |> Result.bind (fun sHigh -> readOutputs c ports sHigh |> Result.map (fun o -> sHigh, o))
                     match high with
                     | Error e -> Error e
-                    | Ok (sHigh, outputs) -> loop (k + 1) sHigh mem' ({ DataIn = dataIn; Outputs = outputs } :: acc)
+                    | Ok (sHigh, outputs) ->
+                        loop (k + 1) sHigh mem'' ({ DataIn = dataIn; Irq = recordedIrq; Outputs = outputs } :: acc)
 
         [ 1 .. rstPulses ]
         |> List.fold (fun acc _ -> Result.bind resetPulse acc) (Ok (initial c))
@@ -332,6 +413,7 @@ module Testbench =
         for cycle in cycles do
             w.WriteStartObject ()
             w.WriteNumber ("dataIn", cycle.DataIn)
+            w.WriteNumber ("irq", cycle.Irq)
             w.WriteStartObject "outputs"
             for KeyValue (name, value) in cycle.Outputs do
                 w.WriteNumber (name, value)

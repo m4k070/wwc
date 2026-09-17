@@ -1,0 +1,31 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD SP,0xD000; IE=0x1F; IF=0x06; EI; NOP; HALT。bit1 (0x48) → RETI 直後に bit2 (0x50) を続けて受付け、IF は 0 になる / ベクタ 0x40/48/50/58/60 = INC B/C/D/E/H; RETI — 期待値は SM83 仕様から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_int_priority_chain.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 6,
+    "c_out": 20,
+    "d_out": 1,
+    "f_out": 16,
+    "sp_out": 53248,
+    "pc_out": 270
+  },
+  "expectMem": {
+    "0xCFFF": 1,
+    "0xCFFE": 13,
+    "0xFF0F": 0,
+    "0xFFFF": 31
+  },
+  "golden": "sm83_full_int_priority_chain.golden.json",
+  "trace": true
+}

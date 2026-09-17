@@ -1,0 +1,30 @@
+{
+  "circuit": "sm83_full",
+  "comment": "LD SP,0xD000; LD A,0x01; LDH (0xFF),A (IE=1); LDH (0x0F),A (IF=1); EI; INC A; HALT。EI の次の命令 (INC A) を実行してから受付けるので戻り番地は 0x010B (即時なら 0x010A) / ベクタ 0x40/48/50/58/60 = INC B/C/D/E/H; RETI — 期待値は SM83 仕様から手で導いた",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_int_ei_delay.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 120,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 2,
+    "b_out": 1,
+    "f_out": 16,
+    "sp_out": 53248,
+    "pc_out": 268
+  },
+  "expectMem": {
+    "0xCFFF": 1,
+    "0xCFFE": 11,
+    "0xFF0F": 0,
+    "0xFFFF": 1
+  },
+  "golden": "sm83_full_int_ei_delay.golden.json",
+  "trace": true
+}

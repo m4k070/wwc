@@ -82,11 +82,15 @@ F# ExportGolden.fsx │                              │ wgpu-runner --memory
 wgpu-runner `memory_program.rs` の実装を契約とする。
 
 1. `clk=0` で収束させる
-2. 出力 `addr` / `mem_read` / `mem_write` / `data_out` を読む (前の posedge でラッチされた値)
-3. メモリ操作 (**書込 → 読出の順**)
+2. 出力 `addr` / `mem_read` / `mem_write` / `data_out` / `int_ack` を読む (前の posedge でラッチされた値)
+3. メモリ操作 (**書込 → 割込み受付 → 読出の順**)
    - `mem_write=1` なら `mem.write(addr, data_out)`
+   - `int_ack` のビットを IF から下ろす
    - `mem_read=1` なら `data_in = mem.read(addr)`、**`mem_read=0` なら `data_in = 0`**
-4. `clk=0` のまま再度収束させる (`data_in` の変化を posedge 前に伝播)
+   - `irq = IE & IF & 0x1F`
+4. `data_in` と `irq` を書き、`clk=0` のまま再度収束させる (posedge 前に伝播)
+
+`irq` / `int_ack` ポートを持たない回路 (sm83_subset) では割込みの手順を飛ばし、`irq` は 0 として記録する。
 5. `clk=1` で収束させる (posedge で DFF がラッチ)
 6. 全出力を読む → この周期の出力
 
@@ -97,7 +101,19 @@ NOP (0x00) を読んだものとして進む。スモーク `sm83_subset_smoke` 
 
 - ROM: アドレス 0 から ROM ファイルの長さぶん。書込は無視
 - RAM: `ramBase` (既定 0xC000) から `ramSize` (既定 8192) バイト。初期値 0
+- I/O: IF (0xFF0F)、HRAM (0xFF80-0xFFFE)、IE (0xFFFF)。初期値 0。IF は書いたバイトをそのまま保持する
+  (gbfs と同じ。実機は上位 3bit が 1 で読める)
+- 優先順位は ROM → RAM 窓 → I/O。RAM 窓が I/O と重なる場合 (sm83_subset_call_stack の 0xF000-0xFFFF) は RAM 窓が勝つ
 - それ以外の読出は 0xFF
+
+### 5.3.1 割込みの分担 (2026-09-17)
+
+- IE / IF は CPU の外 (このメモリモデル、GB エミュレータ組み込み時は gbfs 側) に置く。CPU は `irq[4:0]` = IE & IF を受け取り、
+  受け付けた要因を `int_ack[4:0]` (one-hot、1 周期) で返す。ホストがそのビットを IF から下ろす
+- CPU 側: 命令境界 (PHASE_FETCH) で IME=1 かつ irq≠0 なら最下位ビット (VBlank 優先) を受け付け、IME を下ろし、
+  戻り番地 (次に実行するはずだった命令) を積んで 0x40/48/50/58/60 へ飛ぶ。EI は次の命令の実行開始時に IME を立てる
+  (EI; DI なら割込みは起きない)。DI は即時。RETI は即時に IME を立てる。
+  HALT は irq≠0 で抜け、IME=1 なら受け付け、IME=0 なら次の命令へ進む。**HALT バグは再現しない**
 
 ### 5.4 初期状態
 
@@ -156,14 +172,15 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
   "romSha256": "…",
   "rstPulses": 2,
   "cycles": [
-    { "dataIn": 62, "outputs": { "a_out": 1, "addr": 257, "data_out": 0, "mem_read": 1, "mem_write": 0, "pc_out": 257 } }
+    { "dataIn": 62, "irq": 0, "outputs": { "a_out": 1, "addr": 257, "data_out": 0, "mem_read": 1, "mem_write": 0, "pc_out": 257 } }
   ]
 }
 ```
 
 - `sourceSha256` を routed meta と照合し、古い配線結果に新しい golden を当てる事故を防ぐ。
   `romSha256` はプログラムの ROM と照合し、ROM を変えたのに golden を作り直していない状態を検出する
-- `cycles[k].dataIn` は §5.2 手順 3 の値、`outputs` は手順 6 (clk=1 settle 後) の値。リセット周期は含めない。
+- `cycles[k].dataIn` / `irq` は §5.2 手順 3 の値、`outputs` は手順 6 (clk=1 settle 後) の値。リセット周期は含めない。
+  `irq` は省略可 (古い golden は 0 として読む)。runner は自分で計算した `irq` とも照合する
   runner の `trace` 表示の `addr` は手順 2 (clk=0 settle 時点) の値なので、golden の `outputs.addr` とは時点が違う
 - 出力はポート単位の整数 (LSB first)。runner は meta の probe に従って読み、
   `Unobservable` のビットは比較から除外する
