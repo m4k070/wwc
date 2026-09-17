@@ -98,7 +98,8 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
 - [x] 割込みの実装 (2026-09-17): IE/IF は CPU の外、ポート irq[4:0] / int_ack[4:0]。EI の 1 命令遅延、DI、RETI、HALT 復帰。
       Testbench.fs と wgpu-runner のメモリモデルに IF/IE/HRAM と割込み手順を追加 (DESIGN-VERIFY.md §5.2〜5.3.1)。
       手書き仕様テスト 3 本、gbfs 差分に LDH と割込みシナリオを追加。10,654 gates
-- [ ] 決定待ち: gbfs の EI が即時に IME を立てる (仕様は 1 命令遅延) ため、割込みシナリオの差分テストが食い違う。gbfs を直すか
+- [x] gbfs の EI を 1 命令遅延に修正 (2026-09-17、gbfs の CpuState.ImeScheduled)。修正後、gbfs は仕様テスト 31/31、
+      割込みシナリオ 200 本すべてが RTL (NetlistSim) と一致
 - [ ] 差分テストの残り: STOP、HALT バグ (どちらのモデルも未実装)
 - [x] 通常命令「全 256」の網羅確認 — 上記差分テストで未定義 opcode・STOP・LDH を除き網羅
 
