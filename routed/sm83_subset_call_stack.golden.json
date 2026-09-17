@@ -1,0 +1,714 @@
+{
+  "format": "wwc-golden/1",
+  "circuit": "sm83_subset",
+  "program": "sm83_subset_call_stack",
+  "sourceSha256": "88c6cd5e4ccab4034bcfa8a4883a7cf534a2536b6cd54f7c10b954a4a444b0fe",
+  "romSha256": "21a151455dc8a92816405e672d88a4e65ca68562c96f135a513dfbe3a3aabedb",
+  "rstPulses": 2,
+  "cycles": [
+    {
+      "dataIn": 205,
+      "outputs": {
+        "a_out": 1,
+        "addr": 256,
+        "data_out": 0,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 205,
+      "outputs": {
+        "a_out": 1,
+        "addr": 258,
+        "data_out": 0,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65533,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65532,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65531,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65530,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65529,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65528,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65527,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65526,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65525,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65524,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65523,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65522,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65521,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65520,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65519,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65518,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65517,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65516,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65515,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65514,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65513,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65512,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65511,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65510,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65509,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65508,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65507,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65506,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65505,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65504,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65503,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65502,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65501,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65500,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65499,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65498,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65497,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65496,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65495,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65494,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65493,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65492,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65491,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65490,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65489,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65488,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65487,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65486,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65485,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65484,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65483,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65482,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65481,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65480,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65479,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65478,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65477,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65476,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65475,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65474,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65473,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 461
+      }
+    },
+    {
+      "dataIn": 1,
+      "outputs": {
+        "a_out": 1,
+        "addr": 65472,
+        "data_out": 1,
+        "mem_read": 1,
+        "mem_write": 1,
+        "pc_out": 257
+      }
+    }
+  ]
+}

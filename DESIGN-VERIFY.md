@@ -19,6 +19,7 @@
 |---|---|---|
 | バスは同期式 | `addr` / `mem_read` / `mem_write` / `data_out` はすべてレジスタ出力。`data_in` は posedge で取り込まれる | 1 クロック周期単位で入出力を扱える |
 | **sm83_subset の RTL はフェッチが壊れている** (B-1 の NetlistSim で確定、2026-09-16) | FETCH で `pc` は進むが、NOP・`LD r,n` などの後に `addr_r` を更新しない。ROM `3E 42 3E 17 06 05 80 76` は `LD A,0x42` の後 addr=0x0101 のまま `mem_read=0` → NOP を読み続け、pc だけ進んで a=0x42 で止まる (本物の SM83 なら a=0x1C) | 本物の SM83 の動作を期待値にできない。**直さない (§8 Q1 で決定)** |
+| sm83_subset の `INC r` / `DEC r` はレジスタ選択も誤り (`opcode[2:0]` を使う、2026-09-17 発見) | `INC A` (0x3C) が H を対象にする | 同上。直さない |
 | sm83_full のフェッチは正常。ただし即値読出に off-by-one があった (2026-09-16 修正) | `PHASE_FETCH` で `addr <= pc`、`PHASE_FETCH2` で `data_in` を読む 2 段階。`exec_normal` / `exec_imm` は `pc <= pc + 1` と同じ周期に `addr <= pc` を出しており、opcode 自身の番地から即値を読んでいた → `addr <= pc + 1` に修正 (B-2 の仕様テストで発見) | CPU としての意味の検証は full で行う。手書きの期待値 (SM83 仕様) による仕様テストも NetlistSim 上で持つ |
 | ゲートは 3 種類だけ | subset/full は `$_NAND_` / `$_NOT_` / `$_DFF_P_` のみ (sm83_min は `$_DFF_PP0_`、R は無視) | ゲートレベルのシミュレータは小さく書ける |
 | Verilog シミュレータ | iverilog / verilator はない。`yosys sim` (`-clock` `-reset` `-n` `-vcd`) は flake にある | RTL 側の参照は yosys で取れる |

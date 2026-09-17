@@ -1,0 +1,17 @@
+{
+  "circuit": "sm83_subset",
+  "comment": "CALL 0x0100。subset の壊れたフェッチでスタック書込が続く。RAM を 0xF000-0xFFFF に置き書込を読み返す (SP 初期値 0xFFFE)",
+  "meta": "sm83_subset.meta.json",
+  "init": "sm83_subset.bin",
+  "memory": {
+    "rom": "rom_sm83_subset_call_stack.bin",
+    "ramBase": 61440,
+    "ramSize": 4096
+  },
+  "rstPulses": 2,
+  "cycles": 64,
+  "maxStepsPerPhase": 20000,
+  "checkInterval": 256,
+  "golden": "sm83_subset_call_stack.golden.json",
+  "trace": true
+}

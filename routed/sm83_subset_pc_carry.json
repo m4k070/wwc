@@ -1,0 +1,17 @@
+{
+  "circuit": "sm83_subset",
+  "comment": "LD A,0x5A の後 NOP が続き pc が 0x0101 → 0x022B。pc インクリメンタの下位→上位バイト桁上がりを通す",
+  "meta": "sm83_subset.meta.json",
+  "init": "sm83_subset.bin",
+  "memory": {
+    "rom": "rom_sm83_subset_pc_carry.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 300,
+  "maxStepsPerPhase": 20000,
+  "checkInterval": 256,
+  "golden": "sm83_subset_pc_carry.golden.json",
+  "trace": true
+}

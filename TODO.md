@@ -68,15 +68,23 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
       * `romSha256` を書き換えた golden は GPU 実行前にエラー
 - [ ] 決定待ち: プログラム・ROM を `routed/` から `programs/` に分けるか (DESIGN-VERIFY.md §8 Q2)
 - [ ] B-5 RTL との照合 (`yosys sim -vcd`)。B-4 は Step C
-- [ ] B-6 GPU 収束判定の高速化 (subset の実測で必要なら)
+- [ ] B-6 GPU 収束判定の高速化 — 当面不要 (B-4 で 367 周期 + 検査が 246 秒、1 周期 0.6 秒前後)
 - [x] 決定 (2026-09-15): sm83_subset の RTL フェッチ不具合 (FETCH 後に `addr_r` を更新しない) は
       直さない。subset は CA とネットリストの一致検証専用とし、CPU としての意味の検証は full で行う
       (DESIGN-VERIFY.md §8 Q1)
 
-### Step C: sm83_subset で全工程を通す
+### Step C: sm83_subset で全工程を通す ✅ (2026-09-17、B-4)
 
-- [ ] sm83_subset を配線 (約 100 分、バックグラウンド) → Step A で保存
-- [ ] Step B の仕組みで subset 命令の GPU 検証 (LD/ALU/INC/DEC/JP/メモリ読み書き)
+- [x] sm83_subset を配線 (111.6 分、16x12 失敗 → 20x14、2026-09-16) → `routed/sm83_subset.{bin,meta.json}`
+- [x] 配線済み CA とネットリストの全周期照合 (`wgpu-runner/memory-test.sh`、RTX 3060):
+      * `sm83_subset_smoke` (LD A,0x42): golden 3/3、expect 2/2
+      * `sm83_subset_call_stack` (CALL 0x0100、RAM 0xF000-0xFFFF): golden **64/64**。
+        SP デクリメント・スタック書込と読み返し・pc 0x01CD/0x0101 の往復を通る
+      * `sm83_subset_pc_carry` (LD A,0x5A + NOP): golden **300/300**。pc 0x0101 → 0x022B で下位→上位バイトの桁上がりを通す
+      * 食い違いなし: skew 46 のクロック木でも、この範囲では hold 違反は出ていない
+      * プログラムは NetlistSim で候補を動かし、出力ビットの変化量で選んだ (JP/JR ループや INC は動く範囲が狭い)
+- 注意: subset はフェッチ不具合のため普通の命令列を実行できない。LD/ALU/INC/DEC の網羅的な命令検証は full で行う
+  (subset の `INC r` / `DEC r` は `opcode[5:3]` ではなく `opcode[2:0]` でレジスタを選ぶ不具合もある。直さない)
 
 ### Step D: sm83_full
 

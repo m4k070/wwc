@@ -132,6 +132,7 @@ dotnet build src/WwHdl.fsproj                    # build（テスト前に必須
 dotnet fsi src/RunTests.fsx                       # F# テスト (187/187)
 web/run-test.sh                                   # WebGPU golden tests (Playwright/SiftShader)
 wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
+wgpu-runner/memory-test.sh [program.json ...]     # メモリバス CPU の golden 照合 + 検証器の検証 (subset smoke/call_stack/pc_carry)
 ```
 
 ## 開発フロー（fsx 駆動）
@@ -195,7 +196,7 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 | 回路 | gates | 状態 |
 |------|------|------|
 | sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
-| sm83_subset | 3,553 | ✅ 配線完走 (20x14、約 100 分、skew 46) |
+| sm83_subset | 3,553 | ✅ 配線完走 (20x14、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
 | sm83_full | 9,155 | 全命令セット (通常 256 + CB prefix 256)。NetlistSim 上で LD/HALT/RAM 書込が仕様どおり動くことを確認。配線は今後の課題 |
 
 ### コンパイル
