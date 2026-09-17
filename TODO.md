@@ -1,7 +1,7 @@
 # WireLevel コンパイラ TODO
 
-## 現在のテスト結果: F# 202/202 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
-(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166、NetlistSimTest 追加で 177、TestbenchTest 追加で 187、sm83_full 仕様テスト 16 本で 202。
+## 現在のテスト結果: F# 214/214 / GPU golden 24/24 / Playwright 24/24 PASS 🎉
+(F# は 2026-09-15 に確認。mincpu.json 追加で 150 → 158、RoutedArtifactTest 追加で 166、NetlistSimTest 追加で 177、TestbenchTest 追加で 187、sm83_full 仕様テスト 16 本で 202、差分テストの回帰 12 本で 214。
 GPU/Playwright は d008cbe, 2026-08-14 時点)
 
 ## 次の一手 (M8: SM83 フルセット)
@@ -91,13 +91,16 @@ GPU/Playwright は d008cbe, 2026-08-14 時点)
 - [x] 仕様テスト (2026-09-17): `routed/sm83_full_*.json` 16 本を TestbenchTest で NetlistSim 上で照合。
       期待値は SM83 仕様から手で導出。配線 (2026-09-17 21:25 開始) 中にこのテストで RTL 不具合 7 件が見つかり、
       配線を中止して修正 (詳細 SM83.md)。9,155 → 9,958 gates
-- [ ] 仕様テストの未確認命令を埋める (JP/CALL/RET cc、LD (nn)/LDH、16bit 演算、RLCA/DAA/CPL/CCF、CB の他命令、割込み)。
-      手書きで全命令を網羅するのは重いので、F# の SM83 参照エミュレータとの差分テストも検討する
+- [x] gbfs の CPU との差分テスト `src/DiffTestGbfs.fsx` (2026-09-17): 494 命令 × 4 パターン (境界値入り)。
+      1 回目 52 命令食い違い → すべて RTL の誤り (JR、条件分岐の不成立、ADD HL/ADD SP のフラグ、LD (nn),SP、CB (HL))。
+      修正後 494 命令すべて一致。代表 12 件を `routed/sm83_full_diff_*.json` に書き出し TestbenchTest の回帰テストへ。
+      gbfs 側の ADD の Z フラグ不具合も修正 (gbfs のテスト 220/220)。10,650 gates
+- [ ] 差分テストの残り: LDH (E0/F0/E2/F2、I/O 領域のメモリモデルが必要)、割込み (IE/IF/EI/DI/RETI、ポート追加が必要)、STOP
+- [x] 通常命令「全 256」の網羅確認 — 上記差分テストで未定義 opcode・STOP・LDH を除き網羅
 
-- [ ] sm83_full (9,958 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 +
+- [ ] sm83_full (10,650 gates) の配線完走 — 5〜8 時間見込み。バックグラウンド実行 +
       進行ログで監視し、Step A で必ず保存。16x12 で失敗 → 20x14 再試行の時間も含む
 - [ ] CB 命令の動作検証
-- [ ] 通常命令「全 256」の網羅確認 (参照モデルとの一致で機械判定)
 
 ### 並行して進められる改善 (必須ではない)
 
@@ -247,4 +250,4 @@ web/run-wl.sh mincpu --headed  # ブラウザ表示あり
 ## WireWorld 系 (凍結 — 組合せ回路デモとして維持)
 
 WireWorld 系テストは構造的制約により修正しない。現在 90 テストが WireWorld 系。
-全テスト 202/202 PASS 維持中。
+全テスト 214/214 PASS 維持中。

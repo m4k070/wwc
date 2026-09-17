@@ -78,6 +78,7 @@ module sm83_full (
     localparam PHASE_INT_PUSH2 = 11;
     localparam PHASE_CALL_PUSH = 12;
     localparam PHASE_HALT      = 13;
+    localparam PHASE_WRITE_NN2 = 14;  // LD (nn),SP の 2 バイト目
 
     // ----------------------------------------------------------------
     // レジスタ値読み出し
@@ -324,12 +325,13 @@ module sm83_full (
 
                     if (cb_prefix) begin
                         cb_ir <= data_in;
-                        cb_prefix <= 0;
                         if (data_in[2:0] == 3'b110) begin
+                            // (HL) 版: cb_prefix は PHASE_MEM_DATA で CB 命令と判定するまで保持する
                             addr <= {h, l};
                             mem_read <= 1;
                             phase <= PHASE_MEM_DATA;
                         end else begin
+                            cb_prefix <= 0;
                             exec_cb_reg(data_in);
                             phase <= PHASE_FETCH;
                         end
@@ -363,9 +365,10 @@ module sm83_full (
                     operand <= data_in;
                     mem_read <= 0;
                     if (cb_prefix) begin
-                        // CB (HL) — 演算後 MEM_WRITE
+                        // CB (HL) — 演算後 MEM_WRITE で (HL) に書き戻す。BIT は書き戻さない
+                        cb_prefix <= 0;
                         exec_cb_hl(data_in, cb_ir);
-                        phase <= PHASE_MEM_WRITE;
+                        phase <= (cb_ir[7:6] == 2'b01) ? PHASE_FETCH : PHASE_MEM_WRITE;
                     end else begin
                         exec_mem_read(data_in);
                         phase <= PHASE_FETCH;
@@ -393,6 +396,16 @@ module sm83_full (
                         pc <= call_target;
                         push2_pending <= 0;
                     end
+                    phase <= PHASE_FETCH;
+                end
+
+                // =====================================================
+                // PHASE_WRITE_NN2: LD (nn),SP の上位バイトを nn+1 に書く
+                // =====================================================
+                PHASE_WRITE_NN2: begin
+                    addr <= call_target;
+                    data_out <= operand;
+                    mem_write <= 1;
                     phase <= PHASE_FETCH;
                 end
 
@@ -642,27 +655,27 @@ module sm83_full (
 
                 // === JP nn / JP cc, nn ===
                 8'hC3: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hC2: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hCA: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hD2: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hDA: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hC2: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
+                8'hCA: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
+                8'hD2: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
+                8'hDA: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
 
                 // === JP (HL) ===
                 8'hE9: begin pc <= {h, l}; phase <= PHASE_FETCH; end
 
                 // === JR n / JR cc, n ===
                 8'h18: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
-                8'h20: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'h28: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'h30: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'h38: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'h20: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 2; phase <= PHASE_FETCH; end end
+                8'h28: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 2; phase <= PHASE_FETCH; end end
+                8'h30: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 2; phase <= PHASE_FETCH; end end
+                8'h38: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 2; phase <= PHASE_FETCH; end end
 
                 // === CALL nn / CALL cc, nn ===
                 8'hCD: begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end
-                8'hC4: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hCC: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hD4: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
-                8'hDC: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else phase <= PHASE_FETCH; end
+                8'hC4: begin if (f[7]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
+                8'hCC: begin if (f[7]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
+                8'hD4: begin if (f[4]==0) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
+                8'hDC: begin if (f[4]==1) begin addr <= pc + 1; mem_read <= 1; phase <= PHASE_IMM; end else begin pc <= pc + 3; phase <= PHASE_FETCH; end end
 
                 // === RST n ===
                 8'hC7: begin rst_push(8'h00); end
@@ -855,9 +868,10 @@ module sm83_full (
                 default: rr = 0;
             endcase
             {h, l} <= {h, l} + rr;
+            // 下位 12bit / 16bit の和を 1 段広い幅で比較する
             f <= {f[7], 1'b0,
-                  (({h[3:0], l[3:0]} + rr[11:0]) > 12'hFFF),
-                  (({h, l} + rr) > 16'hFFFF),
+                  (({4'b0, h[3:0], l} + {4'b0, rr[11:0]}) > 16'h0FFF),
+                  (({1'b0, h, l} + {1'b0, rr}) > 17'h0FFFF),
                   4'b0000};
         end
     endtask
@@ -913,12 +927,12 @@ module sm83_full (
                 8'hF6: begin operand <= val; do_alu(ALU_OR); phase <= PHASE_FETCH; end
                 8'hFE: begin operand <= val; do_alu(ALU_CP); phase <= PHASE_FETCH; end
 
-                // JR n / JR cc, n
-                8'h18: begin pc <= pc + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
-                8'h20: begin pc <= pc + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
-                8'h28: begin pc <= pc + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
-                8'h30: begin pc <= pc + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
-                8'h38: begin pc <= pc + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
+                // JR n / JR cc, n — 基点は命令の次の番地 (pc_plus1。pc はまだオペランドの番地)
+                8'h18: begin pc <= pc_plus1 + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
+                8'h20: begin pc <= pc_plus1 + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
+                8'h28: begin pc <= pc_plus1 + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
+                8'h30: begin pc <= pc_plus1 + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
+                8'h38: begin pc <= pc_plus1 + {{8{val[7]}}, val}; phase <= PHASE_FETCH; end
 
                 // LDH
                 8'hE0: begin addr <= {8'hFF, val}; data_out <= a; mem_write <= 1; phase <= PHASE_FETCH; end
@@ -928,15 +942,15 @@ module sm83_full (
                 8'hF8: begin
                     {h, l} <= sp + {{8{val[7]}}, val};
                     f <= {1'b0, 1'b0,
-                          ((sp[3:0] + val[3:0]) > 4'hF),
-                          ((sp[7:0] + val) > 8'hFF),
+                          (({1'b0, sp[3:0]} + {1'b0, val[3:0]}) > 5'hF),
+                          (({1'b0, sp[7:0]} + {1'b0, val}) > 9'hFF),
                           4'b0000};
                     phase <= PHASE_FETCH; end
                 8'hE8: begin
                     sp <= sp + {{8{val[7]}}, val};
                     f <= {1'b0, 1'b0,
-                          ((sp[3:0] + val[3:0]) > 4'hF),
-                          ((sp[7:0] + val) > 8'hFF),
+                          (({1'b0, sp[3:0]} + {1'b0, val[3:0]}) > 5'hF),
+                          (({1'b0, sp[7:0]} + {1'b0, val}) > 9'hFF),
                           4'b0000};
                     phase <= PHASE_FETCH; end
 
@@ -979,10 +993,9 @@ module sm83_full (
                     addr <= {hi, operand};
                     data_out <= sp[7:0];
                     mem_write <= 1;
-                    call_target <= {hi, operand + 1};  // second addr
+                    call_target <= {hi, operand} + 16'd1;  // 2 バイト目の番地 (下位バイトの桁上がりを含む)
                     operand <= sp[15:8];  // high byte of SP
-                    push2_pending <= 1;
-                    phase <= PHASE_MEM_WRITE2;
+                    phase <= PHASE_WRITE_NN2;
                 end
 
                 default: phase <= PHASE_FETCH;
@@ -1120,18 +1133,17 @@ module sm83_full (
             roc = cb_carry(op[5:3], mem_val);
             case (op[7:6])
                 0: begin
-                    operand <= res;
+                    data_out <= res;  // PHASE_MEM_WRITE で (HL) に書く
                     f <= {(res == 0), 1'b0, 1'b0, roc, 4'b0000};
                 end
                 1: begin
-                    operand <= mem_val;
                     f <= {(mem_val[op[5:3]] == 0), 1'b0, 1'b1, f[4], 4'b0000};
                 end
                 2: begin
-                    operand <= mem_val & ~(8'h01 << op[5:3]);
+                    data_out <= mem_val & ~(8'h01 << op[5:3]);
                 end
                 3: begin
-                    operand <= mem_val | (8'h01 << op[5:3]);
+                    data_out <= mem_val | (8'h01 << op[5:3]);
                 end
             endcase
         end

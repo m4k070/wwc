@@ -1,0 +1,15 @@
+{
+  "circuit": "sm83_full",
+  "comment": "DiffTestGbfs.fsx で生成: 命令 CB C6、初期値 A=57 F=10 BC=CF00 DE=DC8E HL=C92B SP=C6D1。期待値は gbfs の結果 (SM83 仕様で判定済みの命令)",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": { "rom": "rom_sm83_full_diff_cbc6.bin", "ramBase": 49152, "ramSize": 8192 },
+  "rstPulses": 2,
+  "cycles": 150,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": { "a_out": 87, "f_out": 16, "b_out": 207, "c_out": 0, "d_out": 220, "e_out": 142, "h_out": 201, "l_out": 43, "sp_out": 50897, "pc_out": 1539 },
+  "expectMem": { "0xC6CF": 16, "0xC6D0": 87, "0xC92B": 1 },
+  "golden": "sm83_full_diff_cbc6.golden.json",
+  "trace": true
+}
