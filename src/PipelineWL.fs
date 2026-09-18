@@ -213,7 +213,12 @@ module PipelineWL =
                 // 探索上限: 経路が存在しないネットは上限まで探索してから失敗するため、
                 // 上限を下げると「早く諦めて rip-up に回す」ことができ、最悪コストが 1/10 になる。
                 // (経路が存在するネットはヒューリスティックが効き、上限に達しない)
-                let maxExplore = min (bboxArea * 8) 5000000
+                let maxExplore = min (bboxArea * 8) 2000000
+                // 優先度: f = g + h。同じ f ならゴールに近い (h の小さい) 状態を先に見る。
+                // 序盤のグリッドはほぼ空で同コストの経路が大量にあり、素の f だけだと
+                // その「平地」を一様に広げて探索が爆発する (24x16 のクロックネットで
+                // 1 終端 12 分・上限 500 万到達)。同点処理を入れても経路の最適性は保たれる。
+                let inline priorityOf (g: int) (hv: int) = (g + hv) * 1024 + hv
                 // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、
                 // 後続ネットが交差できるセルを増やす (輻輳対策)。
                 // リトライが進むほど下げる (4→2→1) — 初回は直線優先で交差余地を
@@ -227,7 +232,7 @@ module PipelineWL =
                     if passOk c d && not (gScore.ContainsKey ((c, d))) then
                         gScore.[(c, d)] <- 1
                         prev.[(c, d)] <- None
-                        pq.Enqueue ((c, d), 1 + h c)
+                        pq.Enqueue ((c, d), priorityOf 1 (h c))
                 let mutable explored = 0
                 let mutable goalState = None
                 while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
@@ -246,7 +251,7 @@ module PipelineWL =
                                         if not (gScore.ContainsKey ((c', nd))) || ng < gScore.[(c', nd)] then
                                             gScore.[(c', nd)] <- ng
                                             prev.[(c', nd)] <- Some (c, d)
-                                            pq.Enqueue ((c', nd), ng + h c')
+                                            pq.Enqueue ((c', nd), priorityOf ng (h c'))
                                     else
                                         // ブロッカー記録 (occ によるブロックのみ)
                                         match Map.tryFind c' occ with
@@ -290,6 +295,9 @@ module PipelineWL =
                     result <- Some (Ok ())
                 | None ->
                     exploreMult <- exploreMult * 2
+                    if exploreMult >= 4 then
+                        eprintfn "[route] NetId %A 探索拡大 mult=%d (bbox %d cells, 上限 %d)"
+                            netId exploreMult bboxArea maxExplore
             match result with
             | Some r ->
                 if exploreMult > 1 then
@@ -601,16 +609,22 @@ module PipelineWL =
                     (Ok ())
 
         let balanceClocks () : Result<unit, CompileError> =
-            placed
-            |> List.choose (fun p ->
-                match p.Gate.Kind, p.Gate.Inputs with
-                | Dff, [clkNet; _] -> Some (clkNet, toward p.Coord S)
-                | Dff, [cNet; _; _] -> Some (cNet, toward p.Coord S)
-                | _ -> None)
-            |> List.groupBy fst
+            let nets =
+                placed
+                |> List.choose (fun p ->
+                    match p.Gate.Kind, p.Gate.Inputs with
+                    | Dff, [clkNet; _] -> Some (clkNet, toward p.Coord S)
+                    | Dff, [cNet; _; _] -> Some (cNet, toward p.Coord S)
+                    | _ -> None)
+                |> List.groupBy fst
+            eprintfn "[clock] スキュー均等化: %d ネット" nets.Length
+            nets
             |> List.fold (fun acc (net, terms) ->
                 acc |> Result.bind (fun () ->
-                    balanceClockNet net (terms |> List.map snd)))
+                    let sw = System.Diagnostics.Stopwatch.StartNew ()
+                    let r = balanceClockNet net (terms |> List.map snd)
+                    eprintfn "[clock] 均等化 NetId %A 終端 %d 本 %.0f s" net terms.Length sw.Elapsed.TotalSeconds
+                    r))
                 (Ok ())
 
         // 全ゲートの全入力終端を順に配線 (短いネット優先で輻輳軽減)。
@@ -632,11 +646,22 @@ module PipelineWL =
                 | _ -> [])
         let clockNetIds = clockTerminals |> List.map fst |> Set.ofList
         let clockResult =
+            eprintfn "[clock] 終端 %d 本の配線を開始" clockTerminals.Length
             let mutable cr : Result<unit, CompileError> = Ok ()
+            let mutable clockDone = 0
             for (nid, goal) in clockTerminals do
+                let sw = System.Diagnostics.Stopwatch.StartNew ()
                 match routeOne nid goal with
                 | Ok () -> ()
-                | Error _ -> cr <- Error (RoutingCongestion nid)
+                | Error _ ->
+                    eprintfn "[clock] 配線失敗: NetId %A (%d/%d) — 最終的に RoutingCongestion で終わる" nid (clockDone + 1) clockTerminals.Length
+                    cr <- Error (RoutingCongestion nid)
+                clockDone <- clockDone + 1
+                if sw.Elapsed.TotalSeconds >= 10.0 then
+                    eprintfn "[clock] 遅い終端: NetId %A %.0f s (%d/%d)" nid sw.Elapsed.TotalSeconds clockDone clockTerminals.Length
+                if clockDone % 20 = 0 then
+                    eprintfn "[clock] %d/%d 本 %d s" clockDone clockTerminals.Length (int routeSw.Elapsed.TotalSeconds)
+            eprintfn "[clock] 配線完了 %d s" (int routeSw.Elapsed.TotalSeconds)
             cr
             |> Result.bind (fun () ->
                 match balanceClocks () with
@@ -744,6 +769,7 @@ module PipelineWL =
                             |> List.sortBy (fun (nid, goal) -> netLen nid goal) do
             queue.Enqueue (nid, goal)
         let totalTerminals = queue.Count
+        eprintfn "[route] データ終端 %d 本の配線を開始 (%d s)" totalTerminals (int routeSw.Elapsed.TotalSeconds)
         let mutable processed = 0
         let mutable result : Result<unit, CompileError> = Ok ()
         while (match result with Ok _ -> true | _ -> false) && queue.Count > 0 do
@@ -752,6 +778,7 @@ module PipelineWL =
             if processed % 100 = 0 then
                 eprintfn "[route] %d/%d (NetId %A) %d s"
                     processed totalTerminals nid (int routeSw.Elapsed.TotalSeconds)
+            let termSw = System.Diagnostics.Stopwatch.StartNew ()
             match routeOne nid goal with
             | Ok () -> ()
             | Error blockers ->
@@ -762,6 +789,8 @@ module PipelineWL =
                         | Some goals -> for g in goals do queue.Enqueue (b, g)
                         | None -> ()
                 | Error e -> result <- Error e
+            if termSw.Elapsed.TotalSeconds >= 20.0 then
+                eprintfn "[route] 遅い終端: NetId %A %.0f s (%d/%d)" nid termSw.Elapsed.TotalSeconds processed totalTerminals
         eprintfn "[route] done: %d terminals processed, %d rip-ups" processed totalRips
         result
         |> Result.bind (fun () -> clockResult)
