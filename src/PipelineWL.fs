@@ -65,16 +65,51 @@ module PipelineWL =
         elif nGates <= 1000 then 20, 14
         else 16, 12
 
-    /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版)。
+    /// ヒルベルト曲線の d 番目の点 (order 次、2^order × 2^order 格子)。
+    /// 曲線上で近い d は平面上でも近い。yosys の宣言順には強い局所性があるため
+    /// (宣言順で前後に 2 分割したときの cut は無作為分割の 1/6)、この順で敷くと
+    /// 配線長が縮む。行優先では、宣言順で半行ぶん離れただけで平面上は行幅ぶん
+    /// (sm83_full で約 1,450 セル) 離れてしまう。
+    let hilbertPoint (order: int) (d: int) : int * int =
+        let mutable rx = 0
+        let mutable ry = 0
+        let mutable x = 0
+        let mutable y = 0
+        let mutable t = d
+        let mutable s = 1
+        while s < (1 <<< order) do
+            rx <- 1 &&& (t / 2)
+            ry <- 1 &&& (t ^^^ rx)
+            if ry = 0 then
+                if rx = 1 then
+                    x <- s - 1 - x
+                    y <- s - 1 - y
+                let swap = x
+                x <- y
+                y <- swap
+            x <- x + s * rx
+            y <- y + s * ry
+            t <- t / 4
+            s <- s * 2
+        (x, y)
+
+    /// ゲートを JSON 宣言順にヒルベルト曲線に沿って配置する (ピッチ指定版)。
+    /// 推定総配線長 (sm83_full 28x20): 行優先 1,390 万 → 1,297 万、1,000 セル超のネット 32.3% → 25.1%。
+    /// ただしクロックスキュー均等化が効かなくなる未解決問題あり (reg8 で skew 36、本来 ≤1)。
     let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
         let n = max 1 nl.Gates.Length
-        let ncols = int (ceil (sqrt (float n)))
+        let order =
+            let mutable o = 1
+            while (1 <<< (2 * o)) < n do o <- o + 1
+            o
+        let points = [| for i in 0 .. n - 1 -> hilbertPoint order i |]
+        let minCol = points |> Array.map fst |> Array.min
+        let minRow = points |> Array.map snd |> Array.min
         let placed =
             nl.Gates |> List.mapi (fun i g ->
-                let col = i % ncols
-                let row = i / ncols
+                let (col, row) = points.[i]
                 { Gate = g
-                  Coord = { X = gateX0 + col * pitchX; Y = 2 + row * pitchY }
+                  Coord = { X = gateX0 + (col - minCol) * pitchX; Y = 2 + (row - minRow) * pitchY }
                   Dir = E })
         let pins =
             nl.PrimaryInputs
