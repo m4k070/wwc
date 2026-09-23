@@ -51,7 +51,10 @@ module PipelineWL =
     /// ピッチ拡大シーケンス (狭い→広い)。compileWL が基本ピッチから開始し、
     /// 輻輳失敗時は一段ずつ広げて再試行する。
     let private pitchSequence : (int * int) list =
-        [ (12, 10); (16, 12); (20, 14); (24, 16) ]
+        // 10k ゲート級 (sm83_full) は 24x16 でも輻輳で通らなかった (2026-09-18: 15,153/18,037 端子)
+        // ため、さらに広いピッチを用意する。グリッド面積は増えるが、A* の同点処理を入れてからは
+        // 探索コストが距離に比例する程度で収まる
+        [ (12, 10); (16, 12); (20, 14); (24, 16); (28, 20); (32, 24) ]
 
     /// 回路規模 (ゲート数) に応じた配置ピッチ (基本ピッチ)。
     /// 大規模回路では grid 面積爆発を防ぐため縮小する。
@@ -691,8 +694,11 @@ module PipelineWL =
         // (balanceClockNet の restoreEdge と同じ思想)。ループ防止のため再試行回数
         // 上限 (ネット単位 / 全体) を設ける。
         let ripCount = System.Collections.Generic.Dictionary<NetId, int>()
-        let maxRipsPerNet = 3
-        let maxTotalRips = 1000
+        // 10k ゲート級では 30 本撤去しても通らないネットが残ったため上限を緩める
+        // (2026-09-18 の 24x16: NetId 165 ほか 5 本が 30 本撤去 × 3 回で失敗)
+        let maxRipsPerNet = 8
+        let maxTotalRips = 5000
+        let maxRipNets = 80
         let mutable totalRips = 0
 
         let ripUpAndReroute (nid: NetId) (goal: Coord) (blockers: NetId list) : Result<NetId list, CompileError> =
@@ -723,7 +729,7 @@ module PipelineWL =
                         match cellsByNet.TryGetValue n with
                         | true, cells -> cells |> Seq.forall (fun (c, _) -> not (tapSources.Contains c))
                         | _ -> false)
-                    |> Seq.truncate 30
+                    |> Seq.truncate maxRipNets
                     |> List.ofSeq
 
                 // 撤去。タップ元を含むネットは ripUpEdge が false を返すのでスキップ。
