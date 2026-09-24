@@ -111,9 +111,27 @@ module PipelineWL =
                 { Gate = g
                   Coord = { X = gateX0 + (col - minCol) * pitchX; Y = 2 + (row - minRow) * pitchY }
                   Dir = E })
+        // 外部入力ピンは左端の列に並べる。ただしクロックだけは DFF 群の重心近くに置く:
+        // 左端からだと DFF までの距離差がそのままクロックスキューになるため
+        // (sm83_full の行優先配置で skew 494〜578、hold 違反の許容は約 316)。
+        // 重心はゲート格子の隙間 (ピッチの半分ずらし) に取り、ゲートや終端と重ならないようにする。
+        let dffs = placed |> List.filter (fun p -> p.Gate.Kind = Dff)
+        let clockPin =
+            match nl.ClockNet, dffs with
+            | Some clkNet, _ :: _ ->
+                let cx = dffs |> List.averageBy (fun p -> float p.Coord.X) |> int
+                let cy = dffs |> List.averageBy (fun p -> float p.Coord.Y) |> int
+                let snap (v: int) (pitch: int) (origin: int) =
+                    origin + ((v - origin) / pitch) * pitch + pitch / 2
+                Some (clkNet, { X = snap cx pitchX gateX0; Y = snap cy pitchY 2 })
+            | _ -> None
         let pins =
             nl.PrimaryInputs
             |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
+            |> List.map (fun (netId, c) ->
+                match clockPin with
+                | Some (clkNet, cc) when clkNet = netId -> netId, cc
+                | _ -> netId, c)
             |> Map.ofList
         placed, pins
 
@@ -181,6 +199,15 @@ module PipelineWL =
         // タップ元セル (分岐の読み出し元)。クロック均等化のリップアップ対象から除外する。
         let tapSources = System.Collections.Generic.HashSet<Coord>()
 
+        // タップ禁止半径と、その対象となる終端群 (0 なら制限なし)。
+        // クロック配線で使う: タップが終端の直前まで寄ると専有部分 (リーフ edge) が
+        // 1〜3 セルしか残らず、スキュー均等化のバンプを 1 つも打てなくなる。
+        // 自分のゴールだけでなく「すべてのクロック終端」の近傍を禁止する。
+        // 後から配線する枝が先の枝の終端手前にタップすると、その枝の専有部分を奪うため。
+        // バンプは 1 か所で 2h (h ≤ 512) 伸ばせるので、数セルの直線区間があれば足りる。
+        let mutable tapGuard = 0
+        let mutable tapGuardPoints : Coord list = []
+
         // ネット → タップ可能セル (Cross 化されたセルは除外していく)
         let netCells = System.Collections.Generic.Dictionary<NetId, ResizeArray<Coord>>()
         let addNetCell n c =
@@ -199,7 +226,16 @@ module PipelineWL =
                 | _ -> blockedCount.[n] <- 1
             let tapCells =
                 match netCells.TryGetValue netId with
-                | true, l -> List.ofSeq l
+                | true, l ->
+                    let cells = List.ofSeq l
+                    if tapGuard <= 0 then cells
+                    else
+                        let farEnough (t: Coord) =
+                            tapGuardPoints
+                            |> List.forall (fun g -> abs (t.X - g.X) + abs (t.Y - g.Y) >= tapGuard)
+                        match cells |> List.filter farEnough with
+                        | [] -> cells   // 候補が消えるなら制限しない (接続を優先)
+                        | filtered -> filtered
                 | _ -> []
             let seeds =
                 if tapCells.IsEmpty then
@@ -599,6 +635,9 @@ module PipelineWL =
                             let leafEdge =
                                 path |> List.skipWhile (fun (c, _) -> ownerCount.[c] > 1)
                             let added, edge' = padEdge netId leafEdge need
+                            let g = fst (List.last path)
+                            eprintfn "[skew] 終端 (%d,%d): パス長 %d / 目標 %d / 必要 %d / バンプ追加 %d / リーフ edge %d セル"
+                                g.X g.Y (List.length path) tMax need added (List.length leafEdge)
                             if added >= need then Ok ()
                             else
                                 // バンプで不足 → リーフ edge を撤去し、幹の任意点から
@@ -627,6 +666,8 @@ module PipelineWL =
                                         |> Option.map (fun p -> p, target))
                                     |> function
                                        | None ->
+                                           eprintfn "[skew] 終端 (%d,%d): 指定長 %d/%d での引き直しも失敗 (タップ候補 %d 個)"
+                                               goal.X goal.Y tMax (tMax - 1) tapCandidates.Length
                                            restoreEdge ()
                                            Error failure
                                        | Some (newPath, _) ->
@@ -668,6 +709,8 @@ module PipelineWL =
         // 全ゲートの全入力終端を順に配線 (短いネット優先で輻輳軽減)。
         // routeOne が輻輳失敗した場合は Rip-up & reroute (残課題 2): そのネットの
         // bbox 内の先行ネットを最大 10 個撤去して再ルーティングする。
+        // クロック終端の手前に残す専有部分の長さ (バンプを打つ余地)
+        let clockTapGuard = 12
         let routeSw = System.Diagnostics.Stopwatch.StartNew()
         let terminals =
             placed |> List.collect (fun p -> fst (gateTerminals p))
@@ -683,8 +726,12 @@ module PipelineWL =
                 | Dff, (clkNet :: _) -> [ clkNet, toward p.Coord S ]
                 | _ -> [])
         let clockNetIds = clockTerminals |> List.map fst |> Set.ofList
-        let clockResult =
-            eprintfn "[clock] 終端 %d 本の配線を開始" clockTerminals.Length
+        // クロック終端をまとめて配線する。guard > 0 なら終端近傍でのタップを禁止して
+        // スキュー均等化用の専有部分を残す。失敗したら呼び出し側が guard=0 で引き直す。
+        let routeClockTerminals (guard: int) : Result<unit, CompileError> =
+            eprintfn "[clock] 終端 %d 本の配線を開始 (タップ禁止半径 %d)" clockTerminals.Length guard
+            tapGuard <- guard
+            tapGuardPoints <- if guard > 0 then clockTerminals |> List.map snd else []
             let mutable cr : Result<unit, CompileError> = Ok ()
             let mutable clockDone = 0
             for (nid, goal) in clockTerminals do
@@ -692,15 +739,39 @@ module PipelineWL =
                 match routeOne nid goal with
                 | Ok () -> ()
                 | Error _ ->
-                    eprintfn "[clock] 配線失敗: NetId %A (%d/%d) — 最終的に RoutingCongestion で終わる" nid (clockDone + 1) clockTerminals.Length
-                    cr <- Error (RoutingCongestion nid)
+                    eprintfn "[clock] 配線失敗: NetId %A (%d/%d)" nid (clockDone + 1) clockTerminals.Length
+                    match cr with
+                    | Ok () -> cr <- Error (RoutingCongestion nid)   // 最初の失敗を記録する
+                    | Error _ -> ()
                 clockDone <- clockDone + 1
                 if sw.Elapsed.TotalSeconds >= 10.0 then
                     eprintfn "[clock] 遅い終端: NetId %A %.0f s (%d/%d)" nid sw.Elapsed.TotalSeconds clockDone clockTerminals.Length
                 if clockDone % 20 = 0 then
                     eprintfn "[clock] %d/%d 本 %d s" clockDone clockTerminals.Length (int routeSw.Elapsed.TotalSeconds)
             eprintfn "[clock] 配線完了 %d s" (int routeSw.Elapsed.TotalSeconds)
+            tapGuard <- 0
+            tapGuardPoints <- []
             cr
+
+        let clockResult =
+            let savedOcc = occ
+            let savedTaps = tapSources |> List.ofSeq
+            match routeClockTerminals clockTapGuard with
+            | Ok () -> Ok ()
+            | Error e when clockTapGuard > 0 ->
+                // タップ禁止で配線できない場合は制限なしでやり直す (接続を優先し、
+                // スキューは均等化できなければ WARN で続行する)
+                eprintfn "[clock] タップ禁止半径 %d では配線できず (%A) — 制限なしで引き直す" clockTapGuard e
+                occ <- savedOcc
+                tapSources.Clear ()
+                for c in savedTaps do tapSources.Add c |> ignore
+                netCells.Clear ()
+                for KeyValue (c, cell) in occ do
+                    match cell with
+                    | OccWire (n, _, true) -> addNetCell n c
+                    | _ -> ()
+                routeClockTerminals 0
+            | Error e -> Error e
             |> Result.bind (fun () ->
                 match balanceClocks () with
                 | Ok x -> Ok x
