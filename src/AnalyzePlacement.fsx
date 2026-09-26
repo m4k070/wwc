@@ -3,8 +3,13 @@
 //
 // 使い方:
 //   dotnet fsi src/AnalyzePlacement.fsx <circuit> [--pitch X Y] [--margin N] [--lcut N]
+//                                       [--place rowmajor|anneal] [--moves N] [--seed N]
+//                                       [--backward P] [--t0 T] [--t1 T]
 //     <circuit>  verilog/<circuit>.json を読む (例: sm83_subset)
 //     --pitch    配置ピッチを固定 (省略時は PipelineWL.placeWL の自動決定)
+//     --place    配置戦略 (既定 rowmajor)。anneal = アーク距離のアニーリング最適化
+//     --moves / --seed / --backward / --t0 / --t1
+//                anneal のパラメータ (既定は GatePlacement.defaultAnnealConfig)
 //     --margin   切断密度の容量に数える探索マージン (既定 960 = PipelineWL の上限)
 //     --lcut     ローカル切断密度 (tile 境界跨越) のタイル辺長。例: 64 (省略時は出さない)
 //     --tile     タイル別需要予測 (L字直接配線) も出す。例: 64 (省略時は出さない)
@@ -40,9 +45,16 @@ let RoutedOccupancyReference = 0.7987
 /// この値を超える配置は「subset より詰まったグリッド」になる。
 let RoutedNeedRatio = 1407487.0 / 1347822.0
 
+/// CLI で選ぶ配置戦略。anneal のパラメータは個別オプションで上書きする。
+type PlaceChoice =
+    | PlaceRowMajor
+    | PlaceAnneal
+
 type Options =
     { Circuit: string
       Pitch: (int * int) option
+      Place: PlaceChoice
+      Anneal: GatePlacement.AnnealConfig
       Margin: int
       Lcut: int option
       Tile: int option }
@@ -84,10 +96,38 @@ let parseArgs (args: string list) : Result<Options, string> =
             | true, v when v > 0 -> go { opts with Tile = Some v } tail
             | _ -> Error (sprintf "--tile には正の整数が必要: %s" n)
         | "--tile" :: rest -> Error "--tile の引数が足りない"
+        | "--place" :: "rowmajor" :: tail -> go { opts with Place = PlaceRowMajor } tail
+        | "--place" :: "anneal" :: tail -> go { opts with Place = PlaceAnneal } tail
+        | "--place" :: v :: _ -> Error (sprintf "--place は rowmajor|anneal: %s" v)
+        | "--moves" :: n :: tail ->
+            match Int32.TryParse n with
+            | true, v when v >= 0 -> go { opts with Anneal = { opts.Anneal with Moves = v } } tail
+            | _ -> Error (sprintf "--moves には 0 以上の整数が必要: %s" n)
+        | "--seed" :: n :: tail ->
+            match UInt64.TryParse n with
+            | true, v -> go { opts with Anneal = { opts.Anneal with Seed = v } } tail
+            | _ -> Error (sprintf "--seed には 0 以上の整数が必要: %s" n)
+        | "--backward" :: p :: tail ->
+            match Double.TryParse (p, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+            | true, v when v >= 0.0 -> go { opts with Anneal = { opts.Anneal with BackwardPenalty = v } } tail
+            | _ -> Error (sprintf "--backward には 0 以上の数が必要: %s" p)
+        | "--t0" :: t :: tail ->
+            match Double.TryParse (t, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+            | true, v when v > 0.0 -> go { opts with Anneal = { opts.Anneal with InitialTemperature = v } } tail
+            | _ -> Error (sprintf "--t0 には正の数が必要: %s" t)
+        | "--t1" :: t :: tail ->
+            match Double.TryParse (t, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+            | true, v when v > 0.0 -> go { opts with Anneal = { opts.Anneal with FinalTemperature = v } } tail
+            | _ -> Error (sprintf "--t1 には正の数が必要: %s" t)
+        | ("--place" | "--moves" | "--seed" | "--backward" | "--t0" | "--t1") as o :: [] ->
+            Error (sprintf "%s の引数が足りない" o)
         | arg :: _ when arg.StartsWith "--" -> Error (sprintf "不明なオプション: %s" arg)
         | name :: tail when opts.Circuit = "" -> go { opts with Circuit = name } tail
         | extra :: _ -> Error (sprintf "余分な引数: %s" extra)
-    match go { Circuit = ""; Pitch = None; Margin = 960; Lcut = None; Tile = None } args with
+    let defaults =
+        { Circuit = ""; Pitch = None; Place = PlaceRowMajor; Anneal = GatePlacement.defaultAnnealConfig
+          Margin = 960; Lcut = None; Tile = None }
+    match go defaults args with
     | Ok opts when opts.Circuit = "" -> Error "回路名が必要 (例: sm83_subset)"
     | result -> result
 
@@ -419,17 +459,50 @@ let analyze (opts: Options) : int =
             eprintfn "FRONTEND ERROR: %A" e
             1
         | Ok nl ->
-            let placed, pins =
+            let px, py =
                 match opts.Pitch with
-                | Some (px, py) -> PipelineWL.placeWLWithPitch px py nl
-                | None -> PipelineWL.placeWL nl
+                | Some p -> p
+                | None ->
+                    // 自動ピッチは placeWL の決定をそのまま使う (配置結果から逆算)
+                    match inferPitch (fst (PipelineWL.placeWL nl)) with
+                    | Ok p -> p
+                    | Error msg -> failwithf "PITCH ERROR: %s" msg
+            let strategy =
+                match opts.Place with
+                | PlaceRowMajor -> GatePlacement.RowMajor
+                | PlaceAnneal -> GatePlacement.Annealed opts.Anneal
+            let sw = Diagnostics.Stopwatch.StartNew ()
+            match PipelineWL.placeWLWithStrategy strategy px py nl with
+            | Error e ->
+                eprintfn "PLACEMENT ERROR: %A" e
+                1
+            | Ok placement ->
+            let elapsed = sw.Elapsed.TotalSeconds
+            let placed, pins = placement.Placed, placement.Pins
+            match placement.Annealing with
+            | None -> printfn "[place] rowmajor (%.2f 秒)" elapsed
+            | Some o ->
+                let c = opts.Anneal
+                printfn "[place] anneal: moves=%s seed=%d T0=%g T1=%g backward=%g (%.2f 秒, 受理 %s)"
+                    (c.Moves.ToString "N0") c.Seed c.InitialTemperature c.FinalTemperature c.BackwardPenalty
+                    elapsed (o.AcceptedMoves.ToString "N0")
+                printfn "[place] 最適化コスト (ピン込みアーク距離%s): %s → %s セル (%.1f%%)"
+                    (if c.BackwardPenalty > 0.0 then " + 逆行ペナルティ" else "")
+                    ((GatePlacement.costToCells o.InitialCost).ToString "N0")
+                    ((GatePlacement.costToCells o.BestCost).ToString "N0")
+                    (100.0 * float o.BestCost / float (max 1L o.InitialCost))
             match placementBoundingBox placed pins with
             | Error msg ->
                 eprintfn "PLACEMENT ERROR: %s" msg
                 1
             | Ok (width, height) ->
+                let placeLabel =
+                    match opts.Place with
+                    | PlaceRowMajor -> "rowmajor"
+                    | PlaceAnneal -> "anneal"
                 let pitchLabel =
-                    opts.Pitch |> Option.map (fun (x, y) -> sprintf "%dx%d" x y) |> Option.defaultValue "auto"
+                    (opts.Pitch |> Option.map (fun (x, y) -> sprintf "%dx%d" x y) |> Option.defaultValue "auto")
+                    + ", " + placeLabel
                 let metrics = collectNetTerminals placed pins |> measureNets
                 printfn "[analyze] %s: gates=%d (DFF %d), PI=%d, PO=%d"
                     opts.Circuit
@@ -466,7 +539,7 @@ let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/AnalyzePlacement.fsx <circuit> [--pitch X Y] [--margin N] [--lcut N] [--tile N]"
+        eprintfn "使い方: dotnet fsi src/AnalyzePlacement.fsx <circuit> [--pitch X Y] [--margin N] [--lcut N] [--tile N] [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P] [--t0 T] [--t1 T]"
         2
     | Ok opts -> analyze opts
 

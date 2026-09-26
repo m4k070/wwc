@@ -15,6 +15,7 @@ module Route =
         | RoutingCongestion of NetId
         | TimingViolation of NetId * expected: int<gen> * actual: int<gen>
         | ClockSkewUnresolved of NetId * residual: int
+        | InvalidPlacementConfig of string
 
     /// 1 本の配線。長さ (= Path のセル数) がそのまま遅延になる。
     /// Consumer は、この Wire を消費するゲートの Output NetId。

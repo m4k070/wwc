@@ -1426,6 +1426,27 @@ module WlCounterTest =
     let private jsonPath =
         System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "counter4.json")
 
+    /// コンパイル済み counter4 をクロック駆動し (初期値 0 か, 1..18 を mod 16 で数えるか) を返す。
+    /// 配置戦略を変えた場合 (WlPlacementTest) も同じ検証を使う。
+    let verifyCounting
+        (qBits: int list)
+        (grid: LGrid, placed: WlPlaced list, pins: Map<NetId, Coord>)
+        : bool * bool =
+        let outOf n =
+            placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
+        let clkPin = pins |> Map.toList |> List.head |> snd
+        let value g =
+            qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
+            |> List.sum
+        let mutable g = fst (settle 2000 grid)   // 初期収束 (clk=0)
+        let init0 = value g = 0
+        let mutable ok = true
+        for k in 1 .. 18 do
+            g <- fst (settle 2000 (setPin clkPin true g))
+            g <- fst (settle 2000 (setPin clkPin false g))
+            if value g <> k % 16 then ok <- false
+        init0, ok
+
     let runAll () : (string * bool) list =
         if not (System.IO.File.Exists jsonPath) then
             [ "WL-CNT: counter4.json present", false ]
@@ -1439,20 +1460,8 @@ module WlCounterTest =
             | Error e ->
                 printfn "  WL_CNT_ERR: %A" e
                 [ "WL-CNT: compile succeeds", false ]
-            | Ok (grid, placed, pins) ->
-                let outOf n =
-                    placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
-                let clkPin = pins |> Map.toList |> List.head |> snd
-                let value g =
-                    qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
-                    |> List.sum
-                let mutable g = fst (settle 2000 grid)   // 初期収束 (clk=0)
-                let init0 = value g = 0
-                let mutable ok = true
-                for k in 1 .. 18 do
-                    g <- fst (settle 2000 (setPin clkPin true g))
-                    g <- fst (settle 2000 (setPin clkPin false g))
-                    if value g <> k % 16 then ok <- false
+            | Ok compiled ->
+                let init0, ok = verifyCounting qBits compiled
                 [ "WL-CNT: compile succeeds",            true
                   "WL-CNT: initial value 0",             init0
                   "WL-CNT: counts 1..18 mod 16 (wrap)",  ok ]
@@ -1472,6 +1481,43 @@ module WlReg8Test =
     let private jsonPath =
         System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "reg8.json")
 
+    /// コンパイル済み reg8 に 4 値を書き込み・読み出して (初期値 0 か, 全値一致か) を返す。
+    /// 配置戦略を変えた場合 (WlPlacementTest) も同じ検証を使う。
+    let verifyWriteRead
+        (qBits: int list)
+        (grid: LGrid, placed: WlPlaced list, pins: Map<NetId, Coord>)
+        : bool * bool =
+        let outOf n =
+            placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
+        let clkPin = pins.[NetId 2]
+        let value g =
+            qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
+            |> List.sum
+
+        // 初期収束 (clk=0, d=0)
+        let mutable g = fst (settle 2000 grid)
+        let init0 = value g = 0
+
+        // 値 0xAB を書き込む (d[0..7] = 1,1,0,1,0,1,0,1)
+        let setData (v: int) (gr: LGrid) =
+            let mutable gr = gr
+            for i in 0 .. 7 do
+                let pin = pins.[NetId (3 + i)]
+                gr <- setPin pin ((v >>> i) &&& 1 = 1) gr
+            gr
+        let mutable ok = true
+
+        // 書き込み & クロック実行 → 値を確認
+        // 注: データを先に伝播させてからクロックをアサートしないと、
+        // クロックがデータより先に DFF に到達し古い値をキャプチャする (ホールド違反)。
+        for (writeVal, expected) in [0xAB; 0x55; 0x00; 0xFF] |> List.map (fun v -> v, v) do
+            g <- setData writeVal g
+            g <- fst (settle 2000 g)                          // データ伝播待ち
+            g <- fst (settle 2000 (setPin clkPin true g))     // クロックアサート
+            g <- fst (settle 2000 (setPin clkPin false g))    // クロックデアサート
+            if value g <> expected then ok <- false
+        init0, ok
+
     let runAll () : (string * bool) list =
         if not (System.IO.File.Exists jsonPath) then
             [ "WL-REG8: reg8.json present", false ]
@@ -1485,37 +1531,8 @@ module WlReg8Test =
             | Error e ->
                 printfn "  WL_REG8_ERR: %A" e
                 [ "WL-REG8: compile succeeds", false ]
-            | Ok (grid, placed, pins) ->
-                let outOf n =
-                    placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
-                let clkPin = pins.[NetId 2]
-                let value g =
-                    qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
-                    |> List.sum
-
-                // 初期収束 (clk=0, d=0)
-                let mutable g = fst (settle 2000 grid)
-                let init0 = value g = 0
-
-                // 値 0xAB を書き込む (d[0..7] = 1,1,0,1,0,1,0,1)
-                let setData (v: int) (gr: LGrid) =
-                    let mutable gr = gr
-                    for i in 0 .. 7 do
-                        let pin = pins.[NetId (3 + i)]
-                        gr <- setPin pin ((v >>> i) &&& 1 = 1) gr
-                    gr
-                let mutable ok = true
-
-                // 書き込み & クロック実行 → 値を確認
-                // 注: データを先に伝播させてからクロックをアサートしないと、
-                // クロックがデータより先に DFF に到達し古い値をキャプチャする (ホールド違反)。
-                for (writeVal, expected) in [0xAB; 0x55; 0x00; 0xFF] |> List.map (fun v -> v, v) do
-                    g <- setData writeVal g
-                    g <- fst (settle 2000 g)                          // データ伝播待ち
-                    g <- fst (settle 2000 (setPin clkPin true g))     // クロックアサート
-                    g <- fst (settle 2000 (setPin clkPin false g))    // クロックデアサート
-                    if value g <> expected then ok <- false
-
+            | Ok compiled ->
+                let init0, ok = verifyWriteRead qBits compiled
                 [ "WL-REG8: compile succeeds",     true
                   "WL-REG8: initial value 0",      init0
                   "WL-REG8: write/read 4 values",  ok ]
@@ -2232,3 +2249,177 @@ module NetlistSimTest =
 
     let runAll () : (string * bool) list =
         errorTests () @ counterTest () @ alu4Test () @ sm83MinTest () @ largeCircuitCompileTests ()
+
+
+// ---------------------------------------------------------------------
+// WL-PLACE: 配置最適化 (GatePlacement のアニーリング)
+//   * 最適化後も割り当てが有効 / コスト ≤ 初期 / 同シードで決定的 / 増分評価 = 全再計算
+//   * anneal 配置で配線・シミュレーションしても counter4 / reg8 の論理テストが通る
+// ---------------------------------------------------------------------
+module WlPlacementTest =
+    open Domain
+    open Netlist
+    open GatePlacement
+
+    let private verilogPath (name: string) =
+        System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", name + ".json")
+
+    /// アルゴリズム検証用の中規模回路 (287 ゲート)。配線はしないので速い。
+    let private unitCircuit = "sm83_min"
+
+    /// 単体テストのピッチ (値自体に意味はない。スロット座標の尺度を与えるだけ)。
+    let private unitPitchX, unitPitchY = 20, 14
+
+    /// 単体テストの手数。数百ゲートでコストが十分下がり、1 秒未満で終わる規模。
+    let private unitMoves = 200_000
+
+    /// 増分評価の検証: 高温で「数百回の交換」をほぼ全部受理させ、最終状態のコストを比べる。
+    let private incrementalMoves = 800
+    let private incrementalMinAccepted = 300
+
+    /// 単体テストの格子に足す余剰行。空きスロットへの移動 (占有者なしの交換) も検証するため。
+    let private spareRows = 2
+
+    /// E2E (配線 + シミュレーション) 用の手数。小回路なので少なくても十分最適化される。
+    let private e2eMoves = 100_000
+
+    let private unitConfig : AnnealConfig =
+        { defaultAnnealConfig with Moves = unitMoves; Seed = 7UL }
+
+    type private UnitProblem =
+        { Grid: SlotGrid
+          GateCount: int
+          Arcs: Arc[] }
+
+    let private loadUnitProblem () : Result<UnitProblem, string> =
+        let path = verilogPath unitCircuit
+        if not (System.IO.File.Exists path) then Error (sprintf "%s がない" path)
+        else
+            match Pipeline.frontend (System.IO.File.ReadAllText path) with
+            | Error e -> Error (sprintf "frontend: %A" e)
+            | Ok nl ->
+                let n = nl.Gates.Length
+                let square = squareSlotGrid n { X = 12; Y = 2 } unitPitchX unitPitchY
+                let grid = { square with Rows = square.Rows + spareRows }
+                let pins =
+                    nl.PrimaryInputs
+                    |> List.mapi (fun i net -> net, { X = 0; Y = 2 + i * unitPitchY })
+                    |> Map.ofList
+                Ok { Grid = grid; GateCount = n; Arcs = buildArcs nl pins }
+
+    let private annealUnit (p: UnitProblem) (cfg: AnnealConfig) =
+        anneal cfg p.Grid p.GateCount p.Arcs (rowMajorAssignment p.GateCount)
+
+    let private algorithmTests () : (string * bool) list =
+        match loadUnitProblem () with
+        | Error msg -> [ sprintf "WL-PLACE: %s netlist loads (%s)" unitCircuit msg, false ]
+        | Ok p ->
+            match annealUnit p unitConfig, annealUnit p unitConfig with
+            | Error e, _ | _, Error e ->
+                [ sprintf "WL-PLACE: anneal runs (%s)" (describeConfigError e), false ]
+            | Ok first, Ok second ->
+                let valid =
+                    match validateAssignment p.Grid p.GateCount first.Best with
+                    | Ok () -> true
+                    | Error msg ->
+                        printfn "  WL_PLACE_INVALID: %s" msg
+                        false
+                let recomputedBest = totalCost p.Grid p.Arcs unitConfig.BackwardPenalty first.Best
+                let improved = first.BestCost <= first.InitialCost && recomputedBest = first.BestCost
+                let deterministic = first.Best = second.Best && first.BestCost = second.BestCost
+                // 余剰行 (行優先の初期解では空き) にゲートが移っていれば、空きへの移動が働いている
+                let spareStart = (p.Grid.Rows - spareRows) * p.Grid.Columns
+                let usesSpare = first.Best |> Array.exists (fun s -> s >= spareStart)
+                [ sprintf "WL-PLACE: %s annealed assignment is valid (%d gates, %d slots)"
+                      unitCircuit p.GateCount (slotCount p.Grid), valid
+                  sprintf "WL-PLACE: cost %d -> %d cells (<= initial, matches full recompute)"
+                      (int64 (costToCells first.InitialCost)) (int64 (costToCells first.BestCost)), improved
+                  "WL-PLACE: same seed gives same assignment", deterministic
+                  "WL-PLACE: gates move into empty slots", usesSpare ]
+
+    let private incrementalTests () : (string * bool) list =
+        match loadUnitProblem () with
+        | Error msg -> [ sprintf "WL-PLACE: %s netlist loads (%s)" unitCircuit msg, false ]
+        | Ok p ->
+            [ for penalty in [ 0.0; 0.5 ] do
+                // 高温で温度をほぼ一定にし、交換を大量に受理させる
+                let cfg =
+                    { Seed = 11UL
+                      Moves = incrementalMoves
+                      InitialTemperature = 1000.0
+                      FinalTemperature = 500.0
+                      BackwardPenalty = penalty }
+                match annealUnit p cfg with
+                | Error e -> yield sprintf "WL-PLACE: incremental anneal runs (%s)" (describeConfigError e), false
+                | Ok o ->
+                    let full = totalCost p.Grid p.Arcs penalty o.Last
+                    let ok = o.AcceptedMoves >= incrementalMinAccepted && full = o.LastCostIncremental
+                    if not ok then
+                        printfn "  WL_PLACE_INCR: accepted=%d incremental=%d full=%d"
+                            o.AcceptedMoves o.LastCostIncremental full
+                    yield sprintf "WL-PLACE: incremental cost = full recompute after %d accepted moves (backward=%g)"
+                              o.AcceptedMoves penalty, ok ]
+
+    let private configErrorTests () : (string * bool) list =
+        match loadUnitProblem () with
+        | Error msg -> [ sprintf "WL-PLACE: %s netlist loads (%s)" unitCircuit msg, false ]
+        | Ok p ->
+            let rejected (cfg: AnnealConfig) =
+                match annealUnit p cfg with
+                | Error _ -> true
+                | Ok _ -> false
+            let duplicated = Array.create p.GateCount 0
+            let rejectsDuplicate =
+                match anneal unitConfig p.Grid p.GateCount p.Arcs duplicated with
+                | Error (InvalidInitialAssignment _) -> true
+                | _ -> false
+            [ "WL-PLACE: rejects invalid config (moves<0, T<=0, T1>T0, penalty<0)",
+              rejected { unitConfig with Moves = -1 }
+              && rejected { unitConfig with InitialTemperature = 0.0 }
+              && rejected { unitConfig with FinalTemperature = unitConfig.InitialTemperature * 2.0 }
+              && rejected { unitConfig with BackwardPenalty = -1.0 }
+              "WL-PLACE: rejects initial assignment with duplicate slots", rejectsDuplicate ]
+
+    /// RowMajor 戦略は従来の placeWLWithPitch と同一の配置を返す (既定動作を変えない)。
+    let private rowMajorCompatTests () : (string * bool) list =
+        let path = verilogPath unitCircuit
+        match Pipeline.frontend (System.IO.File.ReadAllText path) with
+        | Error e -> [ sprintf "WL-PLACE: frontend (%A)" e, false ]
+        | Ok nl ->
+            let legacy = PipelineWL.placeWLWithPitch unitPitchX unitPitchY nl
+            match PipelineWL.placeWLWithStrategy RowMajor unitPitchX unitPitchY nl with
+            | Error e -> [ sprintf "WL-PLACE: RowMajor placement (%A)" e, false ]
+            | Ok p -> [ "WL-PLACE: RowMajor strategy equals placeWLWithPitch", (p.Placed, p.Pins) = legacy ]
+
+    let private e2eTests () : (string * bool) list =
+        let strategy = Annealed { defaultAnnealConfig with Moves = e2eMoves }
+        [ for circuit, verify in
+              [ "counter4", WlCounterTest.verifyCounting
+                "reg8", WlReg8Test.verifyWriteRead ] do
+            let path = verilogPath circuit
+            if not (System.IO.File.Exists path) then
+                yield sprintf "WL-PLACE: %s.json present" circuit, false
+            else
+                let json = System.IO.File.ReadAllText path
+                let qBits =
+                    match Pipeline.parseYosysJson json with
+                    | Ok m -> m.Ports.["q"].Bits
+                    | Error _ -> []
+                match PipelineWL.compileWLWithStrategy strategy json with
+                | Error e ->
+                    printfn "  WL_PLACE_E2E_ERR (%s): %A" circuit e
+                    yield sprintf "WL-PLACE: %s compiles with annealed placement" circuit, false
+                | Ok ((_, placed, _) as compiled) ->
+                    // 配置が行優先から実際に変わっていること (でなければ E2E の意味がない)
+                    let rowMajorCoords =
+                        match Pipeline.frontend json with
+                        | Ok nl -> PipelineWL.placeWLWithPitch 24 16 nl |> fst |> List.map (fun p -> p.Coord)
+                        | Error _ -> []
+                    let moved = (placed |> List.map (fun p -> p.Coord)) <> rowMajorCoords
+                    let init0, ok = verify qBits compiled
+                    yield sprintf "WL-PLACE: %s annealed placement differs from row-major" circuit, moved
+                    yield sprintf "WL-PLACE: %s annealed initial value 0" circuit, init0
+                    yield sprintf "WL-PLACE: %s annealed logic test passes" circuit, ok ]
+
+    let runAll () : (string * bool) list =
+        algorithmTests () @ incrementalTests () @ configErrorTests () @ rowMajorCompatTests () @ e2eTests ()

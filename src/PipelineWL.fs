@@ -65,21 +65,30 @@ module PipelineWL =
         elif nGates <= 1000 then 20, 14
         else 16, 12
 
-    /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版)。
-    let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
-        let n = max 1 nl.Gates.Length
-        let ncols = int (ceil (sqrt (float n)))
+    /// ゲート格子の左上 (外部入力ピン列 X=0 との間に配線用の余白を取る)。
+    let private gateOrigin : Coord = { X = gateX0; Y = 2 }
+
+    /// 外部入力ピン (クロックを含む) の左端列の座標。i 番目のピンは Y = 2 + i*pitchY。
+    let private leftEdgePins (pitchY: int) (nl: Netlist) : Map<NetId, Coord> =
+        nl.PrimaryInputs
+        |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
+        |> Map.ofList
+
+    /// 割り当て (ゲート → スロット) から配置とピン座標を作る。
+    /// クロックピンは (最適化後の) DFF 群の重心に置く: 左端からだと DFF までの距離差が
+    /// そのままクロックスキューになるため (sm83_full の行優先配置で skew 494〜578、
+    /// hold 違反の許容は約 316)。重心はゲート格子の隙間 (ピッチの半分ずらし) に取り、
+    /// ゲートや終端と重ならないようにする。
+    let private placeFromAssignment
+        (grid: GatePlacement.SlotGrid)
+        (nl: Netlist)
+        (assignment: GatePlacement.Assignment)
+        : WlPlaced list * Map<NetId, Coord> =
         let placed =
             nl.Gates |> List.mapi (fun i g ->
-                let col = i % ncols
-                let row = i / ncols
                 { Gate = g
-                  Coord = { X = gateX0 + col * pitchX; Y = 2 + row * pitchY }
+                  Coord = GatePlacement.slotCoord grid assignment.[i]
                   Dir = E })
-        // 外部入力ピンは左端の列に並べる。ただしクロックだけは DFF 群の重心近くに置く:
-        // 左端からだと DFF までの距離差がそのままクロックスキューになるため
-        // (sm83_full の行優先配置で skew 494〜578、hold 違反の許容は約 316)。
-        // 重心はゲート格子の隙間 (ピッチの半分ずらし) に取り、ゲートや終端と重ならないようにする。
         let dffs = placed |> List.filter (fun p -> p.Gate.Kind = Dff)
         let clockPin =
             match nl.ClockNet, dffs with
@@ -88,17 +97,53 @@ module PipelineWL =
                 let cy = dffs |> List.averageBy (fun p -> float p.Coord.Y) |> int
                 let snap (v: int) (pitch: int) (origin: int) =
                     origin + ((v - origin) / pitch) * pitch + pitch / 2
-                Some (clkNet, { X = snap cx pitchX gateX0; Y = snap cy pitchY 2 })
+                Some (clkNet, { X = snap cx grid.PitchX grid.Origin.X; Y = snap cy grid.PitchY grid.Origin.Y })
             | _ -> None
         let pins =
-            nl.PrimaryInputs
-            |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
-            |> List.map (fun (netId, c) ->
+            leftEdgePins grid.PitchY nl
+            |> Map.map (fun netId c ->
                 match clockPin with
-                | Some (clkNet, cc) when clkNet = netId -> netId, cc
-                | _ -> netId, c)
-            |> Map.ofList
+                | Some (clkNet, cc) when clkNet = netId -> cc
+                | _ -> c)
         placed, pins
+
+    /// 配置結果。Annealing は Annealed 戦略のときだけ Some (最適化の前後コスト)。
+    type WlPlacement =
+        { Placed: WlPlaced list
+          Pins: Map<NetId, Coord>
+          Annealing: GatePlacement.AnnealOutcome option }
+
+    /// 配置戦略を指定して配置する。RowMajor は placeWLWithPitch と同一の結果。
+    /// Annealed は行優先を初期解にアーク距離を最小化する (クロックネット除外、
+    /// 外部入力ピンは左端列の固定端子としてコストに含める)。
+    let placeWLWithStrategy
+        (strategy: GatePlacement.PlacementStrategy)
+        (pitchX: int)
+        (pitchY: int)
+        (nl: Netlist)
+        : Result<WlPlacement, CompileError> =
+        let grid = GatePlacement.squareSlotGrid nl.Gates.Length gateOrigin pitchX pitchY
+        let initial = GatePlacement.rowMajorAssignment nl.Gates.Length
+        match strategy with
+        | GatePlacement.RowMajor ->
+            let placed, pins = placeFromAssignment grid nl initial
+            Ok { Placed = placed; Pins = pins; Annealing = None }
+        | GatePlacement.Annealed cfg ->
+            let fixedPins =
+                match nl.ClockNet with
+                | Some clk -> leftEdgePins pitchY nl |> Map.remove clk
+                | None -> leftEdgePins pitchY nl
+            let arcs = GatePlacement.buildArcs nl fixedPins
+            GatePlacement.anneal cfg grid nl.Gates.Length arcs initial
+            |> Result.mapError (GatePlacement.describeConfigError >> InvalidPlacementConfig)
+            |> Result.map (fun outcome ->
+                let placed, pins = placeFromAssignment grid nl outcome.Best
+                { Placed = placed; Pins = pins; Annealing = Some outcome })
+
+    /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版、行優先)。
+    let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
+        let grid = GatePlacement.squareSlotGrid nl.Gates.Length gateOrigin pitchX pitchY
+        placeFromAssignment grid nl (GatePlacement.rowMajorAssignment nl.Gates.Length)
 
     /// 回路規模に応じたピッチで配置する。
     let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
@@ -900,46 +945,71 @@ module PipelineWL =
         | Not | Nand | Dff -> true
         | _ -> false
 
-    /// yosys JSON → WireLevel グリッド (ピッチ指定版)。
+    let private frontendMappable (src: string) : Result<Netlist, CompileError> =
+        frontend src
+        |> Result.bind (fun nl ->
+            match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
+            | Some g -> Error (UnmappableGate g.Kind)
+            | None -> Ok nl)
+
+    /// 配置 → 配線 → グリッド生成 (1 ピッチ分)。
+    let private placeAndRoute
+        (strategy: GatePlacement.PlacementStrategy)
+        (pitchX: int)
+        (pitchY: int)
+        (nl: Netlist)
+        : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
+        placeWLWithStrategy strategy pitchX pitchY nl
+        |> Result.bind (fun p ->
+            routeWL p.Placed p.Pins
+            |> Result.map (fun occ -> emitWL p.Placed p.Pins occ, p.Placed, p.Pins))
+
+    /// yosys JSON → WireLevel グリッド (ピッチ・配置戦略指定版)。
+    let compileWLWithPitchAndStrategy
+        (strategy: GatePlacement.PlacementStrategy)
+        (pitchX: int)
+        (pitchY: int)
+        (src: string)
+        : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
+        frontendMappable src
+        |> Result.bind (placeAndRoute strategy pitchX pitchY)
+
+    /// yosys JSON → WireLevel グリッド (ピッチ指定版、行優先配置)。
     /// 戻り値: (グリッド, 配置, ピン座標)。出力ネットの観測は駆動ゲートのセルで行う。
     let compileWLWithPitch (pitchX: int) (pitchY: int) (src: string)
         : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
-        frontend src
-        |> Result.bind (fun nl ->
-            match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
-            | Some g -> Error (UnmappableGate g.Kind)
-            | None ->
-                let placed, pins = placeWLWithPitch pitchX pitchY nl
-                routeWL placed pins
-                |> Result.map (fun occ -> emitWL placed pins occ, placed, pins))
+        compileWLWithPitchAndStrategy GatePlacement.RowMajor pitchX pitchY src
 
-    /// yosys JSON → WireLevel グリッド。ピッチは回路規模から自動決定し、
+    /// yosys JSON → WireLevel グリッド (配置戦略指定版)。ピッチは回路規模から自動決定し、
     /// 輻輳失敗時はより広いピッチで自動再試行する (pitchSequence)。
+    /// 配置の最適化はピッチごとにやり直す (スロット座標が変わるため)。
+    let compileWLWithStrategy (strategy: GatePlacement.PlacementStrategy) (src: string)
+        : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
+        frontendMappable src
+        |> Result.bind (fun nl ->
+            let startPitch = pitchFor nl.Gates.Length
+            let rec tryPitches (remaining: (int * int) list) =
+                match remaining with
+                | [] -> Error (RoutingCongestion (NetId 0))
+                | (px, py) :: rest ->
+                    match placeAndRoute strategy px py nl with
+                    | Ok compiled -> Ok compiled
+                    | Error (InvalidPlacementConfig _ as e) -> Error e
+                    | Error e ->
+                        match rest with
+                        | [] -> Error e
+                        | _ ->
+                            eprintfn "[pitch] %dx%d 輻輳失敗 (%A) — 広いピッチで再試行" px py e
+                            tryPitches rest
+            let pitches =
+                pitchSequence
+                |> List.skipWhile (fun p -> p <> startPitch)
+            tryPitches pitches)
+
+    /// yosys JSON → WireLevel グリッド (行優先配置)。ピッチは自動決定・自動拡大。
     let compileWL (src: string)
         : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
-        frontend src
-        |> Result.bind (fun nl ->
-            match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
-            | Some g -> Error (UnmappableGate g.Kind)
-            | None ->
-                let startPitch = pitchFor nl.Gates.Length
-                let rec tryPitches (remaining: (int * int) list) =
-                    match remaining with
-                    | [] -> Error (RoutingCongestion (NetId 0))
-                    | (px, py) :: rest ->
-                        let placed, pins = placeWLWithPitch px py nl
-                        match routeWL placed pins with
-                        | Ok occ -> Ok (emitWL placed pins occ, placed, pins)
-                        | Error e ->
-                            match rest with
-                            | [] -> Error e
-                            | _ ->
-                                eprintfn "[pitch] %dx%d 輻輳失敗 (%A) — 広いピッチで再試行" px py e
-                                tryPitches rest
-                let pitches =
-                    pitchSequence
-                    |> List.skipWhile (fun p -> p <> startPitch)
-                tryPitches pitches)
+        compileWLWithStrategy GatePlacement.RowMajor src
 
     /// デバッグ用: LGrid を ASCII ダンプする (構造のみ、レベルは大文字/記号で表現しない)。
     let dumpAscii (g: LGrid) : string =

@@ -3,9 +3,13 @@
 //
 // 使い方:
 //   dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR]
+//                                   [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P]
 //     <circuit>  verilog/<circuit>.json を読む (例: sm83_subset)
 //     --pitch    ピッチ固定 (省略時は compileWL の自動決定 + 輻輳時の自動拡大)
 //     --out      出力先 (既定: routed/)
+//     --place    配置戦略 (既定 rowmajor)。anneal = アーク距離のアニーリング最適化
+//     --moves / --seed / --backward
+//                anneal のパラメータ (既定は GatePlacement.defaultAnnealConfig)
 //
 // 長時間配線 (sm83_subset 約 100 分 / sm83_full 5〜8 時間) はバックグラウンドで:
 //   nohup dotnet fsi src/ExportRouted.fsx sm83_full > routed/sm83_full.log 2>&1 &
@@ -21,10 +25,23 @@ open WwHdl.RoutedArtifact
 
 let repoRoot = Path.GetFullPath (Path.Combine (__SOURCE_DIRECTORY__, ".."))
 
+/// CLI で選ぶ配置戦略。
+type PlaceChoice =
+    | PlaceRowMajor
+    | PlaceAnneal
+
 type Options =
     { Circuit: string
       Pitch: (int * int) option
-      OutDir: string }
+      OutDir: string
+      Place: PlaceChoice
+      /// --place の前後どちらに --moves 等を書いても効くよう、anneal 設定は常に保持する
+      Anneal: GatePlacement.AnnealConfig }
+
+let placementStrategy (opts: Options) : GatePlacement.PlacementStrategy =
+    match opts.Place with
+    | PlaceRowMajor -> GatePlacement.RowMajor
+    | PlaceAnneal -> GatePlacement.Annealed opts.Anneal
 
 let parseArgs (args: string list) : Result<Options, string> =
     let rec go (opts: Options) (rest: string list) =
@@ -35,10 +52,29 @@ let parseArgs (args: string list) : Result<Options, string> =
             | (true, px), (true, py) -> go { opts with Pitch = Some (px, py) } tail
             | _ -> Error (sprintf "--pitch には整数が 2 つ必要: %s %s" x y)
         | "--out" :: dir :: tail -> go { opts with OutDir = Path.GetFullPath dir } tail
+        | "--place" :: "rowmajor" :: tail -> go { opts with Place = PlaceRowMajor } tail
+        | "--place" :: "anneal" :: tail -> go { opts with Place = PlaceAnneal } tail
+        | "--place" :: v :: _ -> Error (sprintf "--place は rowmajor|anneal: %s" v)
+        | "--moves" :: n :: tail ->
+            match Int32.TryParse n with
+            | true, v when v >= 0 -> go { opts with Anneal = { opts.Anneal with Moves = v } } tail
+            | _ -> Error (sprintf "--moves には 0 以上の整数が必要: %s" n)
+        | "--seed" :: n :: tail ->
+            match UInt64.TryParse n with
+            | true, v -> go { opts with Anneal = { opts.Anneal with Seed = v } } tail
+            | _ -> Error (sprintf "--seed には 0 以上の整数が必要: %s" n)
+        | "--backward" :: p :: tail ->
+            match Double.TryParse (p, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+            | true, v when v >= 0.0 -> go { opts with Anneal = { opts.Anneal with BackwardPenalty = v } } tail
+            | _ -> Error (sprintf "--backward には 0 以上の数が必要: %s" p)
+        | ("--place" | "--moves" | "--seed" | "--backward" | "--out") as o :: [] ->
+            Error (sprintf "%s の引数が足りない" o)
         | arg :: _ when arg.StartsWith "--" -> Error (sprintf "不明なオプション: %s" arg)
         | name :: tail when opts.Circuit = "" -> go { opts with Circuit = name } tail
         | extra :: _ -> Error (sprintf "余分な引数: %s" extra)
-    let defaults = { Circuit = ""; Pitch = None; OutDir = Path.Combine (repoRoot, "routed") }
+    let defaults =
+        { Circuit = ""; Pitch = None; OutDir = Path.Combine (repoRoot, "routed"); Place = PlaceRowMajor
+          Anneal = GatePlacement.defaultAnnealConfig }
     match go defaults args with
     | Ok opts when opts.Circuit = "" -> Error "回路名が必要 (例: sm83_subset)"
     | result -> result
@@ -105,12 +141,18 @@ let exportCircuit (opts: Options) : int =
             1
         | Ok ports ->
             let pitchLabel = opts.Pitch |> Option.map (fun (x, y) -> sprintf "%dx%d" x y) |> Option.defaultValue "auto"
-            printfn "[export] %s: compileWL 開始 (pitch=%s, %s)" opts.Circuit pitchLabel (DateTimeOffset.Now.ToString "yyyy-MM-dd HH:mm:ss")
+            let placeLabel =
+                match placementStrategy opts with
+                | GatePlacement.RowMajor -> "rowmajor"
+                | GatePlacement.Annealed c ->
+                    sprintf "anneal moves=%d seed=%d T0=%g T1=%g backward=%g"
+                        c.Moves c.Seed c.InitialTemperature c.FinalTemperature c.BackwardPenalty
+            printfn "[export] %s: compileWL 開始 (pitch=%s, place=%s, %s)" opts.Circuit pitchLabel placeLabel (DateTimeOffset.Now.ToString "yyyy-MM-dd HH:mm:ss")
             let sw = Stopwatch.StartNew ()
             let compiled =
                 match opts.Pitch with
-                | Some (px, py) -> compileWLWithPitch px py json
-                | None -> compileWL json
+                | Some (px, py) -> compileWLWithPitchAndStrategy (placementStrategy opts) px py json
+                | None -> compileWLWithStrategy (placementStrategy opts) json
             match compiled with
             | Error e ->
                 eprintfn "COMPILE ERROR (%.1f 分): %A" sw.Elapsed.TotalMinutes e
@@ -141,7 +183,7 @@ let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR]"
+        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P]"
         2
     | Ok opts -> exportCircuit opts
 
