@@ -2,7 +2,7 @@
   "format": "wwc-golden/1",
   "circuit": "sm83_full",
   "program": "sm83_full_int_halt_wake_di",
-  "sourceSha256": "0538432cc1aab58588ecab0cee54011cb174aadc17e81259dd9ee5db7359bb7d",
+  "sourceSha256": "79c502a112f713280fbc6be5923c7fd7c6c11b86354496eee7454a976e774857",
   "romSha256": "ce384b0b1f3442ab220656abe016b3843a67a2f654201d8649e2ee0579c84934",
   "rstPulses": 2,
   "cycles": [
