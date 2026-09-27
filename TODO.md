@@ -56,8 +56,9 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
    中身がネイティブ CPU への委譲だけのスタブで (`WireLevelCpu.fs:63` にコメントあり)、名前と実体が一致していない。
    CA を gbfs の CPU として実時間で動かすのは 1 周期 0.03〜0.05 秒でも 1 フレームに数分〜十数分かかり非現実的
 8. `web/sm83_mc_*.bin` (2026-06-13 生成) はクロック未接続バグ入りの古い回路のまま — 再生成が必要 (P3 参照)
-9. `placement-hilbert` ブランチ (ローカル + `remotes/origin/placement-hilbert`) はヒルベルト配置の負の結果
-   (クロックスキュー均等化が効かなくなる問題が未解決のまま) の記録として残している。採用しない
+9. `placement-hilbert` ブランチ (ローカル + `remotes/origin/placement-hilbert`) はヒルベルト配置の負の結果の
+   記録として残している。採用しない。理由: 総配線長は約 7% 短くなるのに、sm83_full 28x20 の配線到達点が
+   16,016 → 13,600 端子に下がり、sm83_subset でも面積比 (需要/bbox) が 1.427 → 1.518 に悪化したため
 10. 決定待ち (未解決): プログラム・ROM を `routed/` から `programs/` に分けるか (DESIGN-VERIFY.md §8 Q2)。
     現状も `routed/rom_sm83_full_*.bin` のように配線成果物と混在している
 11. 未着手: B-5 RTL (Verilog) との照合 (`yosys sim -vcd` による VCD 比較)。今回は代わりに公開テスト ROM +
