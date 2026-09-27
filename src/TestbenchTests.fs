@@ -146,6 +146,69 @@ module TestbenchTest =
                             printfn "  TB_SPEC %s: %s" name m
                         yield sprintf "TB-SPEC: %s matches SM83 spec (%d checks)" name checks, mismatches.IsEmpty ]
 
+    /// DAA (0x27) の Pan Docs 仕様どおりの参照実装。RTL (sm83_full.v) の模倣ではなく、
+    /// 仕様書 (加算後: C||A>0x99 で +0x60、H||下位ニブル>0x09 で +0x06。減算後: H で -0x06、C で -0x60。
+    /// いずれも判定は補正前の元の A で行う) から独立に書く
+    let private daaReference (a: int) (f: int) : int * int =
+        let n = (f &&& 0x40) <> 0
+        let h = (f &&& 0x20) <> 0
+        let c = (f &&& 0x10) <> 0
+        let mutable result = a
+        let mutable newC = c
+        if n then
+            if h then result <- (result - 0x06) &&& 0xFF
+            if c then result <- (result - 0x60) &&& 0xFF
+        else
+            if h || (a &&& 0x0F) > 0x09 then result <- (result + 0x06) &&& 0xFF
+            if c || a > 0x99 then
+                result <- (result + 0x60) &&& 0xFF
+                newC <- true
+        let z = result = 0
+        let newF = (if z then 0x80 else 0) ||| (if n then 0x40 else 0) ||| (if newC then 0x10 else 0)
+        result, newF
+
+    /// DAA の全数テスト (A 256 通り × F 上位ニブル 16 通り = 4096 通り)。
+    /// 各ケースを個別の短いプログラム (LD BC,a:f; PUSH BC; POP AF; DAA; HALT) として NetlistSim で実行し、
+    /// daaReference と照合する。RTL の DAA 不具合 (2026-09-27 修正) の回帰テスト
+    let private daaExhaustiveTest () : (string * bool) list =
+        match loadCircuit "sm83_full" with
+        | Error msg -> [ sprintf "TB: sm83_full loads for DAA exhaustive (%s)" msg, false ]
+        | Ok (c, ports) ->
+            match resolveBus ports with
+            | Error e -> [ sprintf "TB: sm83_full bus resolves for DAA exhaustive (%s)" (describeTestbenchError e), false ]
+            | Ok bus ->
+                let sp = 0xDFFE
+                let buildRom (a: int) (f: int) : byte[] =
+                    let rom = Array.create 0x8000 0x76uy
+                    let code =
+                        [| 0x31uy; byte (sp &&& 0xFF); byte (sp >>> 8)   // LD SP,sp
+                           0x01uy; byte f; byte a                        // LD BC,a:f (B=a, C=f)
+                           0xC5uy                                        // PUSH BC
+                           0xF1uy                                        // POP AF (A=a, F=f)
+                           0x27uy                                        // DAA
+                           0x76uy |]                                     // HALT
+                    Array.blit code 0 rom 0x0100 code.Length
+                    rom
+                let cycles = 60
+                let mismatches =
+                    [ for a in 0 .. 255 do
+                        for fHi in 0 .. 15 do
+                            let f = fHi <<< 4
+                            let expectedA, expectedF = daaReference a f
+                            let rom = buildRom a f
+                            match run c ports bus (createMemory rom defaultMemoryConfig) 2 cycles with
+                            | Error e -> yield sprintf "A=%02X F=%02X: netlist error %s" a f (describeTestbenchError e)
+                            | Ok result ->
+                                let gotA = int result.FinalOutputs.["a_out"]
+                                let gotF = int result.FinalOutputs.["f_out"]
+                                if gotA <> expectedA || gotF <> expectedF then
+                                    yield sprintf "A=%02X F=%02X: expected A=%02X F=%02X, got A=%02X F=%02X" a f expectedA expectedF gotA gotF ]
+                for m in mismatches |> List.truncate 20 do
+                    printfn "  TB_DAA: %s" m
+                if mismatches.Length > 20 then
+                    printfn "  TB_DAA: ... ほか %d 件" (mismatches.Length - 20)
+                [ "TB: DAA 全数一致 (A 256 × F 上位ニブル 16 = 4096 通り、Pan Docs 参照関数と照合)", mismatches.IsEmpty ]
+
     let private goldenJsonTest () : (string * bool) list =
         let info : GoldenInfo =
             { GoldenCircuit = "c"; GoldenProgram = "p"; SourceSha256 = "s"; RomSha256 = "r"; RstPulses = 2 }
@@ -162,3 +225,4 @@ module TestbenchTest =
 
     let runAll () : (string * bool) list =
         memoryTests () @ parseTests () @ busTests () @ subsetSmokeTest () @ goldenJsonTest () @ fullSpecProgramTests ()
+        @ daaExhaustiveTest ()
