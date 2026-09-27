@@ -215,6 +215,9 @@ dotnet fsi src/LoadRouted.fsx sm83_subset
 
 - compileWL はピッチを回路規模から自動決定し、輻輳失敗時は自動拡大する (16x12 → 20x14)。`--pitch X Y` で固定も可能
 - クロック終端は優先配線され、balanceClockNet がスキューを均等化する
+- `--clocking two-phase` は各 DFF をマスター (clk_a) / スレーブ (clk_b) に分ける 2 相ノンオーバーラップクロックで配線する。
+  skew を均等化せず、hold は相の間の settle で構造的に守る (駆動手順は DESIGN-VERIFY.md §5.2.1、検査は
+  `dotnet fsi src/AnalyzeHold.fsx <circuit>` が meta の clocking に従って行う)
 - meta JSON はポート名 → ビット毎の座標 (LSB first) を持つ。yosys が定数に畳んだビットは `{"const":0}` として位置を保つ
 
 ### 検証済み命令 (4 命令 × 2 clk phase = 8 golden tests)

@@ -77,6 +77,9 @@ F# ExportGolden.fsx │                              │ wgpu-runner --memory
 
 `rstPulses` 周期、`rst=1` で次の 1 周期を行う (`data_in` は 0)。その後 `rst=0`。
 
+- 単相 (meta `clocking.scheme = "singleEdge"`): 1 周期 = `clk=0` で収束 → `clk=1` で収束
+- 2 相 (`"twoPhase"`、§5.2.1): 1 周期 = `clkA=0, clkB=0` で収束 → `clkA=1` で収束 → `clkA=0, clkB=1` で収束
+
 ### 5.2 1 周期 (`cycles` 回)
 
 wgpu-runner `memory_program.rs` の実装を契約とする。
@@ -96,6 +99,38 @@ wgpu-runner `memory_program.rs` の実装を契約とする。
 
 `mem_read=0` で `data_in=0` を渡すため、sm83_subset の壊れたフェッチ (`mem_read=0` のまま次の opcode を読む) は
 NOP (0x00) を読んだものとして進む。スモーク `sm83_subset_smoke` (`LD A,0x42` → a=0x42, pc=0x102) はこの挙動に依存している。
+
+### 5.2.1 2 相クロックの 1 周期 (meta `clocking.scheme = "twoPhase"`、2026-09-27)
+
+`ExportRouted.fsx --clocking two-phase` で配線したグリッドは、各 DFF がマスター (clkA で駆動) と
+スレーブ (clkB で駆動) の 2 個に分かれている (`src/TwoPhaseClock.fs`)。**元の `clk` ポートは grid 上に無く、
+meta の `inputs` にも載らない**。代わりに meta の `clocking.clkA` / `clocking.clkB` の 2 つのピンセルを駆動する。
+出力 probe (元の Q ネット) はスレーブ DFF を指すので、読み方は単相と同じ。
+
+「収束させる」は単相と同じ (`run_until_settled`、`maxStepsPerPhase` 以内に変化しなくなること。
+収束しなければその周期は失敗)。ピンへの書込は収束待ちの直前にまとめて行う。
+
+1. `clkA=0`、`clkB=0` を書き、収束させる (前周期の `clkB=1` はここで下ろす。立ち下がりでは何も起きない)
+2. 出力 `addr` / `mem_read` / `mem_write` / `data_out` / `int_ack` を読む (前周期にスレーブがラッチした値)
+3. メモリ操作 (単相の手順 3 と同じ: **書込 → 割込み受付 → 読出**、`irq = IE & IF & 0x1F`)
+4. `data_in` と `irq` を書き、`clkA=0, clkB=0` のまま再度収束させる (マスターの D に伝播させる)
+5. `clkA=1` を書き、収束させる (**マスターが D を取り込む**。スレーブは clkB=0 なので動かない)
+6. `clkA=0` と `clkB=1` を**同時に**書き、収束させる (**スレーブがマスター Q を取り込む**。
+   マスターは立ち下がりしか見ないので動かない)
+7. 全出力を読む → この周期の出力 (golden の `outputs` と比較する時点。単相の手順 6 に対応)
+8. 次の周期の手順 1 で `clkB=0` に戻す
+
+リセット周期 (§5.1) も同じ手順 1 → 5 → 6 で行う (`rst=1`, `data_in=0`、出力の比較はしない)。
+
+なぜ skew に強いか: 手順 5 の間、マスターの D はスレーブ Q と外部入力の組合せ関数で、どちらも変化しない。
+手順 6 の間、スレーブの D はマスター Q そのもので、マスターは変化しない。相の間に収束待ちがあるので、
+クロックがどれだけ遅れて届いても「同じ相の DFF の新しい値を取り込む」ことが起こらない (hold 違反が構造的に無い)。
+この前提 (同じ相の DFF → DFF の組合せ経路が 0 本) は `AnalyzeHold.fsx` が 2 相グリッドで検査する。
+
+注意:
+- 手順 5 と 6 を 1 回の収束待ちにまとめてはいけない (clkA と clkB が重なると hold の保護が消える)
+- 手順 5 の後の収束を待たずに手順 6 に進んではいけない (マスターが取り込む前に clkA を下ろすと取りこぼす)
+- golden (NetlistSim) は単相のまま。2 相の手順 7 の出力は単相の手順 6 の出力と同じ値になる
 
 ### 5.3 メモリモデル
 
@@ -184,6 +219,49 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
   runner の `trace` 表示の `addr` は手順 2 (clk=0 settle 時点) の値なので、golden の `outputs.addr` とは時点が違う
 - 出力はポート単位の整数 (LSB first)。runner は meta の probe に従って読み、
   `Unobservable` のビットは比較から除外する
+
+### 6.3 routed meta (`routed/<circuit>.meta.json`、`src/RoutedArtifact.fs` が生成)
+
+`formatVersion` 2 (2026-09-27)。1 との違いは `clocking` の追加だけ。**`formatVersion` 1 (clocking なし) は
+`"singleEdge"` として読む** (既存の `routed/sm83_subset.meta.json` 等)。それ以外のバージョンはエラー。
+座標はすべて .bin の (0,0) 基点 (正規化済み)。以下の値は説明用の例。
+
+```json
+{
+  "formatVersion": 2,
+  "circuit": "counter4",
+  "sourceSha256": "…",
+  "gitCommit": "…",
+  "createdAtUtc": "2026-09-27T01:34:15.68+00:00",
+  "width": 102,
+  "height": 68,
+  "origin": { "x": 10, "y": 2 },
+  "gateCount": 25,
+  "dffCount": 8,
+  "inputs": { "rst": [ { "x": 0, "y": 16 } ] },
+  "outputs": { "q": [ { "x": 26, "y": 16 }, { "const": 0 }, { "unobservable": 42 } ] },
+  "clocking": {
+    "scheme": "twoPhase",
+    "clockPort": "clk",
+    "clkA": { "x": 62, "y": 40 },
+    "clkB": { "x": 86, "y": 40 }
+  }
+}
+```
+
+- `inputs`: 入力ポート名 → ビットごとのピンセル座標 (LSB first)。**2 相では `clocking.clockPort` のポート (元の clk) を含まない**
+- `outputs`: 出力ポート名 → ビットごとの観測方法 (LSB first)。`{x,y}` はそのセルのレベル bit0 を読む、
+  `{"const":0|1}` は yosys が定数に畳んだビット、`{"unobservable":netId}` は grid 上に駆動元が無いビット
+- `gateCount` / `dffCount`: 配置したゲート数・DFF 数。**2 相では DFF が倍 (マスター + スレーブ) になり、gateCount もその分増える**
+- `clocking`: クロック方式
+  - `{"scheme": "singleEdge"}` — 従来。`inputs.clk` を §5.2 の手順で駆動する
+  - `{"scheme": "twoPhase", "clockPort": "clk", "clkA": {x,y}, "clkB": {x,y}}` — `clkA` / `clkB` はピンセル (Pin) の座標。
+    §5.2.1 の手順で駆動する。`clockPort` は元のクロックポート名 (プログラムや golden がクロックを名前で
+    参照しているときの対応付け用)
+- runner は起動時に `clocking.scheme` を見て駆動手順を選ぶ。未知の `scheme` はエラーにする
+- 2026-09-27 時点で wgpu-runner (`memory_program.rs` の `META_FORMAT_VERSION = 1`) は formatVersion 2 を読めない。
+  F# が新しく書く meta は単相でも formatVersion 2 になるので、runner は 1 と 2 の両方を受け付け、
+  `clocking` が無ければ singleEdge とみなすよう対応させる (未対応)
 
 ## 7. 実装計画
 
