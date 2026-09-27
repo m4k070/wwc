@@ -74,6 +74,38 @@ module PipelineWL =
         |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
         |> Map.ofList
 
+    // --- 終端割り当て ---------------------------------------------------
+    //
+    // clockPinCoords / inputPinCoords (下記) が「ネットの受け手群」を必要とするため、
+    // 配線コード本体 (routeWLWith) より前に定義する。
+
+    /// ゲートの入力ネット → 終端セル割り当てと、強制空白にすべき側面セル。
+    /// ゲートは東向き前提: W=背面, N/S=側面, E=出力。
+    /// $_DFF_P_ の Inputs はポート名アルファベット順で [C; D]。
+    /// $_DFF_PP0_ の Inputs は [C; D; R] (R = async reset, 無視)。
+    let private gateTerminals (p: WlPlaced) : (NetId * Coord) list * Coord list =
+        let w = toward p.Coord W
+        let n = toward p.Coord N
+        let s = toward p.Coord S
+        match p.Gate.Kind, p.Gate.Inputs with
+        | Dff, [clkNet; dNet] -> [ (dNet, w); (clkNet, s) ], [ n ]
+        | Dff, [cNet; dNet; _rNet] -> [ (dNet, w); (cNet, s) ], [ n ]
+        | _, [a]              -> [ (a, w) ], [ n; s ]
+        | _, [a; b]           -> [ (a, w); (b, n) ], [ s ]
+        | _, [a; b; c]        -> [ (a, w); (b, n); (c, s) ], []
+        | _, ins ->
+            // 4 入力以上は v1 未対応 (yosys NAND/NOT 分解では発生しない)
+            (ins |> List.mapi (fun i nid -> nid, [w; n; s].[i % 3])), []
+
+    /// 配置済みの全ゲートについて、ネット → 受け手 (ゲート入力終端) 座標一覧。
+    /// クロックピン・外部入力ピンの配置 (L1 ミニマックス中心) と、その検証テストの両方が使う。
+    let externalInputTerminals (placed: WlPlaced list) : Map<NetId, Coord list> =
+        placed
+        |> List.collect (fun p -> fst (gateTerminals p))
+        |> List.groupBy fst
+        |> List.map (fun (netId, terms) -> netId, terms |> List.map snd)
+        |> Map.ofList
+
     // --- クロック方式 ---------------------------------------------------
 
     /// 配置配線が扱うクロック網 (クロック方式の変換後)。
@@ -129,10 +161,26 @@ module PipelineWL =
             |> Result.mapError UnsupportedClocking
             |> Result.map (fun tp -> { Netlist = tp.Netlist; Clocking = TwoPhaseClock tp })
 
+    /// 端子群の L1 連続ミニマックス中心 (格子にスナップする前) と、その半径 (理論下限)。
+    /// u = x+y と v = x−y に変換すると L1 球は軸平行の正方形になり、各軸で独立に
+    /// 最小・最大の中点を取れる (中心からの最大距離 = max のレンジの半分)。
+    /// minimaxGapPin (配置) と WL-2PH 入力ピンテスト (下限との比の検証) の両方が使う。
+    let minimaxCenter (terminals: Coord list) : (float * float) * float =
+        let range (f: Coord -> int) =
+            let vs = terminals |> List.map f
+            List.min vs, List.max vs
+        let uLo, uHi = range (fun t -> t.X + t.Y)
+        let vLo, vHi = range (fun t -> t.X - t.Y)
+        let uc = float (uLo + uHi) / 2.0
+        let vc = float (vLo + vHi) / 2.0
+        let cx = (uc + vc) / 2.0
+        let cy = (uc - vc) / 2.0
+        let bound = max (float (uHi - uLo)) (float (vHi - vLo)) / 2.0
+        (cx, cy), bound
+
     /// クロック端子群 terminals への最大マンハッタン距離が最小になる格子の隙間 (taken 以外)。
-    /// L1 のミニマックス中心は、u = x+y と v = x−y それぞれの最小と最大の中点
-    /// (u, v 座標では L1 球が軸平行の正方形になり、各軸で独立に中点を取れる)。
-    /// 中心を格子の隙間 (ピッチの半分ずらし) にスナップし、周囲の隙間から最大距離が最小のものを選ぶ。
+    /// 連続ミニマックス中心 (minimaxCenter) を格子の隙間 (ピッチの半分ずらし) にスナップし、
+    /// 周囲の隙間から最大距離が最小のものを選ぶ。
     let private minimaxGapPin
         (grid: GatePlacement.SlotGrid)
         (terminals: Coord list)
@@ -140,13 +188,7 @@ module PipelineWL =
         : Coord =
         let maxDist (c: Coord) =
             terminals |> List.map (fun t -> abs (t.X - c.X) + abs (t.Y - c.Y)) |> List.max
-        let midpoint (f: Coord -> int) =
-            let vs = terminals |> List.map f
-            float (List.min vs + List.max vs) / 2.0
-        let uc = midpoint (fun t -> t.X + t.Y)
-        let vc = midpoint (fun t -> t.X - t.Y)
-        let cx = (uc + vc) / 2.0
-        let cy = (uc - vc) / 2.0
+        let (cx, cy), _ = minimaxCenter terminals
         // 隙間 k 番目の座標 = origin + k*pitch + pitch/2 (k = 0 .. slots-1)
         let gapIndex (v: float) (pitch: int) (origin: int) =
             int (floor ((v - float origin - float (pitch / 2)) / float pitch))
@@ -204,6 +246,34 @@ module PipelineWL =
                 acc @ [ clk, pin ])
             []
 
+    /// クロック以外の外部入力ピン (data_in などビットごと) の座標。2 相のときだけ、
+    /// 左端 (X=0) からそのネットの受け手 (ゲート入力終端) 群への L1 ミニマックス中心へ移す
+    /// (クロックピンと同じ考え方。issue #7 (a))。単相・行優先の既存経路は変えない —
+    /// SingleEdgeClock では常に None を返し、呼び出し側は左端のまま使う。
+    /// ビットごとに 1 つずつ確定し、既に確定した他のピン (クロックピン含む) を taken に積んで
+    /// 重ならない隙間へスナップする。受け手が無い (未使用) 入力は None のまま左端に残す。
+    let private nonClockInputPinCoords
+        (grid: GatePlacement.SlotGrid)
+        (placed: WlPlaced list)
+        (clocking: CircuitClocking)
+        (nl: Netlist)
+        (basePins: Map<NetId, Coord>)
+        : Map<NetId, Coord> =
+        match clocking with
+        | SingleEdgeClock _ -> basePins
+        | TwoPhaseClock _ ->
+            let clockNets = clockNetsOf clocking |> Set.ofList
+            let terminalsByNet = externalInputTerminals placed
+            nl.PrimaryInputs
+            |> List.filter (fun netId -> not (Set.contains netId clockNets))
+            |> List.fold (fun (acc: Map<NetId, Coord>) netId ->
+                match Map.tryFind netId terminalsByNet with
+                | None | Some [] -> acc  // 受け手が無い (未使用) 入力は左端のまま
+                | Some terminals ->
+                    let taken = acc |> Map.toList |> List.map snd |> Set.ofList
+                    Map.add netId (minimaxGapPin grid terminals taken) acc)
+                basePins
+
     /// 割り当て (ゲート → スロット) から配置とピン座標を作る。
     let private placeFromAssignment
         (grid: GatePlacement.SlotGrid)
@@ -216,9 +286,11 @@ module PipelineWL =
                 { Gate = g
                   Coord = GatePlacement.slotCoord grid assignment.[i]
                   Dir = E })
-        let pins =
+        let withClockPins =
             clockPinCoords grid placed circuit.Clocking
             |> List.fold (fun acc (clk, c) -> Map.add clk c acc) (leftEdgePins grid.PitchY nl)
+        let pins =
+            nonClockInputPinCoords grid placed circuit.Clocking nl withClockPins
         placed, pins
 
     /// 配置結果。Annealing は Annealed 戦略のときだけ Some (最適化の前後コスト)。
@@ -275,26 +347,6 @@ module PipelineWL =
     let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
         let px, py = pitchFor nl.Gates.Length
         placeWLWithPitch px py nl
-
-    // --- 終端割り当て ---------------------------------------------------
-
-    /// ゲートの入力ネット → 終端セル割り当てと、強制空白にすべき側面セル。
-    /// ゲートは東向き前提: W=背面, N/S=側面, E=出力。
-    /// $_DFF_P_ の Inputs はポート名アルファベット順で [C; D]。
-    /// $_DFF_PP0_ の Inputs は [C; D; R] (R = async reset, 無視)。
-    let private gateTerminals (p: WlPlaced) : (NetId * Coord) list * Coord list =
-        let w = toward p.Coord W
-        let n = toward p.Coord N
-        let s = toward p.Coord S
-        match p.Gate.Kind, p.Gate.Inputs with
-        | Dff, [clkNet; dNet] -> [ (dNet, w); (clkNet, s) ], [ n ]
-        | Dff, [cNet; dNet; _rNet] -> [ (dNet, w); (cNet, s) ], [ n ]
-        | _, [a]              -> [ (a, w) ], [ n; s ]
-        | _, [a; b]           -> [ (a, w); (b, n) ], [ s ]
-        | _, [a; b; c]        -> [ (a, w); (b, n); (c, s) ], []
-        | _, ins ->
-            // 4 入力以上は v1 未対応 (yosys NAND/NOT 分解では発生しない)
-            (ins |> List.mapi (fun i nid -> nid, [w; n; s].[i % 3])), []
 
     // --- 配線 -----------------------------------------------------------
 
