@@ -182,6 +182,59 @@ module HoldAnalysis =
           NandLoads = List.ofSeq nandLoads |> List.distinct
           DataLoads = List.ofSeq dataLoads |> List.distinct }
 
+    // --- 1b. クロック木の最大到達時間と下限 -------------------------------------------
+
+    /// クロック木の最大到達時間 (latency) と、その下限。
+    /// 配線は 1 セル 1 世代なので、どんな木でも DFF i の到達 ≥ dist(ピン, i のクロック端子)
+    /// (マンハッタン距離)。よって max_i 到達 ≥ max_i dist = LowerBound。
+    type ClockLatency =
+        { /// 最大到達時間 (世代)
+          MaxArrival: int
+          /// 最大到達時間の下限: ピンから最も遠いクロック端子までのマンハッタン距離
+          LowerBound: int
+          /// ピンの位置も自由に選べるとしたときの下限: 端子群の L1 ミニマックス半径
+          IdealPinBound: int
+          /// DFF ごとの (到達 − ピンからのマンハッタン距離) の最大 = 最大の遠回り
+          MaxDetour: int }
+
+    /// MaxArrival / LowerBound (下限との比。1.0 が最適)。
+    let latencyRatio (l: ClockLatency) : float =
+        if l.LowerBound <= 0 then 1.0 else float l.MaxArrival / float l.LowerBound
+
+    /// DFF のクロック端子の候補 (クロック側の隣の空でないセル)。Wire はどの向きでも
+    /// 隣へ値を提示するので、向きでは絞らない。
+    let clockTerminalCandidates (dg: DenseGrid) (dffIdx: int) : int list =
+        match dg.Cells.[dffIdx] with
+        | LDff (d, _, _) ->
+            clockSides d
+            |> List.choose (neighborIndex dg dffIdx)
+            |> List.filter (fun n -> dg.Cells.[n] <> LEmpty)
+        | _ -> []
+
+    /// clkPinIdx から届いた DFF について最大到達時間と下限を求める。到達が 1 つもなければ None。
+    let clockLatency (dg: DenseGrid) (clkPinIdx: int) (c: ClockAnalysis) : ClockLatency option =
+        let pin = coordOf dg clkPinIdx
+        let manhattan (a: Coord) = abs (a.X - pin.X) + abs (a.Y - pin.Y)
+        // 到達はクロック側の隣のどれかから届くので、候補のうちピンに近いほうの距離が下限
+        let reached =
+            [ for KeyValue (dff, arrival) in c.Arrival do
+                match clockTerminalCandidates dg dff |> List.map (coordOf dg) with
+                | [] -> ()
+                | candidates -> yield candidates |> List.minBy manhattan, arrival ]
+        match reached with
+        | [] -> None
+        | _ ->
+            let terminals = reached |> List.map fst
+            let span (f: Coord -> int) =
+                let vs = terminals |> List.map f
+                List.max vs - List.min vs
+            let spanU = span (fun t -> t.X + t.Y)
+            let spanV = span (fun t -> t.X - t.Y)
+            Some { MaxArrival = reached |> List.map snd |> List.max
+                   LowerBound = terminals |> List.map manhattan |> List.max
+                   IdealPinBound = (max spanU spanV + 1) / 2
+                   MaxDetour = reached |> List.map (fun (t, a) -> a - manhattan t) |> List.max }
+
     // --- 2. DFF 間の最短データ遅延 ---------------------------------------------------
 
     type DataReach =

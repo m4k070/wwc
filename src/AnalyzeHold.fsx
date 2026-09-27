@@ -156,6 +156,14 @@ let describeArrivals (label: string) (c: ClockAnalysis) : string =
         let hi = List.max times
         sprintf "%s: DFF %d 個、到達 min %d / max %d / skew %d 世代 (参考)" label times.Length lo hi (hi - lo)
 
+/// 最大到達時間と下限 (ピン → 最遠のクロック端子のマンハッタン距離) の比較。
+let describeLatency (label: string) (dg: DenseGrid) (pinIdx: int) (c: ClockAnalysis) : string =
+    match clockLatency dg pinIdx c with
+    | None -> sprintf "%s: 到達なし" label
+    | Some l ->
+        sprintf "%s: 最大到達 %d / 下限 %d (比 %.3f) / 最大の遠回り %d / ピン位置も最適なら下限 %d 世代"
+            label l.MaxArrival l.LowerBound (latencyRatio l) l.MaxDetour l.IdealPinBound
+
 let printTwoPhaseReport (dg: DenseGrid) (names: Map<Coord, string list>) (topCount: int) (r: TwoPhaseReport) : unit =
     let count phase = r.PhaseOf |> Map.filter (fun _ p -> p = phase) |> Map.count
     printfn "DFF %d 個 (clk_a 相 %d / clk_b 相 %d)" r.Dffs.Length (count PhaseA) (count PhaseB)
@@ -189,6 +197,9 @@ let analyzeTwoPhaseAndPrint (opts: Options) (grid: LGrid) (meta: RoutedMeta) (cl
         printfn "%s: grid %dx%d, 2 相クロック clk_a (%d,%d) / clk_b (%d,%d), 解析 %.1f 秒"
             meta.Circuit dg.Width dg.Height clkA.X clkA.Y clkB.X clkB.Y sw.Elapsed.TotalSeconds
         printTwoPhaseReport dg (outputNames meta) opts.TopCount report
+        printfn "クロック木の最大到達時間 (下限 = ピンから最も遠いクロック端子までのマンハッタン距離):"
+        printfn "  %s" (describeLatency "clk_a" dg a report.ClockA)
+        printfn "  %s" (describeLatency "clk_b" dg b report.ClockB)
         if twoPhaseInvariantHolds report then 0 else 3
     | _ ->
         eprintfn "ERROR: 2 相クロックピン clk_a (%d,%d) / clk_b (%d,%d) がグリッド外" clkA.X clkA.Y clkB.X clkB.Y
@@ -221,6 +232,7 @@ let analyzeAndPrint (opts: Options) (grid: LGrid) (meta: RoutedMeta) : int =
                 printfn "WARN: クロック到達が WireLevel.clockArrivals と %d 個不一致:" mismatches.Length
                 for m in List.truncate DefaultTopCount mismatches do printfn "  %s" m
             printReport dg (outputNames meta) opts.TopCount report
+            printfn "%s" (describeLatency "クロック木の最大到達時間 (clk)" dg clkIdx report.Clock)
             let hasViolation = report.Pairs |> List.exists (fun p -> p.Slack < 0)
             if hasViolation then 3 else 0
 

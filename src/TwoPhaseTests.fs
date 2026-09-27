@@ -319,6 +319,32 @@ module WlTwoPhaseTest =
                     Inst = step.GetProperty("pins").GetProperty("inst").GetInt32 ()
                     A = v "a"; B = v "b"; Pc = v "pc"; Flags = v "flags" } ]
 
+    /// 最大到達時間が下限 (ピン → 最遠のクロック端子のマンハッタン距離) の何倍まで許すか。
+    /// 最短経路木 (PipelineWL.MinLatency) なら遠回りは障害物を避ける分だけ
+    let private maxLatencyRatio = 1.1
+
+    /// 2 相のクロック木: 各クロックの最大到達時間が下限に近いこと (最短経路木配線)、
+    /// ピンが端子群の L1 ミニマックス中心の近くにあること (下限が理想の下限に近い)。
+    let private latencyTests (c: WlCompiled) : (string * bool) list =
+        match clockPinsOf c with
+        | Some (ClockDrive.TwoPhasePins (a, b)) ->
+            let dg = toDense c.Grid
+            [ for (label, pin) in [ "clk_a", a; "clk_b", b ] do
+                match indexOf dg pin |> Option.bind (fun i -> clockLatency dg i (analyzeClock dg i)) with
+                | None -> yield sprintf "WL-2PH: sm83_min %s reaches DFFs" label, false
+                | Some l ->
+                    printfn "  WL_2PH_LATENCY: %s max %d / bound %d (ratio %.3f) / ideal-pin bound %d"
+                        label l.MaxArrival l.LowerBound (latencyRatio l) l.IdealPinBound
+                    yield sprintf "WL-2PH: sm83_min %s max clock arrival %d within %.1fx of bound %d"
+                              label l.MaxArrival maxLatencyRatio l.LowerBound,
+                          latencyRatio l <= maxLatencyRatio
+                    // ピンは格子の隙間にスナップするので、理想の下限から 1 ピッチ分 (X+Y、大きめの 24x16 で見込む) まで許す
+                    let pitchSlack = 24 + 16
+                    yield sprintf "WL-2PH: sm83_min %s pin near L1 minimax center (bound %d, ideal %d)"
+                              label l.LowerBound l.IdealPinBound,
+                          l.LowerBound <= l.IdealPinBound + pitchSlack ]
+        | _ -> [ "WL-2PH: sm83_min has clk_a/clk_b pins (latency)", false ]
+
     /// NetlistSimTest.sm83MinTest / wgpu-runner --program と同じ手順を 2 相で行う:
     ///   初期化: rst=1 で settleLow → rst=0 で settleLow
     ///   各命令: inst を書き settleLow → clockEdge (clk_a → clk_b) → レジスタ読出
@@ -381,7 +407,8 @@ module WlTwoPhaseTest =
                      | Error e -> printfn "  WL_2PH_SM83MIN: %s" (ClockDrive.describeDriveError e)
                      | Ok _ -> ())
                     let dffCount = c.Placed |> List.filter (fun p -> p.Gate.Kind = Dff) |> List.length
-                    [ sprintf "WL-2PH: sm83_min two-phase + anneal compiles (%d gates, %d DFF)" c.Placed.Length dffCount,
+                    [ yield! latencyTests c
+                      sprintf "WL-2PH: sm83_min two-phase + anneal compiles (%d gates, %d DFF)" c.Placed.Length dffCount,
                       c.Placed.Length = 380 + 26 && dffCount = 2 * 26
                       "WL-2PH: sm83_min two-phase grid keeps the two-phase invariant", invariantHolds c
                       sprintf "WL-2PH: sm83_min two-phase CA matches GPU-verified expectations (%d/%d instructions)"

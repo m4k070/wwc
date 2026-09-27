@@ -83,12 +83,26 @@ module PipelineWL =
         /// 2 相。配置配線するのは TwoPhaseNetlist.Netlist (マスター / スレーブ分割後)
         | TwoPhaseClock of Clocking.TwoPhaseNetlist
 
+    /// クロック終端 (DFF のクロック端子) を配線する順番。
+    type ClockTerminalOrder =
+        /// ピンから遠い終端から (幹を先に引き、近い終端はそこからタップする)
+        | FarthestFirst
+        /// ピンに近い終端から (木を内側から外へ育てる)。
+        /// sm83_subset (2 相 anneal) で FarthestFirst と最大到達時間は同じ (下限どおり) で、
+        /// 木のセル数が約 25% 少なく (9,520 vs 12,688)、配線も速い (13 秒 vs 33 秒)。
+        /// 遠い終端が先に育った内側の木から枝を伸ばせるため
+        | NearestFirst
+
     /// クロック網の配線方針。
     type ClockRouting =
         /// クロック優先配線 + 終端近傍のタップ禁止 + skew 均等化 (単相の hold 対策)
         | BalancedSkew
-        /// クロック優先配線のみ (2 相は相の間の settle で hold を守るので skew を揃えない)
+        /// クロック優先配線のみ。新しく引く配線の長さを最小にする (skew も latency も揃えない)
         | ShortestOnly
+        /// クロック優先配線を最短経路木 (shortest-path tree) で行う: 各終端への経路を
+        /// 「ピンからの到達時間」最小で選ぶ (同点なら新しく引く配線が短いほう)。
+        /// 2 相は相の間の settle で hold を守るので、クロックに要るのは最大到達時間の短さだけ
+        | MinLatency of order: ClockTerminalOrder
 
     /// 配置配線にかける回路 (クロック方式の変換を済ませたもの)。
     type PreparedCircuit =
@@ -104,7 +118,7 @@ module PipelineWL =
     let clockRoutingOf (clocking: CircuitClocking) : ClockRouting =
         match clocking with
         | SingleEdgeClock _ -> BalancedSkew
-        | TwoPhaseClock _ -> ShortestOnly
+        | TwoPhaseClock _ -> MinLatency NearestFirst
 
     /// クロック方式に応じてネットリストを変換する (純粋関数)。
     let prepareCircuit (scheme: Clocking.ClockingScheme) (nl: Netlist) : Result<PreparedCircuit, CompileError> =
@@ -115,11 +129,48 @@ module PipelineWL =
             |> Result.mapError UnsupportedClocking
             |> Result.map (fun tp -> { Netlist = tp.Netlist; Clocking = TwoPhaseClock tp })
 
-    /// クロックピンの座標。各クロックのピンを、そのクロックが駆動する DFF 群の重心に置く:
+    /// クロック端子群 terminals への最大マンハッタン距離が最小になる格子の隙間 (taken 以外)。
+    /// L1 のミニマックス中心は、u = x+y と v = x−y それぞれの最小と最大の中点
+    /// (u, v 座標では L1 球が軸平行の正方形になり、各軸で独立に中点を取れる)。
+    /// 中心を格子の隙間 (ピッチの半分ずらし) にスナップし、周囲の隙間から最大距離が最小のものを選ぶ。
+    let private minimaxGapPin
+        (grid: GatePlacement.SlotGrid)
+        (terminals: Coord list)
+        (taken: Set<Coord>)
+        : Coord =
+        let maxDist (c: Coord) =
+            terminals |> List.map (fun t -> abs (t.X - c.X) + abs (t.Y - c.Y)) |> List.max
+        let midpoint (f: Coord -> int) =
+            let vs = terminals |> List.map f
+            float (List.min vs + List.max vs) / 2.0
+        let uc = midpoint (fun t -> t.X + t.Y)
+        let vc = midpoint (fun t -> t.X - t.Y)
+        let cx = (uc + vc) / 2.0
+        let cy = (uc - vc) / 2.0
+        // 隙間 k 番目の座標 = origin + k*pitch + pitch/2 (k = 0 .. slots-1)
+        let gapIndex (v: float) (pitch: int) (origin: int) =
+            int (floor ((v - float origin - float (pitch / 2)) / float pitch))
+        let gapAt (k: int) (pitch: int) (origin: int) = origin + k * pitch + pitch / 2
+        let kx = gapIndex cx grid.PitchX grid.Origin.X
+        let ky = gapIndex cy grid.PitchY grid.Origin.Y
+        let clampTo (hi: int) (k: int) = max 0 (min (hi - 1) k)
+        // 半径 SearchRadius 個分の隙間を候補にする (中心が塞がっていても近くに置ける)
+        let searchRadius = 3
+        [ for dx in -searchRadius .. searchRadius do
+            for dy in -searchRadius .. searchRadius do
+                yield { X = gapAt (clampTo grid.Columns (kx + dx)) grid.PitchX grid.Origin.X
+                        Y = gapAt (clampTo grid.Rows (ky + dy)) grid.PitchY grid.Origin.Y } ]
+        |> List.distinct
+        |> List.filter (fun c -> not (Set.contains c taken))
+        |> List.minBy (fun c -> maxDist c, abs (float c.X - cx) + abs (float c.Y - cy))
+
+    /// クロックピンの座標。単相は各クロックのピンを、そのクロックが駆動する DFF 群の重心に置く:
     /// 左端からだと DFF までの距離差がそのままクロックスキューになるため (sm83_full の行優先配置で
     /// skew 494〜578、hold 違反の許容は約 316)。重心はゲート格子の隙間 (ピッチの半分ずらし) に取り、
     /// ゲートや終端と重ならないようにする。2 相でマスター群とスレーブ群の重心が同じ隙間に
     /// 落ちたら、後のクロックを 1 ピッチずつ右へずらす。
+    /// 2 相は最大到達時間の下限 (ピンから最も遠い端子までの距離) を最小にするため、
+    /// 端子群の L1 ミニマックス中心 (minimaxGapPin) に置く。
     let private clockPinCoords
         (grid: GatePlacement.SlotGrid)
         (placed: WlPlaced list)
@@ -138,13 +189,19 @@ module PipelineWL =
             match drivenBy clk with
             | [] -> acc
             | group ->
-                let cx = group |> List.averageBy (fun p -> float p.Coord.X) |> int
-                let cy = group |> List.averageBy (fun p -> float p.Coord.Y) |> int
-                let centroid = { X = snap cx grid.PitchX grid.Origin.X; Y = snap cy grid.PitchY grid.Origin.Y }
                 let taken = acc |> List.map snd |> Set.ofList
-                let rec freeFrom (c: Coord) =
-                    if Set.contains c taken then freeFrom { c with X = c.X + grid.PitchX } else c
-                acc @ [ clk, freeFrom centroid ])
+                let pin =
+                    match clocking with
+                    | SingleEdgeClock _ ->
+                        let cx = group |> List.averageBy (fun p -> float p.Coord.X) |> int
+                        let cy = group |> List.averageBy (fun p -> float p.Coord.Y) |> int
+                        let centroid = { X = snap cx grid.PitchX grid.Origin.X; Y = snap cy grid.PitchY grid.Origin.Y }
+                        let rec freeFrom (c: Coord) =
+                            if Set.contains c taken then freeFrom { c with X = c.X + grid.PitchX } else c
+                        freeFrom centroid
+                    | TwoPhaseClock _ ->
+                        minimaxGapPin grid (group |> List.map (fun p -> toward p.Coord S)) taken
+                acc @ [ clk, pin ])
             []
 
     /// 割り当て (ゲート → スロット) から配置とピン座標を作る。
@@ -241,6 +298,19 @@ module PipelineWL =
 
     // --- 配線 -----------------------------------------------------------
 
+    /// 1 終端の A* で何を最小化するか。
+    type private TapCost =
+        /// 新しく引く配線の長さ (+ 転回ペナルティ)。データネットと従来のクロック配線
+        | MinNewWire
+        /// ネットの駆動源からの到達時間 (セル数 = 世代) を第 1 キー、新しく引く配線を第 2 キーにする。
+        /// arrivals は既存の木の各セルの到達時間 (駆動源 = 0)。経路を確定したら新セルを書き足す
+        | MinArrival of arrivals: System.Collections.Generic.Dictionary<Coord, int>
+
+    /// MinArrival で到達時間 1 世代に掛ける重み。新配線の長さ (+ 転回) は常にこれより小さいので、
+    /// 到達時間が辞書式の第 1 キーになる
+    [<Literal>]
+    let private ArrivalWeight = 65536L
+
     /// 全ネットを配線して占有グリッドを返す。
     /// 各終端へは「既配線セルからのタップ (ファンアウト)」または
     /// 「駆動ゲートの出力先頭セル」から (Coord, Dir) 状態の A* で配線する。
@@ -296,7 +366,7 @@ module PipelineWL =
             | _ -> let l = ResizeArray<Coord>() in l.Add c; netCells.[n] <- l
         for KeyValue (n, c) in pins do addNetCell n c
 
-        let routeOne (netId: NetId) (goal: Coord) : Result<unit, NetId list> =
+        let routeOneWith (tapCost: TapCost) (netId: NetId) (goal: Coord) : Result<unit, NetId list> =
             // 探索中に passOk false となったセルを占有する他ネットをブロック回数付きで記録。
             // 失敗時にこれを返し、rip-up が「実際に経路を塞いだネット」を撤去できるようにする。
             let blockedCount = System.Collections.Generic.Dictionary<NetId, int>()
@@ -317,18 +387,27 @@ module PipelineWL =
                         | [] -> cells   // 候補が消えるなら制限しない (接続を優先)
                         | filtered -> filtered
                 | _ -> []
+            // タップ元セルの到達時間 (MinArrival のみ意味を持つ。駆動源は 0)
+            let arrivalOf (t: Coord) =
+                match tapCost with
+                | MinArrival arrivals ->
+                    match arrivals.TryGetValue t with
+                    | true, a -> a
+                    | _ -> 0
+                | MinNewWire -> 0
+            // シード: (セル, 進入方向, そのセルでの到達時間)
             let seeds =
                 if tapCells.IsEmpty then
                     match Map.tryFind netId driver with
-                    | Some p -> [ (toward p.Coord p.Dir, p.Dir) ]
+                    | Some p -> [ (toward p.Coord p.Dir, p.Dir, 1) ]
                     | None ->
                         match Map.tryFind netId pins with
-                        | Some c -> [ for d in [E; W; N; S] do yield toward c d, d ]
+                        | Some c -> [ for d in [E; W; N; S] do yield toward c d, d, 1 ]
                         | None -> []
                 else
                     [ for t in tapCells do
                         for d in [E; W; N; S] do
-                            yield (toward t d, d) ]
+                            yield (toward t d, d, arrivalOf t + 1) ]
 
             let isCrossingCell (c: Coord) =
                 match Map.tryFind c occ with
@@ -339,7 +418,12 @@ module PipelineWL =
             // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、後続ネットが
             // 交差できるセルを増やす (輻輳対策)。
             let h (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
-            let pts = goal :: (seeds |> List.map fst)
+            let pts = goal :: (seeds |> List.map (fun (c, _, _) -> c))
+            // 1 歩あたりの到達時間の重み (MinNewWire では 0 = 従来どおり新配線の長さだけ)
+            let arrivalWeight =
+                match tapCost with
+                | MinArrival _ -> ArrivalWeight
+                | MinNewWire -> 0L
             let mutable exploreMult = 1
             let mutable result = None
             while result.IsNone && exploreMult <= 16 do
@@ -372,21 +456,25 @@ module PipelineWL =
                 // 序盤のグリッドはほぼ空で同コストの経路が大量にあり、素の f だけだと
                 // その「平地」を一様に広げて探索が爆発する (24x16 のクロックネットで
                 // 1 終端 12 分・上限 500 万到達)。同点処理を入れても経路の最適性は保たれる。
-                let inline priorityOf (g: int) (hv: int) = (g + hv) * 1024 + hv
+                // g は arrivalWeight × 到達時間 + 新配線の長さ (+ 転回)。1 歩で g は
+                // arrivalWeight + 1 以上増えるので、h × (arrivalWeight + 1) は許容的かつ一貫的
+                let inline priorityOf (g: int64) (hv: int) =
+                    (g + int64 hv * (arrivalWeight + 1L)) * 1024L + int64 hv
                 // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、
                 // 後続ネットが交差できるセルを増やす (輻輳対策)。
                 // リトライが進むほど下げる (4→2→1) — 初回は直線優先で交差余地を
                 // 温存し、輻輳が深刻なリトライでは柔軟な経路選択を許容する。
                 let turnPenalty = max 1 (4 / exploreMult)
-                let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
-                let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
+                let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int64>()
+                let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int64>()
                 let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
                 let closed = System.Collections.Generic.HashSet<Coord * Dir>()
-                for (c, d) in seeds do
-                    if passOk c d && not (gScore.ContainsKey ((c, d))) then
-                        gScore.[(c, d)] <- 1
+                for (c, d, arrival) in seeds do
+                    let g0 = arrivalWeight * int64 arrival + 1L
+                    if passOk c d && (not (gScore.ContainsKey ((c, d))) || g0 < gScore.[(c, d)]) then
+                        gScore.[(c, d)] <- g0
                         prev.[(c, d)] <- None
-                        pq.Enqueue ((c, d), priorityOf 1 (h c))
+                        pq.Enqueue ((c, d), priorityOf g0 (h c))
                 let mutable explored = 0
                 let mutable goalState = None
                 while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
@@ -401,7 +489,7 @@ module PipelineWL =
                                 let c' = toward c nd
                                 if not (closed.Contains ((c', nd))) then
                                     if passOk c' nd then
-                                        let ng = gc + 1 + (if nd <> d then turnPenalty else 0)
+                                        let ng = gc + arrivalWeight + 1L + (if nd <> d then int64 turnPenalty else 0L)
                                         if not (gScore.ContainsKey ((c', nd))) || ng < gScore.[(c', nd)] then
                                             gScore.[(c', nd)] <- ng
                                             prev.[(c', nd)] <- Some (c, d)
@@ -430,6 +518,12 @@ module PipelineWL =
                          occ <- Map.add tapC (OccWire (n2, f2, false)) occ
                          tapSources.Add tapC |> ignore
                      | _ -> ())
+                    // 新セルの到達時間 = タップ元 + 1, +2, … (Cross も 1 世代。WireLevel.clockArrivals と同じ数え方)
+                    (match tapCost with
+                     | MinArrival arrivals ->
+                         let tapArrival = arrivalOf tapC
+                         path |> Array.iteri (fun i (c, _) -> arrivals.[c] <- tapArrival + i + 1)
+                     | MinNewWire -> ())
                     path |> Array.iteri (fun i (c, d) ->
                         let straight = i < path.Length - 1 && snd path.[i + 1] = d
                         match Map.tryFind c occ with
@@ -458,6 +552,9 @@ module PipelineWL =
                     eprintfn "[route] NetId %A ok after mult=%d" netId exploreMult
                 r
             | None -> Error (blockedCount |> Seq.sortByDescending (fun (KeyValue (_, k)) -> k) |> Seq.map (fun (KeyValue (n, _)) -> n) |> List.ofSeq)
+
+        let routeOne (netId: NetId) (goal: Coord) : Result<unit, NetId list> =
+            routeOneWith MinNewWire netId goal
 
         // --- クロックスキュー均等化 (P1: hold 対策) -----------------------
         // WireLevel は配線セル 1 個 = 1 世代なので、クロック枝の長さを揃えれば
@@ -804,7 +901,7 @@ module PipelineWL =
         let clockTapGuard =
             match clockRouting with
             | BalancedSkew -> 12
-            | ShortestOnly -> 0
+            | ShortestOnly | MinLatency _ -> 0
         let routeSw = System.Diagnostics.Stopwatch.StartNew()
         let terminals =
             placed |> List.collect (fun p -> fst (gateTerminals p))
@@ -820,6 +917,34 @@ module PipelineWL =
                 | Dff, (clkNet :: _) -> [ clkNet, toward p.Coord S ]
                 | _ -> [])
         let clockNetIds = clockTerminals |> List.map fst |> Set.ofList
+        // MinLatency: クロックネットごとの「既存の木のセル → ピンからの到達時間」(ピン = 0)
+        let clockArrivalMaps =
+            match clockRouting with
+            | MinLatency _ ->
+                clockNetIds
+                |> Set.toList
+                |> List.map (fun nid ->
+                    let arrivals = System.Collections.Generic.Dictionary<Coord, int>()
+                    match Map.tryFind nid pins with
+                    | Some c -> arrivals.[c] <- 0
+                    | None -> ()
+                    nid, arrivals)
+                |> Map.ofList
+            | BalancedSkew | ShortestOnly -> Map.empty
+        let clockTapCost (nid: NetId) : TapCost =
+            match Map.tryFind nid clockArrivalMaps with
+            | Some arrivals -> MinArrival arrivals
+            | None -> MinNewWire
+        // 配線順。MinLatency は ピンからのマンハッタン距離で並べ替える (同距離は配置順のまま)
+        let orderedClockTerminals =
+            let distFromPin (nid: NetId, goal: Coord) =
+                match Map.tryFind nid pins with
+                | Some c -> abs (goal.X - c.X) + abs (goal.Y - c.Y)
+                | None -> 0
+            match clockRouting with
+            | MinLatency FarthestFirst -> clockTerminals |> List.sortByDescending distFromPin
+            | MinLatency NearestFirst -> clockTerminals |> List.sortBy distFromPin
+            | BalancedSkew | ShortestOnly -> clockTerminals
         // クロック終端をまとめて配線する。guard > 0 なら終端近傍でのタップを禁止して
         // スキュー均等化用の専有部分を残す。失敗したら呼び出し側が guard=0 で引き直す。
         let routeClockTerminals (guard: int) : Result<unit, CompileError> =
@@ -828,9 +953,9 @@ module PipelineWL =
             tapGuardPoints <- if guard > 0 then clockTerminals |> List.map snd else []
             let mutable cr : Result<unit, CompileError> = Ok ()
             let mutable clockDone = 0
-            for (nid, goal) in clockTerminals do
+            for (nid, goal) in orderedClockTerminals do
                 let sw = System.Diagnostics.Stopwatch.StartNew ()
-                match routeOne nid goal with
+                match routeOneWith (clockTapCost nid) nid goal with
                 | Ok () -> ()
                 | Error _ ->
                     eprintfn "[clock] 配線失敗: NetId %A (%d/%d)" nid (clockDone + 1) clockTerminals.Length
@@ -843,6 +968,19 @@ module PipelineWL =
                 if clockDone % 20 = 0 then
                     eprintfn "[clock] %d/%d 本 %d s" clockDone clockTerminals.Length (int routeSw.Elapsed.TotalSeconds)
             eprintfn "[clock] 配線完了 %d s" (int routeSw.Elapsed.TotalSeconds)
+            for KeyValue (nid, arrivals) in clockArrivalMaps do
+                let terminalArrivals =
+                    clockTerminals
+                    |> List.filter (fun (n, _) -> n = nid)
+                    |> List.choose (fun (_, g) ->
+                        match arrivals.TryGetValue g with
+                        | true, a -> Some a
+                        | _ -> None)
+                if not terminalArrivals.IsEmpty then
+                    // arrivals はピン (到達 0) と木の全セルを持つ
+                    eprintfn "[clock] NetId %A 到達 min %d / max %d 世代 (終端 %d 本、木 %d セル)"
+                        nid (List.min terminalArrivals) (List.max terminalArrivals) terminalArrivals.Length
+                        (arrivals.Count - 1)
             tapGuard <- 0
             tapGuardPoints <- []
             cr
@@ -868,7 +1006,7 @@ module PipelineWL =
             | Error e -> Error e
             |> Result.bind (fun () ->
                 match clockRouting with
-                | ShortestOnly -> Ok ()
+                | ShortestOnly | MinLatency _ -> Ok ()
                 | BalancedSkew ->
                     match balanceClocks () with
                     | Ok x -> Ok x
