@@ -151,7 +151,7 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
 
 ## sm83_full の現状 (2026-09-27, PR #5)
 
-sm83_full (通常命令 256 + CB prefix 256 + 割込み + HALT バグ、組合せ 10,859 + DFF 181) は
+sm83_full (通常命令 (STOP を除く) + CB prefix 256 + 割込み + HALT バグ、組合せ 10,859 + DFF 181) は
 **20x14 ピッチ・アニーリング配置・2 相クロックで配線完走** (16.1 分、rip-up 0、`routed/sm83_full.{bin,meta.json}`)。
 RTL の正しさは blargg `cpu_instrs` 個別版 **11/11 PASS** (`CoSimGbfs.fsx --lockstep`) で、
 RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式) で確認済み。

@@ -2,7 +2,7 @@
 
 任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス (2026-09-27, PR #5): SM83 CPU フルセット (sm83_full、通常命令 256 + CB prefix 256 + 割込み、
+> **ステータス (2026-09-27, PR #5): SM83 CPU フルセット (sm83_full、通常命令 (STOP を除く) + CB prefix 256 + 割込み、
 > 組合せ 10,859 + DFF 181) を WireLevel CA 上で配線完走。RTL の正しさは blargg `cpu_instrs` 個別版 11/11 PASS、
 > RTL ≡ CA は GPU 全周期照合 37/37 で確認済み。テスト F# 287/287 / cargo test 44/44 / GPU golden 24/24 /
 > memory-test.sh 5/5 通過。**
@@ -214,7 +214,7 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 |------|------|------|
 | sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
 | sm83_subset | 3,553 | ✅ 配線完走 (20x14、行優先、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
-| sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (20x14、アニーリング配置 + 2 相クロック、16.1 分、rip-up 0、2026-09-27)。全命令セット (通常 256 + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
+| sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (20x14、アニーリング配置 + 2 相クロック、16.1 分、rip-up 0、2026-09-27)。全命令セット (通常命令は STOP を除く + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
 
 ### コンパイル
 
