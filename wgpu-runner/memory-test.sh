@@ -46,12 +46,12 @@ for prog in "${PROGRAMS[@]}"; do
   out=$("$RUNNER" --memory "$prog" 2>&1)
   code=$?
   set -e
-  summary=$(echo "$out" | grep -E '^golden:|^expect checks:' | tr '\n' ' ')
+  summary=$(echo "$out" | grep -E '^golden:|^expect checks:' | tr '\n' ' ' || true)
   if [ $code -eq 0 ]; then
     pass "$prog: $summary"
   else
     fail "$prog (exit $code): $summary"
-    echo "$out" | grep -E 'DIVERGED|UNSETTLED|MISMATCH|^  |Error' | sed 's/^/      /'
+    echo "$out" | grep -E 'DIVERGED|UNSETTLED|MISMATCH|^  |Error' | sed 's/^/      /' || true
   fi
 done
 
