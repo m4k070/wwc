@@ -40,7 +40,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::clocking::{write_bus, CaDriver, ClockPins, GpuDriver, Phase, LABEL_DATA_IN, LABEL_SETUP};
-use crate::gpu::{load_bin, save_bin, GpuSim};
+use crate::gpu::{load_bin, save_bin, Engine, GpuSim};
 use crate::memory::{Memory, MemoryConfig, RomSource};
 use crate::routed_meta::{OutputProbe, RoutedMeta, Xy};
 
@@ -111,6 +111,7 @@ pub struct MemorySection {
 
 pub struct MemProgOpts {
     pub batch: u32,
+    pub engine: Engine,
     pub dump_dir: Option<PathBuf>,
 }
 
@@ -476,7 +477,7 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
         prog.cycles, meta.circuit, meta.gate_count, meta.dff_count,
         mem.rom.len(), mem.ram.len(), mem.config.ram_base, meta.format_version, clock.scheme_name());
 
-    let mut sim = GpuSim::new(w, h, &init_cells, opts.batch)?;
+    let mut sim = GpuSim::new(w, h, &init_cells, opts.batch, opts.engine)?;
     let mut driver = GpuDriver {
         sim: &mut sim,
         max_steps_per_phase: prog.max_steps_per_phase,

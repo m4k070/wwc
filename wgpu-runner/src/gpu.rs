@@ -13,6 +13,34 @@ const TILE_SIZE: u32 = 16;
 const MAX_GENS_PER_BATCH: u32 = 1024;
 /// GenParams テーブルの 1 エントリの間隔 (dynamic offset の既定アラインメント)
 const GEN_PARAMS_STRIDE: u64 = 256;
+/// Dims uniform のバイト数 (5 × u32 を 16 バイト境界に切り上げ)
+const DIMS_SIZE: u64 = 32;
+/// DispatchArgs.x の初期値 = 制御用 workgroup の数 (wirelevel.wgsl の ARGS_CONTROL_WORKGROUPS)
+const ARGS_CONTROL_WORKGROUPS: u32 = 1;
+/// stamp_base がこれを超えたら stamps を 0 に戻す (u32 の桁あふれ防止)
+const STAMP_RESET_THRESHOLD: u32 = u32::MAX - 2 * MAX_GENS_PER_BATCH;
+/// アクティブリストの本数 (cur / next / free を世代ごとに回す)
+const LIST_ROTATION: usize = 3;
+
+/// 世代の進め方。どちらも同じ CA 規則で、結果のグリッドは byte 単位で一致する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// 毎世代全タイルを計算する (参照実装)
+    Dense,
+    /// 前世代に変化したタイルとその隣接タイルだけを計算する
+    Tiled,
+}
+
+impl std::str::FromStr for Engine {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "dense" => Ok(Engine::Dense),
+            "tiled" => Ok(Engine::Tiled),
+            _ => anyhow::bail!("unknown engine {s:?} (expected dense or tiled)"),
+        }
+    }
+}
 
 pub fn load_bin(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     let data = fs::read(path).with_context(|| format!("reading .bin file {path:?}"))?;
@@ -40,10 +68,33 @@ pub fn save_bin(path: &Path, w: u32, h: u32, cells: &[u8]) -> Result<()> {
 
 /// WireLevel CA の GPU シミュレータ。
 /// セルは u32 に 1 個 (下位 8 ビット)。ping-pong 2 バッファで、front が現在の世代を持つ。
+/// Tiled エンジンの GPU 資源と、世代をまたいで持ち越す状態。
+struct TiledStepper {
+    step_full: wgpu::ComputePipeline,
+    step_list: wgpu::ComputePipeline,
+    /// args[i]: list[i] の dispatch_workgroups_indirect 引数 (x = 1 + タイル数)
+    args: [wgpu::Buffer; LIST_ROTATION],
+    /// list_bind_groups[r]: cur = list[r]、next = list[r+1]、free = args[r+2] (mod 3)
+    list_bind_groups: [wgpu::BindGroup; LIST_ROTATION],
+    stamps: wgpu::Buffer,
+    /// 次の世代が cur として使うリストの添字
+    rot: usize,
+    /// 次のバッチの Dims.stamp_base
+    stamp_base: u32,
+    /// 次の世代を step_full で計算するか (初回と、ホストがセルを書いた直後)
+    needs_full_step: bool,
+}
+
+enum Stepper {
+    Dense { step_dense: wgpu::ComputePipeline },
+    Tiled(TiledStepper),
+}
+
 pub struct GpuSim {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    step_dense: wgpu::ComputePipeline,
+    stepper: Stepper,
+    dims_buf: wgpu::Buffer,
     cell_bufs: [wgpu::Buffer; 2],
     /// cell_bind_groups[i]: cell_bufs[i] を読み cell_bufs[1-i] に書く
     cell_bind_groups: [wgpu::BindGroup; 2],
@@ -65,7 +116,7 @@ pub struct GpuSim {
 type ChangeLog = Vec<u32>;
 
 impl GpuSim {
-    pub fn new(w: u32, h: u32, cells: &[u8], batch: u32) -> Result<Self> {
+    pub fn new(w: u32, h: u32, cells: &[u8], batch: u32, engine: Engine) -> Result<Self> {
         let cell_count = (w as usize) * (h as usize);
         anyhow::ensure!(cells.len() == cell_count, "cell count mismatch: {} cells for {w}x{h}", cells.len());
         anyhow::ensure!(batch >= 1, "batch must be >= 1");
@@ -110,11 +161,11 @@ impl GpuSim {
 
         let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dims"),
-            size: 16,
+            size: DIMS_SIZE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&dims_buf, 0, bytemuck::cast_slice(&[w, h, tiles_x, tiles_y]));
+        queue.write_buffer(&dims_buf, 0, bytemuck::cast_slice(&[w, h, tiles_x, tiles_y, 0u32, 0, 0, 0]));
 
         // GenParams テーブル: エントリ slot は { slot }。dynamic offset slot*STRIDE で世代ごとに選ぶ
         let gen_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -204,22 +255,94 @@ impl GpuSim {
             label: Some("wirelevel"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WGSL_SHADER)),
         });
-        let dense_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("dense"),
-            bind_group_layouts: &[&cell_layout],
-            push_constant_ranges: &[],
-        });
-        let step_dense = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("step_dense"),
-            layout: Some(&dense_layout),
+        let make_pipeline = |label: &str, layout: &wgpu::PipelineLayout| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
             module: &shader,
-            entry_point: Some("step_dense"),
+            entry_point: Some(label),
             cache: None,
             compilation_options: Default::default(),
         });
 
+        let stepper = match engine {
+            Engine::Dense => {
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("dense"),
+                    bind_group_layouts: &[&cell_layout],
+                    push_constant_ranges: &[],
+                });
+                Stepper::Dense { step_dense: make_pipeline("step_dense", &layout) }
+            }
+            Engine::Tiled => {
+                let tile_count = tiles_x * tiles_y;
+                let max_workgroups = device.limits().max_compute_workgroups_per_dimension;
+                anyhow::ensure!(tile_count + ARGS_CONTROL_WORKGROUPS <= max_workgroups,
+                    "grid {w}x{h} has {tile_count} tiles; tiled engine dispatches up to {} workgroups (limit {max_workgroups}). Use --engine dense",
+                    tile_count + ARGS_CONTROL_WORKGROUPS);
+                let list_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("active_lists"),
+                    entries: &[
+                        storage_entry(0, true),
+                        storage_entry(1, false),
+                        storage_entry(2, false),
+                        storage_entry(3, false),
+                        storage_entry(4, false),
+                    ],
+                });
+                let make_list = |i: usize| device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("list{i}")),
+                    size: 4 * tile_count as u64,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                let lists: [wgpu::Buffer; LIST_ROTATION] = std::array::from_fn(make_list);
+                let make_args = |i: usize| device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("args{i}")),
+                    size: 12,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let args: [wgpu::Buffer; LIST_ROTATION] = std::array::from_fn(make_args);
+                let stamps = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("stamps"),
+                    size: 4 * tile_count as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let list_bind_groups: [wgpu::BindGroup; LIST_ROTATION] = std::array::from_fn(|r| {
+                    let next = (r + 1) % LIST_ROTATION;
+                    let free = (r + 2) % LIST_ROTATION;
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &list_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: lists[r].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: lists[next].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: args[next].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 3, resource: args[free].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 4, resource: stamps.as_entire_binding() },
+                        ],
+                    })
+                });
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("tiled"),
+                    bind_group_layouts: &[&cell_layout, &list_layout],
+                    push_constant_ranges: &[],
+                });
+                Stepper::Tiled(TiledStepper {
+                    step_full: make_pipeline("step_full", &layout),
+                    step_list: make_pipeline("step_list", &layout),
+                    args, list_bind_groups, stamps,
+                    rot: 0,
+                    stamp_base: 0,
+                    // 初期グリッドが固定点とは限らないので、初回は全タイルを計算する
+                    needs_full_step: true,
+                })
+            }
+        };
+
         Ok(GpuSim {
-            device, queue, step_dense,
+            device, queue, stepper, dims_buf,
             cell_bufs, cell_bind_groups,
             change_log, change_log_read, cells_read,
             w, h, tiles_x, tiles_y, batch,
@@ -232,19 +355,53 @@ impl GpuSim {
         &self.cell_bufs[self.front]
     }
 
-    /// n 世代ぶんのコマンドを 1 つの compute pass に積む。世代 i は changeLog[i] に変化タイル数を足す。
+    /// n 世代ぶんのコマンドを積む。世代 i は changeLog[i] に変化タイル数を足す。
+    /// Tiled ではバッチ前の準備 (stamp_base・args の初期化) を queue.write_buffer で行うので、
+    /// 呼び出し側は encoder を次に submit すること。
     fn encode_gens(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) {
-        debug_assert!(n <= MAX_GENS_PER_BATCH);
+        debug_assert!((1..=MAX_GENS_PER_BATCH).contains(&n));
+        if let Stepper::Tiled(t) = &mut self.stepper {
+            if t.stamp_base > STAMP_RESET_THRESHOLD {
+                encoder.clear_buffer(&t.stamps, 0, None);
+                t.stamp_base = 0;
+            }
+            self.queue.write_buffer(&self.dims_buf, 16, bytemuck::cast_slice(&[t.stamp_base]));
+            if t.needs_full_step {
+                // step_full は argsNext に積み、argsFree は触らない。全リストを空にしてから始める
+                for a in &t.args {
+                    self.queue.write_buffer(a, 0, bytemuck::cast_slice(&[ARGS_CONTROL_WORKGROUPS, 1, 1]));
+                }
+            }
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.step_dense);
         for slot in 0..n {
             let offset = (slot as u64 * GEN_PARAMS_STRIDE) as u32;
             pass.set_bind_group(0, &self.cell_bind_groups[self.front], &[offset]);
-            pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
+            match &mut self.stepper {
+                Stepper::Dense { step_dense } => {
+                    pass.set_pipeline(step_dense);
+                    pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
+                }
+                Stepper::Tiled(t) => {
+                    pass.set_bind_group(1, &t.list_bind_groups[t.rot], &[]);
+                    if t.needs_full_step {
+                        pass.set_pipeline(&t.step_full);
+                        pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
+                        t.needs_full_step = false;
+                    } else {
+                        pass.set_pipeline(&t.step_list);
+                        pass.dispatch_workgroups_indirect(&t.args[t.rot], 0);
+                    }
+                    t.rot = (t.rot + 1) % LIST_ROTATION;
+                }
+            }
             self.front = 1 - self.front;
+        }
+        if let Stepper::Tiled(t) = &mut self.stepper {
+            t.stamp_base += n;
         }
     }
 
@@ -286,9 +443,14 @@ impl GpuSim {
 
     /// front バッファの 1 セルを書き換える。Pin セルは step で不変・毎世代コピーされる
     /// ため、front 側 1 バッファへの書き込みだけで以降の全世代に反映される。
+    /// Tiled では次の 1 世代を全タイル計算にする (書いたセルのタイルと隣接タイルを確実に動かし、
+    /// 書いたタイルで back 側に残る古い値を上書きするため。F# settleIncremental の「初回は全セル評価」と同じ)
     pub fn write_cell(&mut self, x: u32, y: u32, byte: u8) {
         let offset = ((y * self.w + x) as u64) * 4;
         self.queue.write_buffer(self.front_buf(), offset, bytemuck::cast_slice(&[byte as u32]));
+        if let Stepper::Tiled(t) = &mut self.stepper {
+            t.needs_full_step = true;
+        }
     }
 
     /// 固定点 (step(g) == g) まで実行する。F# WireLevel.settle (`next = cur` で停止) と同値の判定。

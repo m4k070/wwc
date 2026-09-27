@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::gpu::{load_bin, save_bin, GpuSim};
+use crate::gpu::{load_bin, save_bin, Engine, GpuSim};
 
 #[derive(Deserialize, Clone, Copy)]
 pub struct Xy { pub x: u32, pub y: u32 }
@@ -52,6 +52,7 @@ pub struct Step {
 
 pub struct ProgOpts {
     pub batch: u32,
+    pub engine: Engine,
     pub dump_regs: bool,
     pub dump_dir: Option<PathBuf>,
 }
@@ -140,7 +141,7 @@ pub fn run_program(prog_path: &Path, opts: &ProgOpts) -> Result<i32> {
     println!("Program: {} steps, circuit={}, grid {w}×{h}, maxStepsPerPhase={}, checkInterval={}",
         prog.steps.len(), meta.circuit, prog.max_steps_per_phase, prog.check_interval);
 
-    let mut sim = GpuSim::new(w, h, &init_cells, opts.batch)?;
+    let mut sim = GpuSim::new(w, h, &init_cells, opts.batch, opts.engine)?;
     if let Some(d) = &opts.dump_dir { fs::create_dir_all(d)?; }
 
     let mut passed = 0u32;

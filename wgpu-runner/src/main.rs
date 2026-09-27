@@ -8,10 +8,11 @@ mod routed_meta;
 use std::env;
 use std::path::PathBuf;
 use anyhow::{Context, Result};
-use gpu::{load_bin, save_bin, GpuSim};
+use gpu::{load_bin, save_bin, Engine, GpuSim};
 
 fn print_usage() {
     eprintln!("Usage: wgpu-runner <input.bin> [--steps N] [--output out.bin] [--batch B]");
+    eprintln!("       (全モード共通) [--engine tiled|dense]   # tiled: 動いたタイルだけ計算 (既定)、dense: 毎世代全セル");
     eprintln!("       wgpu-runner --program prog.json [--dump-regs] [--dump-dir DIR] [--batch B]");
     eprintln!("       wgpu-runner --memory prog.json [--batch B] [--dump-dir DIR]   # メモリバスモード (Step B)");
 }
@@ -31,6 +32,7 @@ fn main() -> Result<()> {
     let mut memory_path: Option<PathBuf> = None;
     let mut dump_regs = false;
     let mut dump_dir: Option<PathBuf> = None;
+    let mut engine = Engine::Tiled;
 
     let mut i = 1;
     while i < args.len() {
@@ -42,6 +44,7 @@ fn main() -> Result<()> {
             "--memory" => { i += 1; memory_path = Some(PathBuf::from(&args[i])); }
             "--dump-regs" => { dump_regs = true; }
             "--dump-dir" => { i += 1; dump_dir = Some(PathBuf::from(&args[i])); }
+            "--engine" => { i += 1; engine = args[i].parse()?; }
             s if s.starts_with('-') => { anyhow::bail!("unknown flag {s}"); }
             _ => { input = PathBuf::from(&args[i]); }
         }
@@ -50,14 +53,14 @@ fn main() -> Result<()> {
 
     // ---- プログラムモード (命令レベル検証) ----
     if let Some(prog) = program_path {
-        let opts = program::ProgOpts { batch, dump_regs, dump_dir };
+        let opts = program::ProgOpts { batch, engine, dump_regs, dump_dir };
         let code = program::run_program(&prog, &opts)?;
         std::process::exit(code);
     }
 
     // ---- メモリバスモード (Step B: ROM/RAM 駆動シミュレーション) ----
     if let Some(prog) = memory_path {
-        let opts = memory_program::MemProgOpts { batch, dump_dir };
+        let opts = memory_program::MemProgOpts { batch, engine, dump_dir };
         let code = memory_program::run_memory_program(&prog, &opts)?;
         std::process::exit(code);
     }
@@ -70,7 +73,7 @@ fn main() -> Result<()> {
     let (w, h, cells) = load_bin(&input)?;
     println!("Loaded {w}×{h} grid ({} cells)", cells.len());
 
-    let mut sim = GpuSim::new(w, h, &cells, batch)?;
+    let mut sim = GpuSim::new(w, h, &cells, batch, engine)?;
     sim.run(steps);
     let result = sim.read_cells()?;
 
