@@ -19,6 +19,7 @@
 //     --max-mismatches N ロックステップの食い違いを何件まで詳しく出すか (既定 20)
 //     --progress N       N 周期ごとに進捗を出す (既定 200,000。0 で出さない)
 //     --strict-phases    DESIGN-VERIFY.md §5.2 どおり 1 周期 3 回 settle する (既定は 2 回。下記)
+//     --trace FROM:TO    その周期範囲で 1 周期ごとのバス・レジスタ・phase を出す (開始時に PC 周辺のメモリも出す)
 //
 // 1 周期 (DESIGN-VERIFY.md §5.2 の単相手順。メモリは gbfs の Memory.read / Memory.write):
 //   出力 addr/mem_read/mem_write/data_out/int_ack を読む → 書込 (シリアル観測を含む) → int_ack で IF を下ろす
@@ -91,7 +92,9 @@ type Options =
       Lockstep: bool
       MaxMismatches: int
       ProgressInterval: int64
-      StrictPhases: bool }
+      StrictPhases: bool
+      /// この周期範囲 (両端を含む) で 1 周期ごとのバスとレジスタを出す
+      Trace: (int64 * int64) option }
 
 let parseArgs (args: string list) : Result<Options, string> =
     let rec go opts rest =
@@ -105,10 +108,14 @@ let parseArgs (args: string list) : Result<Options, string> =
         | "--max-mismatches" :: n :: tail -> go { opts with MaxMismatches = int n } tail
         | "--progress" :: n :: tail -> go { opts with ProgressInterval = int64 n } tail
         | "--strict-phases" :: tail -> go { opts with StrictPhases = true } tail
+        | "--trace" :: range :: tail ->
+            match range.Split ':' with
+            | [| a; b |] -> go { opts with Trace = Some (int64 a, int64 b) } tail
+            | _ -> Error (sprintf "--trace は FROM:TO (周期) で指定する: %s" range)
         | a :: _ when a.StartsWith "--" -> Error (sprintf "不明な引数: %s" a)
         | p :: tail -> go { opts with Roms = p :: opts.Roms } tail
     go { Roms = []; MaxCycles = DefaultMaxCycles; TsvPath = None; GbfsTsvPath = DefaultGbfsTsv
-         Lockstep = false; MaxMismatches = 20; ProgressInterval = DefaultProgressInterval; StrictPhases = false } args
+         Lockstep = false; MaxMismatches = 20; ProgressInterval = DefaultProgressInterval; StrictPhases = false; Trace = None } args
 
 // --- 回路 --------------------------------------------------------------------
 
@@ -407,6 +414,12 @@ let lockstepBoundary
             patchIoReads ioReads pending.Prepared.Mem
             let stepped = Decoder.step pending.Prepared
             let diffs = formatDiffs (diffRegisters (refRegisters stepped) rtlRegs) (diffMemory stepped.Mem peripherals.Mem)
+            // 読み違えないよう、食い違った命令の実行前の値 (RTL と一致していたもの) も添える
+            let before =
+                refRegisters pending.Prepared
+                |> List.map (fun (name, v) -> sprintf "%s=%0*X" name (if name = "SP" || name = "PC" then 4 else 2) v)
+                |> String.concat " "
+            let diffs = if diffs.IsEmpty then diffs else diffs @ [ "実行前: " + before ]
             if diffs.IsEmpty then { ls with Reference = stepped }
             else
                 let m = { BoundaryIndex = ls.Boundaries; Cycle = cycle; Instruction = pending.Description
@@ -532,6 +545,22 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
         sim <- sLow |> applyWrites c [ bus.Clock, 1UL ]
         // 4. 命令境界の観測 (posedge 後のバス出力で判定する)
         let next = readBusRequest circuit sim
+        match opts.Trace with
+        | Some (fromCycle, toCycle) when cycle >= fromCycle && cycle <= toCycle ->
+            let regs = readRegisters circuit sim |> Map.ofList
+            if cycle = fromCycle then
+                let pc = uint16 regs.["PC"]
+                let start = (pc - 0x40us) &&& 0xFFF0us
+                for row in 0 .. 7 do
+                    let a = start + uint16 (row * 16)
+                    let bytes = [ for i in 0 .. 15 -> sprintf "%02X" (Memory.read (a + uint16 i) peripherals.Mem) ] |> String.concat " "
+                    printfn "  [mem] %04X: %s" a bytes
+            let phaseIndex = circuit.Probes.Phase |> Array.tryFindIndex (fun i -> sim.Values.[i]) |> Option.defaultValue -1
+            let control = readControl circuit sim
+            printfn "  [trace] cyc=%d bus(%s%s addr=%04X din=%02X dout=%02X ack=%02X irq=%02X) -> phase=%d cb=%b a=%02X f=%02X b=%02X c=%02X d=%02X e=%02X h=%02X l=%02X sp=%04X pc=%04X ime=%b halted=%b"
+                cycle (if request.IsRead then "R" else "-") (if request.IsWrite then "W" else "-") request.Addr dataIn request.DataOut request.IntAck irq
+                phaseIndex sim.Values.[circuit.Probes.CbPrefix] regs.["A"] regs.["F"] regs.["B"] regs.["C"] regs.["D"] regs.["E"] regs.["H"] regs.["L"] regs.["SP"] regs.["PC"] control.Ime control.Halted
+        | _ -> ()
         let boundary =
             if not wasFetchPhase then None
             elif next.IntAck <> 0uy then Some (InterruptDispatch next.IntAck)
