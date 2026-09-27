@@ -4,32 +4,87 @@
 
 ```bash
 dotnet build src/WwHdl.fsproj          # build
-dotnet fsi src/RunTests.fsx            # all tests
+dotnet fsi src/RunTests.fsx            # F# 全テスト
 web/run-test.sh                        # WebGPU golden tests (Playwright/SwiftShader)
 wgpu-runner/run-tests.sh               # GPU golden tests (Rust + wgpu, RTX 3060)
-wgpu-runner/target/release/wgpu-runner # Rust native wgpu CLI (run single .bin)
-dotnet build src/WwHdl.fsproj -c Release && dotnet fsi src/CoSimGbfs.fsx [--lockstep] [--tsv out.tsv] <rom.gb>  # sm83_full RTL + gbfs 周辺回路で公開テスト ROM (blargg) を流す
+cd wgpu-runner && cargo test           # Rust 側ユニットテスト
+wgpu-runner/memory-test.sh [program.json ...]   # メモリバス golden 照合 + 検証器の自己検証
+wgpu-runner/target/release/wgpu-runner --memory <prog.json> [--engine tiled|dense] [--batch B] [--dump-dir DIR]
+wgpu-runner/target/release/wgpu-runner <grid.bin> [--steps N] [--output out.bin] [--batch B] [--engine tiled|dense]   # 単発 .bin 実行
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
 
+You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` (or any `src/*.fsx` script) —
+they reference the compiled DLL (`src/bin/Debug/net8.0/WwHdl.dll`).
+
+**Current test results** (2026-09-28 に実測): F# `RunTests.fsx` **287/287** /
+`cargo test` (wgpu-runner) **44/44** / `wgpu-runner/run-tests.sh` (GPU golden) **24/24** /
+`wgpu-runner/memory-test.sh` (引数なし) **5/5**。
+Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計測。
+
+### 配線・検証まわりのスクリプト (`src/*.fsx`)
+
+各スクリプトの正確なオプションは冒頭のコメントを見ること（下記は要約、フラグの追加/変更はコメント側が正）。
+
+```bash
+# 配線して routed/<circuit>.{bin,meta.json} に保存（保存後に自動で再読込して整合性確認）
+dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] \
+    [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P] \
+    [--clocking single|two-phase]
+
+# sm83_full の配線実績コマンド（20x14 ピッチ・アニーリング配置・2 相クロックで約 16 分、rip-up 0）
+dotnet fsi src/ExportRouted.fsx sm83_full --pitch 20 14 --place anneal --clocking two-phase
+
+# 保存済み配線結果の整合性・鮮度確認 (寸法/ピン座標/verilog JSON の SHA-256)
+dotnet fsi src/LoadRouted.fsx <circuit> [--dir DIR]
+
+# プログラム JSON (wgpu-runner --memory と同形式) を NetlistSim で実行し golden を生成
+dotnet fsi src/ExportGolden.fsx <program.json>
+
+# 配線済みグリッドの hold 静的解析 (single-edge: skew 検査 / two-phase: 相間経路 0 本の検査)
+dotnet fsi src/AnalyzeHold.fsx <circuit> [--dir DIR] [--top N] [--clk PORT]
+dotnet fsi src/AnalyzeHold.fsx --compile <circuit> [--place rowmajor|anneal] [--clocking single|two-phase]
+dotnet fsi src/AnalyzeHold.fsx --selftest        # 静的判定と実シミュレーションの掃引照合
+
+# 配線前の密度分析 (配置の質 vs 面積不足の切り分け)
+dotnet fsi src/AnalyzePlacement.fsx <circuit> [--pitch X Y] [--place rowmajor|anneal] \
+    [--moves N] [--seed N] [--backward P] [--lcut N] [--tile N]
+
+# sm83_full ネットリスト vs ../gbfs (別リポジトリの F# 製 GB エミュレータ) の CPU 全命令差分テスト
+# 前提: dotnet build src/WwHdl.fsproj と (cd ../gbfs && nix develop -c dotnet build src/gbfs.Lib/gbfs.Lib.fsproj -c Release)
+dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46,...] [--interrupts N]
+
+# sm83_full の RTL (NetlistSim) を gbfs の周辺回路 (Timer/Ppu/Joypad) につないで公開テスト ROM (blargg) を流す
+# NetlistSim は Debug だと遅いため Release ビルド必須
+dotnet build src/WwHdl.fsproj -c Release
+dotnet fsi src/CoSimGbfs.fsx [--lockstep] [--tsv out.tsv] [--trace FROM:TO] <rom.gb>...
+```
+
 ## Architecture
 
-Multi-file F# project (10 files in `src/`). Files are compiled in dependency order:
+Multi-file F# project (18 files in `src/`, ~9,300 lines). Compile order is defined by
+`src/WwHdl.fsproj` (this is also the dependency order):
 
 ```
-Domain.fs      # Units, Domain, Rule, Netlist            ( 98 lines)
-WireLevel.fs   # 独自CAルール (レベル駆動・pull型有向配線) — 新ターゲット
-Library.fs     # StdCell definitions, CellTest            (516 lines)
-Place.fs       # Placement algorithm                       (23 lines)
-Route.fs       # Lee/BFS routing algorithm                (255 lines)
-Sta.fs         # Static timing analysis                   (290 lines)
-Sim.fs         # Clock-gated simulation                   (189 lines)
-Pipeline.fs    # Yosys JSON frontend/parse + WireWorld pipeline (legacy)   (765 lines)
-TwoPhaseClock.fs # 2 相ノンオーバーラップクロック (toTwoPhase) と CA のクロック駆動 (ClockDrive)
-PipelineWL.fs  # yosys Netlist → WireLevel コンパイラ (P0)
-HoldAnalysis.fs  # 配線済みグリッドの hold 静的解析 (AnalyzeHold.fsx の本体、2 相の不変条件検査)
-E2eTests.fs    # All test modules                         (~1500 lines)
+Domain.fs        # Units, Domain, Rule, Netlist                              (  98 lines)
+WireLevel.fs     # 独自CAルール (レベル駆動・pull型有向配線) — メインターゲット      ( 393 lines)
+TwoPhaseClock.fs # 2 相ノンオーバーラップクロック (toTwoPhase, DFF のマスタ/スレーブ分割) ( 257 lines)
+Library.fs       # StdCell definitions, CellTest (WireWorld legacy)          ( 516 lines)
+GatePlacement.fs # ゲート配置のシミュレーテッドアニーリング (アーク距離最小化)      ( 386 lines)
+Place.fs         # Placement algorithm (WireWorld legacy)                    (  23 lines)
+Route.fs         # Lee/BFS routing algorithm (WireWorld legacy)              ( 284 lines)
+Sta.fs           # Static timing analysis (WireWorld legacy)                 ( 290 lines)
+Sim.fs           # Clock-gated simulation (WireWorld legacy)                 ( 189 lines)
+Pipeline.fs      # Yosys JSON frontend/parse + WireWorld pipeline (legacy)   ( 760 lines)
+PipelineWL.fs    # yosys Netlist → WireLevel コンパイラ (配置・A* 配線・クロック均等化) (1337 lines)
+RoutedArtifact.fs # 配線済みグリッドの保存・再読込 (.bin + meta JSON、鮮度確認)   ( 534 lines)
+HoldAnalysis.fs  # 配線済みグリッドの hold 静的解析 (AnalyzeHold.fsx の本体)     ( 431 lines)
+NetlistSim.fs    # ゲートレベル周期シミュレータ (CA と同じ規則、検証の期待値生成用) ( 235 lines)
+Testbench.fs     # メモリバス TB (runner --memory と同じプログラム JSON、golden 生成) ( 425 lines)
+E2eTests.fs      # All test modules (CellTest 〜 MultiGateTest 等)            (2458 lines)
+TestbenchTests.fs # Testbench の単体テスト + sm83_full 仕様テスト             ( 228 lines)
+TwoPhaseTests.fs  # 2 相クロックの単体テスト・skew 耐性の実証テスト            ( 495 lines)
 ```
 
 yosys は `nix develop --command yosys ...` で使う (flake.nix に同梱)。
@@ -38,67 +93,76 @@ yosys は `nix develop --command yosys ...` で使う (flake.nix に同梱)。
 
 順序回路合成は `dffunmap` が必要: `nix develop --command yosys -p "read_verilog verilog/mincpu.v; synth -top top -flatten; dffunmap; abc -g NAND; opt_clean; write_json verilog/mincpu.json"` (DFF は `$_DFF_P_` のみサポート。`$_DFFE_PP0P_` 等は PipelineWL.parseGateKind が未対応)
 
-Module dependency order (within and across files):
-
-`Units` → `Domain` → `Rule` → `Netlist` → `Library` → `CellTest` → `Place` → `Route` → `Sta` → `Sim` → `Pipeline` → `FrontendTest` → `RoutingTest` → `StaTest` → `E2eTest` → `MultiStageTest` → `NandGateTest` → `MultiGateTest`
-
-**Compile pipeline** (railway-oriented, each stage returns `Result<'b, CompileError>`):
+**Compile pipeline** (WireWorld legacy, railway-oriented, each stage returns `Result<'b, CompileError>`):
 
 ```
 HDL → Yosys JSON → Netlist → (Gate × StdCell) → Placement → Wires → Grid → Golly RLE
 ```
 
-**WireLevel compile pipeline** (PipelineWL.fs):
+**WireLevel compile pipeline** (メイン、`PipelineWL.fs`):
 
 ```
-HDL → Yosys JSON → Netlist → Place (grid) → Route (A* BFS) → Emit (WireLevel grid)
+HDL → Yosys JSON → Netlist → Place (rowmajor|anneal) → Route (A* BFS) → (単相ならクロック均等化 / 2相なら DFF 分割)
+    → WireLevel Grid → RoutedArtifact (.bin + meta) → NetlistSim/Testbench (golden) → wgpu-runner (GPU 検証)
 ```
 
 Key design choices:
 - Sparse grid: `Map<Coord, CellState>` (Empty = key absent)
-- `[<Measure>] type gen` — WireWorld generations as a unit of measure; `StdCell.Latency: int<gen>` and `Wire.Delay: int<gen>` share the same dimension
+- `[<Measure>] type gen` — WireLevel/WireWorld generations as a unit of measure
 - Each pipeline stage returns a **different type** to catch stage misordering at compile time
 - Yosys normalizes all logic to NAND+NOT only (`abc -g NAND,NOT`); no monolithic AND/XOR cells
+- 配置は既定で行優先 (`rowmajor`)。密な回路 (sm83_full 規模) はシミュレーテッドアニーリング配置
+  (`GatePlacement.fs`、アーク距離の総和を最小化) の方が配線完走率が大きく上がる。詳細は TODO.md 「残課題」参照
+- クロックは既定で単相 + 経路長均等化 (`balanceClockNet`)。アニーリング配置のように密になると
+  均等化の蛇行余地がなくなり hold 違反が出るため、2 相ノンオーバーラップクロック
+  (`TwoPhaseClock.fs`、下記「クロック方式」参照) を使う
 
 ## Test structure
 
-Tests are modules inside `WwHdl.fs`, not a separate test project. RunTests.fsx calls `runAll()` on each test module. Test groups: CellTest (M1), FrontendTest (M2), RoutingTest (M3), StaTest (M4), E2eTest (M5), MultiStageTest, NandGateTest, MultiGateTest.
+Tests are modules across `E2eTests.fs` / `TestbenchTests.fs` / `TwoPhaseTests.fs`
+(not a separate test project). `RunTests.fsx` calls `runAll()` on each test module.
 
-You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` — the script references the compiled DLL.
+主なテストモジュール: CellTest / FrontendTest / RoutingTest / StaTest / E2eTest / MultiStageTest /
+NandGateTest / MultiGateTest (WireWorld legacy、凍結) / WlSm83Test / RoutedArtifactTest /
+NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacementTest / WL-2PH 系
+(TwoPhaseClock/settleIncremental/skew 耐性)。内訳は README.md の「テスト」表を参照。
 
-**Total tests**: 152. Current pass rate: **151/152** (WL Mincpu 1 fail: `verilog/mincpu.json` not found — synthesize with yosys first)。GPU golden tests: **24/24** パス (RTX 3060, Vulkan)。
+**SM83 multi-instruction golden tests** (`ExportSm83Multi.fsx` + `golden-cases.json`): 4 命令 (NOP/LD_A/LD_B/ADD) の各 clk phase (high/low) の F# `settle` をリファレンスとし、GPU が byte-exact 一致することを検証 (8 tests)。
 
-**SM83 CPU test** (`WlSm83Test`): compileWL で sm83_min.json (380 gates, 69k cells) をコンパイルし、DFF マッピング・ピン構成・初期化状態を検証 (7 tests)。compileWL は A* ルーティングが支配的で 53 秒を要する。
+**重要な発見 (DFF ラッチのタイミング)**: DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その時点での入力値を捕捉する。命令値の変更後、必ずクロックが低いまま組合せ論理を収束させてから立ち上げないと、伝播前の古い値が捕捉される。単相・2 相いずれのクロック駆動手順もこれを踏まえて「相ごとに収束を挟む」形になっている (詳細は DESIGN-VERIFY.md §5.2 / §5.2.1)。
 
-**SM83 multi-instruction golden tests** (`ExportSm83Multi.fsx` + `golden-cases.json`): 4 命令 (NOP/LD_A/LD_B/ADD) の各 clk phase (high/low) の F# `settle` をリファレンスとし、GPU が byte-exact 一致することを検証 (8 tests)。レジスタ値 (A/B/PC/Flags) を Verilog 仕様と照合済み:
-- NOP: a=0, b=0, pc=1, flags=0x0 ✓
-- LD_A #42: a=42, b=0, pc=2, flags=0x0 ✓
-- LD_B #17: a=42, b=17, pc=3, flags=0x0 ✓
-- ADD A,B (42+17): a=59, b=17, pc=4, flags=0x2 ✓
+## クロック方式
 
-**重要な発見**: DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その時点での入力値を捕捉する。命令値の変更後、必ず clk=0 のまま組合せ論理を収束させてから clk=1 に遷移しないと、伝播前の古い値が捕捉される。これを `ExportSm83Multi.fsx` では setup settle (clk=0 で inst 変更 → settle → clk=1 → settle) の2段階で対処。
-
-既存の golden tests (sm83-cyc0, sm83p0 系) は NOP のみテストしているためこの問題に影響しない。
-
-## Clock balance
-
-`PipelineWL.balanceClockNet` はクロックツリーの経路長を均等化する。小規模回路 (counter4, reg8) では skew=0 に調整可能。
-287ゲートの mincpu では配線リソース不足でスキュー非調整となり警告を出すが、CPU の動作自体は正しい
-(cyc6 で out=4 を確認。F# シミュレーションは 46k セルで ~80s/cycle)。
-
-スキュー非調整でも `balanceClocks` は `Ok` を返し、コンパイルは続行される。
+- **単相 (`Clocking.SingleEdge`、既定)**: `PipelineWL.balanceClockNet` がクロックツリーの経路長を均等化する。
+  小規模回路 (counter4, reg8) では skew=0 に調整可能。密な回路では配線資源不足で均等化しきれず hold 違反の
+  リスクが残る (`AnalyzeHold.fsx` で検査)。
+- **2 相ノンオーバーラップ (`Clocking.TwoPhase`、CLI: `--clocking two-phase`)**: 各 DFF をマスター (clk_a) /
+  スレーブ (clk_b) に分け、skew 均等化をしない。ホストは「clk_a=1 → settle → clk_a=0, clk_b=1 → settle」
+  (2 周期目以降は短縮手順) で駆動する。同じ相の DFF 間に組合せ経路が無い限り hold 違反が構造的に起きない。
+  手順の正確な根拠は DESIGN-VERIFY.md §5.2.1、不変条件の検査は `AnalyzeHold.fsx` (`--clocking two-phase` /
+  meta の `clocking` から自動判定)。論理 Netlist / NetlistSim / golden は単相のまま変わらない。
+  sm83_full はこの方式で 16.1 分・rip-up 0 で配線完走した (2026-09-27)。
 
 ## External dependency
 
-Yosys is needed to synthesize Verilog to JSON. Not bundled — must be installed separately.
+- **Yosys** — Verilog を JSON に合成するために必要。Not bundled — `nix develop` 経由で使う。
+- **gbfs** (`../gbfs`、別リポジトリの F# 製 Game Boy エミュレータ) — `DiffTestGbfs.fsx` / `CoSimGbfs.fsx`
+  が参照モデルとして使う。事前に `gbfs.Lib` を Release ビルドしておく必要がある。
+
+## sm83_full の現状 (2026-09-27, PR #5)
+
+sm83_full (通常命令 (STOP を除く) + CB prefix 256 + 割込み + HALT バグ、組合せ 10,859 + DFF 181) は
+**20x14 ピッチ・アニーリング配置・2 相クロックで配線完走** (16.1 分、rip-up 0、`routed/sm83_full.{bin,meta.json}`)。
+RTL の正しさは blargg `cpu_instrs` 個別版 **11/11 PASS** (`CoSimGbfs.fsx --lockstep`) で、
+RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式) で確認済み。
+残課題 (優先順) は TODO.md 「残課題」節を参照 (CA 高速化、`compileWL` の既定値見直し、サイクル精度、
+mooneye acceptance 系、STOP 未実装、NetlistSim 高速化など)。
 
 ## 2026-06-10: LargeCircuit BFS timeout resolved
 
 **Root cause**: `YosysModule.Cells` used `Map<string, YosysCell>`, and `Map.toList` sorts alphabetically by key name. For 50 NAND gates, `u10` (index 2, row 2) came before `u2` (index 12, row 12), scattering consecutive chain gates across 49 rows. NetId 9's output (gate u9, row 49) needed to reach consumer u10 (row 2) — Manhattan distance 1327 cells.
 
 **Fix**: Changed `parseCells` from `Map.ofSeq` to `List.ofSeq`, and `parseGates` from `m.Cells |> Map.toList` to `m.Cells` directly. This preserves JSON declaration order (numeric order: u0, u1, u2, ..., u49) instead of string-sorted order.
-
-50-gate and 100-gate NAND chains now compile successfully.
 
 ## 2026-06-11: WireLevel への戦略ピボット (DESIGN-CA2.md)
 
@@ -115,37 +179,17 @@ Yosys is needed to synthesize Verilog to JSON. Not bundled — must be installed
 toggle FF (DFF+NOT ループ) の複数サイクル動作を検証済み — WireWorld で
 不可能だった順序回路が動く。詳細は **DESIGN-CA2.md** 参照。
 
-GPU 実行は WebGPU (ブラウザ + WGSL compute、ping-pong バッファ) で実現済み。
-F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte
-エンコーディングが GPU 側と共有される。
-
-GPU golden tests: **24/24 パス** (Rust + wgpu + RTX 3060, Vulkan)。
-GPU 結果は F# `settle` と byte-exact 一致。
-ベンチマーク (RTX 3060):
-- sm83-cyc0-high (139k cells, 2000 steps): 0.41s (SwiftShader 比 44x 高速)
-- sm83p0-cyc0-high (425k cells, 2500 steps): 0.46s (SwiftShader 比 130x 高速)
-- mincpu-clk1 (105k cells, 3500 steps): 0.39s (F# ref 比 205x 高速)
-- sm83-mc-add-high (139k cells, 2419 steps): 0.56s (F# ref 比 280x 高速)
+GPU 実行は WebGPU (ブラウザ + WGSL compute、ping-pong バッファ) と Rust + wgpu (ネイティブ CLI、
+`wgpu-runner/`) で実現済み。F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte
+エンコーディングが GPU 側と共有される。GPU 結果は F# `settle` と byte-exact 一致。
 
 WireWorld 系パイプライン (junc3/STA/クロック注入 Sim) は組合せ回路デモとして
 維持。新規開発は WireLevel 上で行う。
 
 詳細な技術情報はスキルファイルを参照:
-
-詳細な技術情報はスキルファイルを参照:
 - **fsharp-wireworld**: F#イディオム, Units of Measure, Struct gotchas, Yosys JSONパース, Map疎グリッド
 - **compiler-pipeline**: パイプライン各段の実装詳細 (Frontend/TechMap/Place/Route/STA/Emit)
 - **routing-placement**: 配置モード, Lee法BFS, passable判定, オーバーラップフォールバック
-- **fsharp-testing**: テストアーキテクチャ, 8つのテストパターン, ヘルパー関数
+- **fsharp-testing**: テストアーキテクチャ, テストパターン, ヘルパー関数
 - **sta-simulation**: 到達時刻/スラック, 遅延挿入 (waypoint/U字), クロックシミュレーション
 - **wireworld-domain**: StdCell全定義, JUNC3/NAND/NOT/DIODE/SPLIT/OR2設計, 遷移規則
-
-## 2026-09-27: 2 相ノンオーバーラップクロック (`--clocking two-phase`)
-
-アニーリング配置で密になると skew 均等化の蛇行余地がなく、sm83_full で hold 違反 144 組が出た。
-`PipelineWL.compileWLWithOptions { ... Clocking = Clocking.TwoPhase }` (CLI: `ExportRouted.fsx --clocking two-phase`) は
-WL コンパイル経路の中だけで各 DFF をマスター (clk_a) / スレーブ (clk_b) に分け、skew 均等化をしない。
-ホストは「clk_a=1 → settle → clk_a=0, clk_b=1 → settle」で駆動する (DESIGN-VERIFY.md §5.2.1)。
-論理 Netlist / NetlistSim / golden は単相のまま。meta は formatVersion 2 (`clocking` を追加、1 は単相として読む)。
-`AnalyzeHold.fsx` は 2 相グリッドで「同相 DFF 間の組合せ経路 0 本」を検査する。
-CA レベルの F# 検証は `WireLevel.settleIncremental` (settle と同値、sm83_min で約 190 倍速) を使う。
