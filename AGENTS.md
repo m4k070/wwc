@@ -8,6 +8,7 @@ dotnet fsi src/RunTests.fsx            # all tests
 web/run-test.sh                        # WebGPU golden tests (Playwright/SwiftShader)
 wgpu-runner/run-tests.sh               # GPU golden tests (Rust + wgpu, RTX 3060)
 wgpu-runner/target/release/wgpu-runner # Rust native wgpu CLI (run single .bin)
+dotnet build src/WwHdl.fsproj -c Release && dotnet fsi src/CoSimGbfs.fsx [--lockstep] [--tsv out.tsv] <rom.gb>  # sm83_full RTL + gbfs 周辺回路で公開テスト ROM (blargg) を流す
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
