@@ -1,104 +1,18 @@
 // GpuSim — WireLevel CA の GPU シミュレータ本体。
-// ping-pong 2 バッファでバッチ実行し、任意時点でホストへ読み戻せる。
+// ping-pong 2 バッファで世代を進め、収束判定は GPU 上の変化ログ (世代ごとの変化タイル数) で行う。
 use std::fs;
 use std::path::Path;
 use anyhow::{Context, Result};
 
-pub const WGSL_SHADER: &str = r#"
-// WireLevel WGSL — level-driven, pull-type directional wiring.
-//   naga restriction: ptr<storage,...> cannot be a function parameter.
-//   All storage access goes through globals b1 (read) / b2 (write).
-const E: u32 = 0u; const W: u32 = 1u; const N: u32 = 2u; const S: u32 = 3u;
-const K_EMPTY: u32 = 0u; const K_PIN: u32 = 1u; const K_WIRE: u32 = 2u;
-const K_NAND: u32 = 3u; const K_CROSS: u32 = 4u; const K_DFF: u32 = 5u;
+/// WireLevel の 1 世代を計算するシェーダー (step_dense)
+const WGSL_SHADER: &str = include_str!("wirelevel.wgsl");
 
-struct Params { width: u32, height: u32, flags: u32, }
-@group(0) @binding(0) var<storage, read>       b1   : array<u32>;
-@group(0) @binding(1) var<storage, read_write>  b2   : array<u32>;
-@group(0) @binding(2) var<uniform>              dims : Params;
-
-fn readBuf(i: u32) -> u32 { return b1[i]; }
-fn writeBuf(i: u32, v: u32) { b2[i] = v; }
-fn kind(c: u32) -> u32 { return (c >> 5u) & 7u; }
-fn dir(c: u32) -> u32 { return (c >> 3u) & 3u; }
-fn level(c: u32) -> u32 { return c & 1u; }
-
-fn opposite(d: u32) -> u32 {
-  switch (d) { case E { return W; } case W { return E; } case N { return S; } default { return N; } }
-}
-fn delta(d: u32) -> vec2<i32> {
-  switch (d) { case E { return vec2( 1,  0); } case W { return vec2(-1,  0); }
-               case N { return vec2( 0, -1); } default { return vec2( 0,  1); } }
-}
-fn presentedTo(c: u32, toward: u32) -> u32 {
-  let k = kind(c);
-  if (k == K_EMPTY) { return 0xFFFFFFFFu; }
-  if (k == K_PIN || k == K_WIRE || k == K_NAND) { return level(c); }
-  if (k == K_DFF) { return c & 1u; }
-  if (k == K_CROSS) {
-    let hDir = select(E, W, ((c >> 4u) & 1u) == 1u);
-    let vDir = select(N, S, ((c >> 3u) & 1u) == 1u);
-    if (toward == hDir) { return c & 1u; }
-    if (toward == vDir) { return (c >> 1u) & 1u; }
-    return 0xFFFFFFFFu;
-  }
-  return 0xFFFFFFFFu;
-}
-fn pullFrom(x: i32, y: i32, side: u32) -> u32 {
-  let d = delta(side);
-  let nx = x + d.x; let ny = y + d.y;
-  if (nx < 0 || ny < 0 || nx >= i32(dims.width) || ny >= i32(dims.height)) { return 0xFFFFFFFFu; }
-  return presentedTo(readBuf(u32(ny) * dims.width + u32(nx)), opposite(side));
-}
-fn stepCell(x: i32, y: i32) -> u32 {
-  let i = u32(y) * dims.width + u32(x);
-  let cell = readBuf(i);
-  let k = kind(cell);
-  if (k == K_EMPTY || k == K_PIN) { return cell; }
-  if (k == K_WIRE) {
-    return (cell & 0xF8u) | select(0u, 1u, pullFrom(x, y, opposite(dir(cell))) == 1u);
-  }
-  if (k == K_NAND) {
-    let d = dir(cell);
-    var allTrue: bool = true; var anyInput: bool = false;
-    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
-      if (s != d) {
-        let v = pullFrom(x, y, s);
-        if (v != 0xFFFFFFFFu) { anyInput = true; if (v == 0u) { allTrue = false; } }
-      }
-    }
-    return (cell & 0xF8u) | select(0u, 1u, anyInput && !allTrue);
-  }
-  if (k == K_CROSS) {
-    let hd = select(E, W, ((cell >> 4u) & 1u) == 1u);
-    let vd = select(N, S, ((cell >> 3u) & 1u) == 1u);
-    let hv = pullFrom(x, y, opposite(hd));
-    let vv = pullFrom(x, y, opposite(vd));
-    return (cell & 0xF8u) | (select(0u, 1u, vv == 1u) << 1u) | select(0u, 1u, hv == 1u);
-  }
-  if (k == K_DFF) {
-    let d = dir(cell);
-    let dVal = select(0u, 1u, pullFrom(x, y, opposite(d)) == 1u);
-    var clk: bool = false;
-    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
-      let isPerp = ((d == E || d == W) && (s == N || s == S)) || ((d == N || d == S) && (s == E || s == W));
-      if (isPerp) { if (pullFrom(x, y, s) == 1u) { clk = true; } }
-    }
-    let prevClk = (cell >> 1u) & 1u;
-    let q = select(cell & 1u, dVal, clk && prevClk == 0u);
-    return (cell & 0xF8u) | (select(0u, 1u, clk) << 1u) | q;
-  }
-  return cell;
-}
-
-@compute @workgroup_size(16, 16)
-fn step(@builtin(global_invocation_id) gid: vec3u) {
-  let x = i32(gid.x); let y = i32(gid.y);
-  if (x >= i32(dims.width) || y >= i32(dims.height)) { return; }
-  let i = u32(y) * dims.width + u32(x);
-  writeBuf(i, stepCell(x, y));
-}
-"#;
+/// タイル (= workgroup) の一辺。wirelevel.wgsl の TILE / @workgroup_size と一致させる
+const TILE_SIZE: u32 = 16;
+/// 1 回の読み戻しで扱える最大世代数 (changeLog と GenParams テーブルの長さ)
+const MAX_GENS_PER_BATCH: u32 = 1024;
+/// GenParams テーブルの 1 エントリの間隔 (dynamic offset の既定アラインメント)
+const GEN_PARAMS_STRIDE: u64 = 256;
 
 pub fn load_bin(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     let data = fs::read(path).with_context(|| format!("reading .bin file {path:?}"))?;
@@ -123,23 +37,38 @@ pub fn save_bin(path: &Path, w: u32, h: u32, cells: &[u8]) -> Result<()> {
     Ok(())
 }
 
+
+/// WireLevel CA の GPU シミュレータ。
+/// セルは u32 に 1 個 (下位 8 ビット)。ping-pong 2 バッファで、front が現在の世代を持つ。
 pub struct GpuSim {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
-    bufs: [wgpu::Buffer; 2],
-    bind_groups: [wgpu::BindGroup; 2],
-    read_buf: wgpu::Buffer,
+    step_dense: wgpu::ComputePipeline,
+    cell_bufs: [wgpu::Buffer; 2],
+    /// cell_bind_groups[i]: cell_bufs[i] を読み cell_bufs[1-i] に書く
+    cell_bind_groups: [wgpu::BindGroup; 2],
+    /// 世代ごとの「変化したタイル数」。changeLog[slot] == 0 ⇔ その世代で step(g) == g
+    change_log: wgpu::Buffer,
+    change_log_read: wgpu::Buffer,
+    cells_read: wgpu::Buffer,
     pub w: u32,
     pub h: u32,
+    tiles_x: u32,
+    tiles_y: u32,
+    /// run() で 1 回の submit に積む世代数
     batch: u32,
-    ping: bool,
+    /// 現在の世代を持つバッファの添字 (0 or 1)
+    front: usize,
 }
+
+/// run_logged が返す、世代ごとの変化タイル数 (添字 = バッチ内の世代番号)
+type ChangeLog = Vec<u32>;
 
 impl GpuSim {
     pub fn new(w: u32, h: u32, cells: &[u8], batch: u32) -> Result<Self> {
-        let cell_count = (w * h) as usize;
-        anyhow::ensure!(cells.len() == cell_count, "cell count mismatch");
+        let cell_count = (w as usize) * (h as usize);
+        anyhow::ensure!(cells.len() == cell_count, "cell count mismatch: {} cells for {w}x{h}", cells.len());
+        anyhow::ensure!(batch >= 1, "batch must be >= 1");
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
@@ -163,121 +92,196 @@ impl GpuSim {
             None,
         )).context("requesting device")?;
 
-        let buf_size = (cell_count * 4) as u64;
+        let tiles_x = w.div_ceil(TILE_SIZE);
+        let tiles_y = h.div_ceil(TILE_SIZE);
+
+        let cell_buf_size = (cell_count * 4) as u64;
         let make_storage = |label: &str| device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
-            size: buf_size,
+            size: cell_buf_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let src_buf = make_storage("src");
-        let dst_buf = make_storage("dst");
-        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("params"),
-            size: 12,
+        let cell_bufs = [make_storage("cells0"), make_storage("cells1")];
+        let src_data: Vec<u32> = cells.iter().map(|&c| c as u32).collect();
+        for buf in &cell_bufs {
+            queue.write_buffer(buf, 0, bytemuck::cast_slice(&src_data));
+        }
+
+        let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dims"),
+            size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(&dims_buf, 0, bytemuck::cast_slice(&[w, h, tiles_x, tiles_y]));
 
-        let src_data: Vec<u32> = cells.iter().map(|&c| c as u32).collect();
-        queue.write_buffer(&src_buf, 0, bytemuck::cast_slice(&src_data));
-        queue.write_buffer(&dst_buf, 0, bytemuck::cast_slice(&src_data));
-        queue.write_buffer(&params_buf, 0, bytemuck::cast_slice(&[w, h, 0u32]));
+        // GenParams テーブル: エントリ slot は { slot }。dynamic offset slot*STRIDE で世代ごとに選ぶ
+        let gen_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gen_params"),
+            size: GEN_PARAMS_STRIDE * MAX_GENS_PER_BATCH as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut gen_params = vec![0u32; (GEN_PARAMS_STRIDE / 4) as usize * MAX_GENS_PER_BATCH as usize];
+        for slot in 0..MAX_GENS_PER_BATCH {
+            gen_params[(slot as u64 * GEN_PARAMS_STRIDE / 4) as usize] = slot;
+        }
+        queue.write_buffer(&gen_params_buf, 0, bytemuck::cast_slice(&gen_params));
+
+        let change_log_size = 4 * MAX_GENS_PER_BATCH as u64;
+        let change_log = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("change_log"),
+            size: change_log_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let change_log_read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("change_log_read"),
+            size: change_log_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cells_read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cells_read"),
+            size: cell_buf_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let uniform_entry = |binding: u32, has_dynamic_offset: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let cell_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cells"),
+            entries: &[
+                storage_entry(0, true),
+                storage_entry(1, false),
+                uniform_entry(2, false),
+                uniform_entry(3, true),
+                storage_entry(4, false),
+            ],
+        });
+        let gen_params_binding = wgpu::BufferBinding {
+            buffer: &gen_params_buf,
+            offset: 0,
+            size: Some(std::num::NonZeroU64::new(4).expect("4 != 0")),
+        };
+        let make_cell_bind_group = |src: &wgpu::Buffer, dst: &wgpu::Buffer| device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &cell_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: dst.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: dims_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(gen_params_binding.clone()) },
+                wgpu::BindGroupEntry { binding: 4, resource: change_log.as_entire_binding() },
+            ],
+        });
+        let cell_bind_groups = [
+            make_cell_bind_group(&cell_bufs[0], &cell_bufs[1]),
+            make_cell_bind_group(&cell_bufs[1], &cell_bufs[0]),
+        ];
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wirelevel"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WGSL_SHADER)),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("step"),
-            layout: None,
+        let dense_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("dense"),
+            bind_group_layouts: &[&cell_layout],
+            push_constant_ranges: &[],
+        });
+        let step_dense = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("step_dense"),
+            layout: Some(&dense_layout),
             module: &shader,
-            entry_point: Some("step"),
+            entry_point: Some("step_dense"),
             cache: None,
             compilation_options: Default::default(),
         });
 
-        let bind_group_layout = pipeline.get_bind_group_layout(0);
-        let make_bind_group = |src: &wgpu::Buffer, dst: &wgpu::Buffer| -> wgpu::BindGroup {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: dst.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
-                ],
-            })
-        };
-        let bind_groups = [
-            make_bind_group(&src_buf, &dst_buf),
-            make_bind_group(&dst_buf, &src_buf),
-        ];
-
-        let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("read"),
-            size: buf_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         Ok(GpuSim {
-            device, queue, pipeline,
-            bufs: [src_buf, dst_buf],
-            bind_groups, read_buf,
-            w, h, batch,
-            ping: true,
+            device, queue, step_dense,
+            cell_bufs, cell_bind_groups,
+            change_log, change_log_read, cells_read,
+            w, h, tiles_x, tiles_y, batch,
+            front: 0,
         })
     }
 
     /// 次の step が読む側 (front) のバッファ。ピン書き換えはここに行う。
     fn front_buf(&self) -> &wgpu::Buffer {
-        &self.bufs[if self.ping { 0 } else { 1 }]
+        &self.cell_bufs[self.front]
     }
 
-    pub fn run(&mut self, steps: u32) {
-        let gx = (self.w + 15) / 16;
-        let gy = (self.h + 15) / 16;
-        let mut remaining = steps;
-        while remaining > 0 {
-            let b = remaining.min(self.batch);
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("sim"),
-            });
-            for _ in 0..b {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("step"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, if self.ping { &self.bind_groups[0] } else { &self.bind_groups[1] }, &[]);
-                pass.dispatch_workgroups(gx, gy, 1);
-                self.ping = !self.ping;
-            }
-            self.queue.submit([encoder.finish()]);
-            remaining -= b;
+    /// n 世代ぶんのコマンドを 1 つの compute pass に積む。世代 i は changeLog[i] に変化タイル数を足す。
+    fn encode_gens(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) {
+        debug_assert!(n <= MAX_GENS_PER_BATCH);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("step"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.step_dense);
+        for slot in 0..n {
+            let offset = (slot as u64 * GEN_PARAMS_STRIDE) as u32;
+            pass.set_bind_group(0, &self.cell_bind_groups[self.front], &[offset]);
+            pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
+            self.front = 1 - self.front;
         }
     }
 
-    pub fn read_cells(&mut self) -> Result<Vec<u8>> {
-        let cell_count = (self.w * self.h) as usize;
-        let buf_size = (cell_count * 4) as u64;
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("readback"),
-        });
-        encoder.copy_buffer_to_buffer(self.front_buf(), 0, &self.read_buf, 0, buf_size);
-        self.queue.submit([encoder.finish()]);
+    /// steps 世代進める (変化ログは読まない)。
+    pub fn run(&mut self, steps: u32) {
+        let per_submit = self.batch.min(MAX_GENS_PER_BATCH);
+        let mut remaining = steps;
+        while remaining > 0 {
+            let n = remaining.min(per_submit);
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
+            self.encode_gens(&mut encoder, n);
+            self.queue.submit([encoder.finish()]);
+            remaining -= n;
+        }
+    }
 
-        let slice = self.read_buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
-        let cells = {
-            let mapped = slice.get_mapped_range();
-            let result: &[u32] = bytemuck::cast_slice(&mapped);
-            result.iter().take(cell_count).map(|&v| (v & 0xFF) as u8).collect()
-        };
-        self.read_buf.unmap();
-        Ok(cells)
+    /// n 世代進め、世代ごとの変化タイル数を読み戻す。
+    fn run_logged(&mut self, n: u32) -> Result<ChangeLog> {
+        anyhow::ensure!((1..=MAX_GENS_PER_BATCH).contains(&n), "run_logged: n={n} out of 1..={MAX_GENS_PER_BATCH}");
+        let log_bytes = 4 * n as u64;
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim_logged") });
+        encoder.clear_buffer(&self.change_log, 0, Some(log_bytes));
+        self.encode_gens(&mut encoder, n);
+        encoder.copy_buffer_to_buffer(&self.change_log, 0, &self.change_log_read, 0, log_bytes);
+        self.queue.submit([encoder.finish()]);
+        map_read(&self.device, &self.change_log_read, log_bytes, |bytes| bytemuck::cast_slice::<u8, u32>(bytes).to_vec())
+    }
+
+    pub fn read_cells(&mut self) -> Result<Vec<u8>> {
+        let cell_count = (self.w as usize) * (self.h as usize);
+        let buf_size = (cell_count * 4) as u64;
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
+        encoder.copy_buffer_to_buffer(self.front_buf(), 0, &self.cells_read, 0, buf_size);
+        self.queue.submit([encoder.finish()]);
+        map_read(&self.device, &self.cells_read, buf_size, |bytes| {
+            bytemuck::cast_slice::<u8, u32>(bytes).iter().map(|&v| (v & 0xFF) as u8).collect()
+        })
     }
 
     /// front バッファの 1 セルを書き換える。Pin セルは step で不変・毎世代コピーされる
@@ -287,24 +291,45 @@ impl GpuSim {
         self.queue.write_buffer(self.front_buf(), offset, bytemuck::cast_slice(&[byte as u32]));
     }
 
-    /// 固定点 (step(g) == g) まで実行する。F# WireLevel.settle と同値の判定。
-    /// interval 世代ごとに「+1 世代して不変か」を検査する。
+    /// 固定点 (step(g) == g) まで実行する。F# WireLevel.settle (`next = cur` で停止) と同値の判定。
+    ///
+    /// GPU が世代ごとに変化タイル数を changeLog に書き、ホストは batch_gens 世代ごとにそれだけを読む。
+    /// 「世代 t の計算で変化 0」⇔ 状態 g_t が固定点。最初のそのような t について t+1 (検証の 1 世代を含む
+    /// 実行世代数) を返す。固定点に達した後の余分な世代は状態を変えないので、読み戻すセルは g_t と同じ。
+    /// max_steps 以内の状態 (t <= max_steps) が固定点でなければ未収束。
     /// 戻り値: (最終セル配列, 実行世代数, 収束したか)
-    pub fn run_until_settled(&mut self, max_steps: u32, interval: u32) -> Result<(Vec<u8>, u32, bool)> {
-        let interval = interval.max(1);
+    pub fn run_until_settled(&mut self, max_steps: u32, batch_gens: u32) -> Result<(Vec<u8>, u32, bool)> {
+        let batch_gens = batch_gens.clamp(1, MAX_GENS_PER_BATCH);
+        // 状態 g_{max_steps} の検証に要る世代数
+        let gens_limit = max_steps.saturating_add(1);
         let mut gens = 0u32;
-        while gens < max_steps {
-            let chunk = interval.min(max_steps - gens);
-            self.run(chunk);
-            gens += chunk;
-            let snap = self.read_cells()?;
-            self.run(1);
-            gens += 1;
-            let next = self.read_cells()?;
-            if snap == next {
-                return Ok((next, gens, true));
+        while gens < gens_limit {
+            let n = batch_gens.min(gens_limit - gens);
+            let log = self.run_logged(n)?;
+            if let Some(i) = log.iter().position(|&changed_tiles| changed_tiles == 0) {
+                gens += i as u32 + 1;
+                return Ok((self.read_cells()?, gens, true));
             }
+            gens += n;
         }
         Ok((self.read_cells()?, gens, false))
     }
+}
+
+/// buf の先頭 size バイトを map して f で変換する。map の失敗はエラーとして返す。
+fn map_read<T>(device: &wgpu::Device, buf: &wgpu::Buffer, size: u64, f: impl FnOnce(&[u8]) -> T) -> Result<T> {
+    let slice = buf.slice(..size);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        // 受信側は下の recv で待っているので send は失敗しない
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv().context("map_async callback was dropped")?.context("mapping readback buffer")?;
+    let value = {
+        let mapped = slice.get_mapped_range();
+        f(&mapped)
+    };
+    buf.unmap();
+    Ok(value)
 }

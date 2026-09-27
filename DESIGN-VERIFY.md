@@ -24,7 +24,7 @@
 | (旧記述) sm83_full のフェッチは正常。ただし即値読出に off-by-one があった (2026-09-16 修正) | `PHASE_FETCH` で `addr <= pc`、`PHASE_FETCH2` で `data_in` を読む 2 段階。`exec_normal` / `exec_imm` は `pc <= pc + 1` と同じ周期に `addr <= pc` を出しており、opcode 自身の番地から即値を読んでいた → `addr <= pc + 1` に修正 (B-2 の仕様テストで発見) | CPU としての意味の検証は full で行う。手書きの期待値 (SM83 仕様) による仕様テストも NetlistSim 上で持つ |
 | ゲートは 3 種類だけ | subset/full は `$_NAND_` / `$_NOT_` / `$_DFF_P_` のみ (sm83_min は `$_DFF_PP0_`、R は無視) | ゲートレベルのシミュレータは小さく書ける |
 | Verilog シミュレータ | iverilog / verilator はない。`yosys sim` (`-clock` `-reset` `-n` `-vcd`) は flake にある | RTL 側の参照は yosys で取れる |
-| GPU の収束判定が重い | `run_until_settled` は判定のたびにグリッド全体 (w×h×4 byte) を 2 回読み戻す | subset 1197x1126 (約 1.35M セル) で周期あたり秒単位になりうる (§7 B-6) |
+| (解消済み、2026-09-27) GPU の収束判定が重い | 旧 `run_until_settled` は判定のたびにグリッド全体 (w×h×4 byte) を 2 回読み戻していた。現在はシェーダーが世代ごとの変化タイル数を書き、ホストはそれだけを読む (§7 B-6) | 世代数は「最初に step(g) == g となった世代」に正確になった (旧実装は `checkInterval`+1 の倍数に切り上がっていた) |
 
 ## 3. 方針
 
@@ -109,6 +109,12 @@ meta の `inputs` にも載らない**。代わりに meta の `clocking.clkA` /
 
 「収束させる」は単相と同じ (`run_until_settled`、`maxStepsPerPhase` 以内に変化しなくなること。
 収束しなければその周期は失敗)。ピンへの書込は収束待ちの直前にまとめて行う。
+
+`run_until_settled` の判定は F# `WireLevel.settle` (`next = cur` で停止) と同じ意味。GPU は世代 t の計算で
+変化したタイル数を `changeLog` に書き、ホストは `checkInterval` 世代ごとにそれだけを読み戻して、
+変化 0 の最初の世代 t を探す。表示する世代数は t+1 (固定点を確かめる 1 世代を含む実行世代数)。
+固定点に達した後に同じバッチ内で余分に回した世代は状態を変えないので、読み戻すグリッドは g_t と同じ。
+`checkInterval` は判定の粒度ではなく「何世代ごとにホストと同期するか」だけを決める。
 
 1. `clkA=0`、`clkB=0` を書き、収束させる (前周期の `clkB=1` はここで下ろす。立ち下がりでは何も起きない)
 2. 出力 `addr` / `mem_read` / `mem_write` / `data_out` / `int_ack` を読む (前周期にスレーブがラッチした値)
@@ -276,7 +282,7 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
 | B-3b | `--memory` に golden 照合を追加 | `memory_program.rs` | smoke の golden で全周期一致。**わざと 1 セル壊した .bin で不一致を検出する** (検証器の検証) |
 | B-4 | subset で長いプログラムを通す (= Step C) | `programs/`、golden | 全周期一致、または不一致の原因特定 |
 | B-5 | RTL との照合 | テストベンチ Verilog + `yosys sim -vcd` + VCD 比較 | NetlistSim と RTL が x 以外で一致 |
-| B-6 | GPU 収束判定の高速化 (必要なら) | 変化フラグを compute shader で集計し 4 byte だけ読み戻す | B-4 の実測で周期あたりの時間が問題になったときだけ着手 |
+| B-6 | GPU 収束判定の高速化 (2026-09-27 済) | `wgpu-runner/src/gpu.rs`、`wirelevel.wgsl` | 変化タイル数を compute shader で世代ごとに集計し、`checkInterval` 世代ぶんをまとめて読み戻す。golden・周期ごとのバス値は旧実装と一致し、世代数は旧値以下かつ差が `checkInterval`+1 未満 |
 
 ### モジュール設計 (F#)
 
