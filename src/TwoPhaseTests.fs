@@ -266,8 +266,13 @@ module WlTwoPhaseTest =
                     |> Result.map (fun next ->
                         let matches = [ 0 .. shiftStages - 1 ] |> List.forall (fun i -> levelOf next (qCoord i) = expected k i)
                         next, ok && matches))
-            List.indexed shiftPattern
-            |> List.fold folder (Ok (c.Grid, true))
+            // cycle は「直前が settleLow か cycle」を前提とする (2 相はクロックの立ち下がりを
+            // 次の cycle に畳み込むため)。コンパイル直後の生グリッドから始めるので、最初に
+            // 1 回だけ明示的に settleLow する
+            ClockDrive.settleLow settler settleLimit clocks c.Grid
+            |> Result.mapError ClockDrive.describeDriveError
+            |> Result.map (fun g -> g, true)
+            |> fun initial -> List.indexed shiftPattern |> List.fold folder initial
             |> Result.map snd
 
     let private holdContrastTests () : (string * bool) list =
@@ -357,8 +362,10 @@ module WlTwoPhaseTest =
                         match state with
                         | Error e -> Error e, passed
                         | Ok g ->
+                            // クロックには触れず inst の伝播だけ収束させる (2 周期目以降は
+                            // clockEdge が前周期の clkB=1 の立ち下がりも兼ねる)
                             let next =
-                                low (writePort "inst" step.Inst g)
+                                ClockDrive.settleData settler settleLimit "inst" (writePort "inst" step.Inst g)
                                 |> Result.bind (ClockDrive.clockEdge settler settleLimit clocks)
                             match next with
                             | Error e -> Error e, passed
@@ -412,11 +419,16 @@ module WlTwoPhaseTest =
                         let cells = probes |> List.choose (function CellProbe p -> Some p | _ -> None)
                         let value g = cells |> List.mapi (fun i p -> if levelOf g p then 1 <<< i else 0) |> List.sum
                         let clocks = ClockDrive.TwoPhasePins (a, b)
-                        [ 1 .. 3 ]
-                        |> List.fold (fun acc _ ->
-                            acc |> Result.bind (fun (g, values) ->
-                                ClockDrive.cycle settler 2000 clocks g |> Result.map (fun g' -> g', values @ [ value g' ])))
-                            (Ok (grid, []))
+                        // cycle は「直前が settleLow か cycle」を前提とするので、
+                        // インポート直後の生グリッドからはまず settleLow で始める
+                        ClockDrive.settleLow settler 2000 clocks grid
+                        |> Result.map (fun g -> g, [])
+                        |> fun initial ->
+                            [ 1 .. 3 ]
+                            |> List.fold (fun acc _ ->
+                                acc |> Result.bind (fun (g, values) ->
+                                    ClockDrive.cycle settler 2000 clocks g |> Result.map (fun g' -> g', values @ [ value g' ])))
+                                initial
                         |> Result.map snd = Ok [ 1; 2; 3 ]
                     | _ -> false
                 // 旧形式 (formatVersion 1、clocking なし) は単相として読む

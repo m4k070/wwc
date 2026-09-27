@@ -2,12 +2,16 @@
 // (DESIGN-VERIFY.md §5.1 / §5.2 / §5.2.1)。
 //
 // 周期のどこでクロックをどう動かすかはここだけが知っている。メモリ操作 (memory_program.rs) は
-//   settle_idle (クロックを休止状態にして収束) → バス観測・メモリ操作・data_in 書込 → settle_idle → latch
-// の順に呼ぶだけで、単相 / 2 相の違いを意識しない。
+// 単相 / 2 相の違いを意識しない。ただし 2 相は「最初の周期 (リセット直後) だけ」settle_idle
+// で明示的にクロックを低に揃え、以降は latch がクロックの立ち下がりも兼ねる (2026-09-27 短縮)。
 //
-//   単相 (singleEdge):  idle = clk=0 で収束       latch = clk=1 で収束 ("high")
-//   2 相 (twoPhase):    idle = clkA=0,clkB=0 で収束 latch = clkA=1 で収束 ("phaseA")
-//                                                       → clkA=0,clkB=1 を同時に書いて収束 ("phaseB")
+//   単相 (singleEdge):  毎周期 settle_idle (clk=0 で収束) → settle_after_data → latch (clk=1 で収束 "high")
+//   2 相 (twoPhase):    最初の周期だけ settle_idle (clkA=0,clkB=0 で収束)。
+//                       毎周期 settle_after_data (クロックに触れず data_in/irq だけ収束) → latch:
+//                         clkA=1 と clkB=0 を同時に書いて収束 ("phaseA": 前周期の clkB=1 をここで下ろす。
+//                           スレーブは立ち下がりを見ないので影響を受けず、マスターの D はスレーブ Q の
+//                           組合せ関数でこの収束の間は動かないので安全)
+//                         → clkA=0 と clkB=1 を同時に書いて収束 ("phaseB")
 // 2 相の latch は必ず 2 回の収束に分ける (1 回にまとめると clkA と clkB が重なり hold の保護が消える)。
 //
 // GPU を直接呼ばず CaDriver trait を通すので、書込と収束の順序を GPU なしで単体テストできる。
@@ -127,7 +131,8 @@ impl ClockPins {
     }
 
     /// クロックを休止状態 (単相 clk=0 / 2 相 clkA=0,clkB=0) にして収束させる。
-    /// 周期の手順 1 と、data_in を書いた後の手順 4 の両方で使う。
+    /// 単相は毎周期の手順 1、2 相は「最初の周期 (リセット直後) だけ」の手順 1' で使う
+    /// (2 周期目以降は latch がクロックの立ち下がりも兼ねるので呼ばない。DESIGN-VERIFY.md §5.2.1)。
     pub fn settle_idle<D: CaDriver>(&self, driver: &mut D, label: &'static str) -> Result<Phase> {
         match self {
             ClockPins::SingleEdge { clk } => driver.write_pin(*clk, false),
@@ -139,7 +144,18 @@ impl ClockPins {
         timed(driver, label)
     }
 
-    /// DFF にラッチさせる (単相の手順 5 / 2 相の手順 5〜6)。最後の段の cells が周期の出力。
+    /// data_in / irq を書いた後の収束 (手順 4)。単相は idle に戻すのと同じ (clk=0 は既に 0 なので
+    /// 実質 data のみの収束)。2 相はクロックに一切触れない — クロックは前周期の終わりの値
+    /// (定常状態では clkA=0, clkB=1) のまま。ここでクロックを動かすと、次の latch でまとめて
+    /// 動かすはずだった clkB の立ち下がりを前倒ししてしまい、短縮の効果が消える。
+    pub fn settle_after_data<D: CaDriver>(&self, driver: &mut D) -> Result<Phase> {
+        match self {
+            ClockPins::SingleEdge { .. } => self.settle_idle(driver, LABEL_DATA_IN),
+            ClockPins::TwoPhase { .. } => timed(driver, LABEL_DATA_IN),
+        }
+    }
+
+    /// DFF にラッチさせる (単相の手順 5 / 2 相の手順 5'〜6)。最後の段の cells が周期の出力。
     pub fn latch<D: CaDriver>(&self, driver: &mut D) -> Result<Vec<Phase>> {
         match self {
             ClockPins::SingleEdge { clk } => {
@@ -147,8 +163,11 @@ impl ClockPins {
                 Ok(vec![timed(driver, LABEL_HIGH)?])
             }
             ClockPins::TwoPhase { clk_a, clk_b } => {
-                // 手順 5: マスターが D を取り込む。スレーブは clkB=0 のまま
+                // 手順 5': マスターへの立ち上がりと、前周期の clkB=1 を下ろすのを同じ収束にまとめる。
+                // スレーブは立ち下がりを見ないので影響を受けず、マスターの D はスレーブ Q の
+                // 組合せ関数でこの収束の間は動かないので安全 (すでに clkB=0 なら単なる no-op 書込)
                 driver.write_pin(*clk_a, true);
+                driver.write_pin(*clk_b, false);
                 let phase_a = timed(driver, LABEL_PHASE_A)?;
                 // 手順 6: clkA を下ろすのと clkB を上げるのを同じ収束の前に書く
                 // (マスターは立ち下がりを見ないので動かず、スレーブがマスター Q を取り込む)
@@ -235,14 +254,48 @@ mod tests {
         clock.settle_idle(&mut d, LABEL_SETUP).unwrap();
         let latch = clock.latch(&mut d).unwrap();
         assert_eq!(d.events, vec![
-            Write(CLK_A, false), Write(CLK_B, false), Settle,   // 手順 1
-            Write(CLK_A, true), Settle,                          // 手順 5
+            Write(CLK_A, false), Write(CLK_B, false), Settle,   // 手順 1' (最初だけ)
+            Write(CLK_A, true), Write(CLK_B, false), Settle,     // 手順 5' (clkB は既に false なので no-op)
             Write(CLK_A, false), Write(CLK_B, true), Settle,     // 手順 6 (同時に書いてから 1 回収束)
         ]);
         let labels: Vec<&str> = latch.iter().map(|p| p.label).collect();
         assert_eq!(labels, [LABEL_PHASE_A, LABEL_PHASE_B]);
         // 最後の段の出力は clkA=0, clkB=1
         assert_eq!(latch[1].settled.cells, vec![pin_cell(false), pin_cell(false), pin_cell(true)]);
+    }
+
+    #[test]
+    fn two_phase_latch_folds_previous_clk_b_fall_into_next_rise() {
+        // 定常状態: 前周期の latch が clkA=0, clkB=1 で終わったところから、次の latch を直接呼ぶ
+        // (settle_idle を挟まない)。phaseA の書込に clkB=false が含まれ、立ち下がりを畳み込む。
+        let clock = ClockPins::TwoPhase { clk_a: CLK_A, clk_b: CLK_B };
+        let mut d = driver();
+        d.write_pin(CLK_B, true); // 前周期の終わり (clkA=0, clkB=1) を模す
+        d.events.clear();
+        let latch = clock.latch(&mut d).unwrap();
+        assert_eq!(d.events, vec![
+            Write(CLK_A, true), Write(CLK_B, false), Settle, // phaseA: 立ち上がりと同時に前周期の clkB を下ろす
+            Write(CLK_A, false), Write(CLK_B, true), Settle, // phaseB
+        ]);
+        let labels: Vec<&str> = latch.iter().map(|p| p.label).collect();
+        assert_eq!(labels, [LABEL_PHASE_A, LABEL_PHASE_B]);
+    }
+
+    #[test]
+    fn two_phase_settle_after_data_does_not_touch_clocks() {
+        let clock = ClockPins::TwoPhase { clk_a: CLK_A, clk_b: CLK_B };
+        let mut d = driver();
+        clock.settle_after_data(&mut d).unwrap();
+        assert_eq!(d.events, vec![Settle]);
+    }
+
+    #[test]
+    fn single_edge_settle_after_data_matches_settle_idle() {
+        let clock = ClockPins::SingleEdge { clk: CLK };
+        let mut d = driver();
+        let phase = clock.settle_after_data(&mut d).unwrap();
+        assert_eq!(d.events, vec![Write(CLK, false), Settle]);
+        assert_eq!(phase.label, LABEL_DATA_IN);
     }
 
     #[test]

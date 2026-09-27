@@ -177,7 +177,13 @@ module Clocking =
 
 // ---------------------------------------------------------------------
 // クロック駆動 (CA レベル、ホスト操作)。テストと検証スクリプトが共有する。
-// 契約は DESIGN-VERIFY.md §5.2 (2 相の手順) と同じ。
+// 契約は DESIGN-VERIFY.md §5.1 / §5.2.1 (2 相の短縮された手順、2026-09-27) と、
+// wgpu-runner の clocking.rs と同じ。
+//
+// 2 相の定常状態では、周期の終わりは clkA=0, clkB=1 のまま返す (単相のように clk=0 へ
+// 戻す settleLow は行わない)。次の周期の clockEdge が、その clkB=1 の立ち下がりを
+// 自分の立ち上がりと同じ収束にまとめて処理する (settle_idle / settle_after_data /
+// latch の分担は Rust の clocking.rs を参照)。
 // ---------------------------------------------------------------------
 module ClockDrive =
     open Domain
@@ -203,7 +209,15 @@ module ClockDrive =
         let settled, t = settler limit g
         if t >= limit then Error (Unsettled (phase, limit)) else Ok settled
 
-    /// 全クロックを 0 にして収束させる (周期の最初、入力を書いた後の setup)。
+    /// クロックには一切触れず、直前に書いた入力 (data_in 相当) だけを収束させる
+    /// (Rust clocking.rs の settle_after_data と同じ契約)。2 相の定常状態ではクロックは
+    /// 前周期の終わり (clkA=0, clkB=1) のまま — 次の clockEdge がその立ち下がりも兼ねる。
+    let settleData (settler: Settler) (limit: int) (phase: string) (g: LGrid) : Result<LGrid, DriveError> =
+        settlePhase settler limit phase g
+
+    /// 全クロックを 0 にして収束させる。シーケンスの最初 (リセット直後の 1 周期目) に
+    /// 1 回だけ呼べば十分 — 以降は clockEdge がクロックの立ち下がりも兼ねる
+    /// (DESIGN-VERIFY.md §5.2.1 手順 1')。
     let settleLow (settler: Settler) (limit: int) (pins: ClockPins) (g: LGrid) : Result<LGrid, DriveError> =
         let lowered =
             match pins with
@@ -211,19 +225,33 @@ module ClockDrive =
             | TwoPhasePins (clkA, clkB) -> g |> setPin clkA false |> setPin clkB false
         settlePhase settler limit "clk=0 (setup)" lowered
 
-    /// クロックの有効エッジを与えて収束させる。前提: settleLow 済み。
-    /// 戻り値のグリッドはクロックが上がったまま (SingleEdge: clk=1 / TwoPhase: clk_b=1)。
-    ///   SingleEdge: clk=1 → settle
-    ///   TwoPhase:   clk_a=1 → settle → clk_a=0, clk_b=1 → settle
+    /// クロックの有効エッジを与えて収束させる。
+    ///   SingleEdge: 前提は settleLow 済み (clk=0)。clk=1 → settle
+    ///   TwoPhase:   前提は「clkA=0, clkB=1 (定常)」か「clkA=0, clkB=0 (settleLow 直後)」。
+    ///     clkA=1 と clkB=0 を同時に書いて収束 (前周期の clkB=1 をここで下ろす。スレーブは
+    ///     立ち下がりを見ないので影響を受けず、マスターの D はスレーブ Q の組合せ関数で
+    ///     この収束の間は動かないので安全。すでに clkB=0 なら単なる no-op 書込)
+    ///     → clkA=0 と clkB=1 を同時に書いて収束
     let clockEdge (settler: Settler) (limit: int) (pins: ClockPins) (g: LGrid) : Result<LGrid, DriveError> =
         match pins with
         | SingleEdgePins clk -> settlePhase settler limit "clk=1" (setPin clk true g)
         | TwoPhasePins (clkA, clkB) ->
-            settlePhase settler limit "clk_a=1" (setPin clkA true g)
+            g |> setPin clkA true |> setPin clkB false
+            |> settlePhase settler limit "clk_a=1, clk_b=0"
             |> Result.bind (fun g -> g |> setPin clkA false |> setPin clkB true |> settlePhase settler limit "clk_a=0, clk_b=1")
 
-    /// 1 周期 = settleLow → clockEdge → settleLow (クロックを戻して収束した状態で返す)。
+    /// 1 周期。前提: 直前の呼出しが settleLow か cycle であること。
+    ///   SingleEdge (変更なし): settleLow → clockEdge → settleLow (クロックを 0 に戻して返す)
+    ///   TwoPhase: data の収束 (クロックには触れない) → clockEdge (前周期の立ち下がりを
+    ///     次の立ち上がりに畳み込む)。戻り値のクロックは clkA=0, clkB=1 のまま
+    ///     (次の cycle 呼出しがそこから立ち下げる)。data 入力は呼び出し側であらかじめ
+    ///     書いておくこと (setPin などで cycle に渡す g に反映させておく)。
     let cycle (settler: Settler) (limit: int) (pins: ClockPins) (g: LGrid) : Result<LGrid, DriveError> =
-        settleLow settler limit pins g
-        |> Result.bind (clockEdge settler limit pins)
-        |> Result.bind (settleLow settler limit pins)
+        match pins with
+        | SingleEdgePins _ ->
+            settleLow settler limit pins g
+            |> Result.bind (clockEdge settler limit pins)
+            |> Result.bind (settleLow settler limit pins)
+        | TwoPhasePins _ ->
+            settleData settler limit "data (clk unchanged)" g
+            |> Result.bind (clockEdge settler limit pins)

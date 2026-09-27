@@ -21,11 +21,15 @@
 //     "trace": false
 //   }
 //
-// クロック駆動 (DESIGN-VERIFY.md §5.2 の契約): 1 サイクル = 「idle settle → バス観測 →
-// mem_write なら書込 → 割込み受付 → mem_read なら data_in=mem[addr]、そうでなければ 0 → idle settle →
-// latch」。idle / latch の中身は meta の clocking で決まる (clocking.rs):
+// クロック駆動 (DESIGN-VERIFY.md §5.2 / §5.2.1 の契約): 1 サイクル = 「バス観測 →
+// mem_write なら書込 → 割込み受付 → mem_read なら data_in=mem[addr]、そうでなければ 0 →
+// data_in/irq を書いて収束 (クロックには触れない) → latch」。単相は毎周期の先頭で idle settle
+// (clk=0) を挟むが、2 相は「最初の周期 (リセット直後) だけ」idle settle を行い、以降は前周期の
+// latch で収束済みの状態からそのままバスを読む (latch がクロックの立ち下がりも兼ねるため)。
+// idle / latch の中身は meta の clocking で決まる (clocking.rs):
 //   singleEdge: idle = clk=0、latch = clk=1 settle
-//   twoPhase:   idle = clkA=0,clkB=0、latch = clkA=1 settle → clkA=0,clkB=1 settle (§5.2.1)
+//   twoPhase:   idle (最初の周期だけ) = clkA=0,clkB=0、
+//               latch = clkA=1,clkB=0 同時 settle → clkA=0,clkB=1 同時 settle (§5.2.1、2026-09-27 短縮)
 //
 // golden を指定すると、周期ごとに data_in と全出力 (latch の最後の settle 後) を NetlistSim の結果と
 // 比べ、最初に食い違った周期で止める (DESIGN-VERIFY.md §6.2)。
@@ -326,17 +330,26 @@ impl BusPorts {
     }
 }
 
-/// リセットの 1 周期 (§5.1): rst=1 を書き、idle settle → latch。rst は呼び出し側が最後に 0 へ戻す。
-fn run_reset_cycle<D: CaDriver>(driver: &mut D, clock: &ClockPins, bus: &BusPorts) -> Result<Vec<Phase>> {
+/// リセットの 1 周期 (§5.1): rst=1 を書き、latch。単相は毎回 idle settle を挟む。
+/// 2 相は `first` (最初のパルス) のときだけ idle settle でクロックを低に安定させる —
+/// 2 パルス目以降は前パルスの手順 6 (clkB=1) からそのまま latch する (latch がクロックの
+/// 立ち下がりも兼ねる)。rst は呼び出し側が最後に 0 へ戻す。
+fn run_reset_cycle<D: CaDriver>(driver: &mut D, clock: &ClockPins, bus: &BusPorts, first: bool) -> Result<Vec<Phase>> {
     write_bus(driver, &bus.rst, 1);
-    let mut phases = vec![clock.settle_idle(driver, LABEL_SETUP)?];
+    let mut phases = match clock {
+        ClockPins::SingleEdge { .. } => vec![clock.settle_idle(driver, LABEL_SETUP)?],
+        ClockPins::TwoPhase { .. } if first => vec![clock.settle_idle(driver, LABEL_SETUP)?],
+        ClockPins::TwoPhase { .. } => Vec::new(),
+    };
     phases.extend(clock.latch(driver)?);
     Ok(phases)
 }
 
 /// バス周期 1 回分の観測結果。
 struct BusCycle {
-    /// 手順 2 (idle settle 後) のバス
+    /// 手順 2 でバスを読んだ時点のセル (最初の周期は idle settle 後、2 周期目以降は前周期の
+    /// 手順 6 で収束済みの状態そのもの)
+    setup_cells: Vec<u8>,
     addr: u64,
     mem_read: bool,
     mem_write: bool,
@@ -344,7 +357,7 @@ struct BusCycle {
     /// 手順 3 で決めて書いた値
     data_in: u64,
     irq: u64,
-    /// setup, data_in, latch の各段 (単相: high / 2 相: phaseA, phaseB)
+    /// data_in, latch の各段 (単相: high / 2 相: phaseA, phaseB)。最初の周期は先頭に setup も入る
     phases: Vec<Phase>,
 }
 
@@ -354,9 +367,9 @@ impl BusCycle {
         &self.phases.last().expect("a bus cycle always has phases").settled.cells
     }
 
-    /// 手順 1 (idle settle 後) のセル
+    /// 手順 2 でバスを読んだ時点のセル
     fn setup_cells(&self) -> &[u8] {
-        &self.phases[0].settled.cells
+        &self.setup_cells
     }
 
     fn all_settled(&self) -> bool {
@@ -369,16 +382,26 @@ impl BusCycle {
     }
 }
 
-/// バス周期 1 回 (§5.2 / §5.2.1): idle settle → バス観測 → 書込 → 割込み受付 → 読出 →
-/// data_in / irq を書いて idle settle → latch。
+/// バス周期 1 回 (§5.2 / §5.2.1): バス観測 → 書込 → 割込み受付 → 読出 →
+/// data_in / irq を書いて収束 (クロックには触れない) → latch。
+///
+/// `first` (2 相のみ意味を持つ) は、リセット直後の 1 周期目だけ true — rst=0 の伝播と
+/// クロックの立ち下がりを、この周期の先頭で明示的な idle settle により確定させる
+/// (単相は `first` によらず毎回 idle settle する)。2 周期目以降 (`first = false`) は
+/// `prev_cells` (前周期の手順 6 で収束済みのセル) からそのままバスを読み、idle settle は
+/// 行わない — 次の latch がクロックの立ち下がりも兼ねるため。
 fn run_bus_cycle<D: CaDriver>(
     driver: &mut D, clock: &ClockPins, bus: &BusPorts, mem: &mut Memory, w: u32,
+    prev_cells: &[u8], first: bool,
 ) -> Result<BusCycle> {
-    // 1) クロック休止で収束
-    let setup = clock.settle_idle(driver, LABEL_SETUP)?;
-
-    // 2) バス観測 (前周期にラッチされた値)
-    let cells = &setup.settled.cells;
+    // 1)(2) バス観測 (前周期にラッチされた値)
+    let setup_phase = match clock {
+        ClockPins::SingleEdge { .. } => Some(clock.settle_idle(driver, LABEL_SETUP)?),
+        ClockPins::TwoPhase { .. } if first => Some(clock.settle_idle(driver, LABEL_SETUP)?),
+        ClockPins::TwoPhase { .. } => None,
+    };
+    let cells: &[u8] = setup_phase.as_ref().map(|p| p.settled.cells.as_slice()).unwrap_or(prev_cells);
+    let setup_cells = cells.to_vec();
     let addr = read_bus(cells, w, &bus.addr);
     let mem_read = read_bus(cells, w, &bus.mem_read) > 0;
     let mem_write = read_bus(cells, w, &bus.mem_write) > 0;
@@ -403,14 +426,15 @@ fn run_bus_cycle<D: CaDriver>(
         None => 0,
     };
 
-    // 4) data_in 変化をラッチ前に伝播させる (クロック休止のまま収束)。クロックとデータの
-    //    競合を避ける — クロックは DFF に到達するまで数十世代かかる
-    let wait = clock.settle_idle(driver, LABEL_DATA_IN)?;
+    // 4) data_in 変化をラッチ前に伝播させる。単相は idle (clk=0) に戻すのと同じ。2 相は
+    //    クロックに触れない (次の latch でまとめて動かす — settle_after_data 参照)
+    let wait = clock.settle_after_data(driver)?;
 
-    // 5) ラッチ (単相: clk=1 / 2 相: clkA=1 → clkA=0,clkB=1)
-    let mut phases = vec![setup, wait];
+    // 5)(6) ラッチ (単相: clk=1 / 2 相: clkA=1,clkB=0 同時 → clkA=0,clkB=1 同時)
+    let mut phases: Vec<Phase> = setup_phase.into_iter().collect();
+    phases.push(wait);
     phases.extend(clock.latch(driver)?);
-    Ok(BusCycle { addr, mem_read, mem_write, data_out, data_in, irq, phases })
+    Ok(BusCycle { setup_cells, addr, mem_read, mem_write, data_out, data_in, irq, phases })
 }
 
 pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
@@ -489,15 +513,17 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let mut unsettled: Vec<String> = Vec::new();
     let status_line = |phases: &[Phase]| phases.iter().map(Phase::status_str).collect::<Vec<_>>().join(" ");
 
-    // リセット
+    // リセット (2 相は最初のパルスだけクロックを低に安定させる。run_reset_cycle 参照)
     for pulse in 0..prog.rst_pulses {
-        let phases = run_reset_cycle(&mut driver, &clock, &bus)?;
+        let phases = run_reset_cycle(&mut driver, &clock, &bus, pulse == 0)?;
         if !phases.iter().all(|p| p.settled.settled) {
             unsettled.push(format!("rst pulse {pulse}: {}", status_line(&phases)));
         }
     }
     write_bus(&mut driver, &bus.rst, 0);
 
+    // 2 相は最初のバス周期だけ idle settle するので、prev_cells の初期値は使われない
+    // (rst_pulses=0 のときも run_bus_cycle 側の `first` 分岐が baseline を確立する)
     let mut last_cells: Vec<u8> = init_cells.clone();
     let mut trace_lines: Vec<String> = Vec::new();
     // golden と一致した周期数と、最初に食い違った周期の報告
@@ -505,7 +531,7 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let mut divergence: Option<Vec<String>> = None;
 
     for cycle in 0..prog.cycles {
-        let result = run_bus_cycle(&mut driver, &clock, &bus, &mut mem, w)?;
+        let result = run_bus_cycle(&mut driver, &clock, &bus, &mut mem, w, &last_cells, cycle == 0)?;
         last_cells = result.output_cells().to_vec();
 
         if !result.all_settled() {
@@ -844,11 +870,16 @@ mod tests {
             vec![Write(DIN0, false), Write(DIN1, true)]
         }
 
+        fn prev_cells() -> Vec<u8> {
+            vec![pin_cell(false); (W * 2) as usize]
+        }
+
         #[test]
         fn single_edge_cycle_keeps_the_existing_order() {
+            // 単相は `first` によらず毎回 idle settle する。ここでは cycle >= 1 を模して false を渡す
             let mut d = driver();
             let mut mem = Memory::new(vec![], MemoryConfig::default());
-            let r = run_bus_cycle(&mut d, &SINGLE, &bus(None), &mut mem, W).unwrap();
+            let r = run_bus_cycle(&mut d, &SINGLE, &bus(None), &mut mem, W, &prev_cells(), false).unwrap();
             let mut expected = vec![Write(CLK, false), Settle];
             expected.extend(data_in_writes());
             expected.extend([Write(CLK, false), Settle, Write(CLK, true), Settle]);
@@ -859,16 +890,17 @@ mod tests {
         }
 
         #[test]
-        fn two_phase_cycle_follows_design_verify_5_2_1() {
+        fn two_phase_first_cycle_settles_idle_before_latch() {
+            // リセット直後の 1 周期目 (first=true): 従来どおり idle settle → data_in → latch
             let mut d = driver();
             let mut mem = Memory::new(vec![], MemoryConfig::default());
-            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(None), &mut mem, W).unwrap();
-            let mut expected = vec![Write(CLK_A, false), Write(CLK_B, false), Settle];   // 1
-            expected.extend(data_in_writes());                                           // 3
+            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(None), &mut mem, W, &prev_cells(), true).unwrap();
+            let mut expected = vec![Write(CLK_A, false), Write(CLK_B, false), Settle]; // 1'
+            expected.extend(data_in_writes());                                        // 3
             expected.extend([
-                Write(CLK_A, false), Write(CLK_B, false), Settle,                        // 4
-                Write(CLK_A, true), Settle,                                              // 5
-                Write(CLK_A, false), Write(CLK_B, true), Settle,                         // 6
+                Settle,                                                               // 4 (クロックには触れない)
+                Write(CLK_A, true), Write(CLK_B, false), Settle,                      // 5' (clkB は既に false)
+                Write(CLK_A, false), Write(CLK_B, true), Settle,                      // 6
             ]);
             assert_eq!(d.events, expected);
             assert_eq!(r.data_in, 0x5A);
@@ -879,34 +911,71 @@ mod tests {
         }
 
         #[test]
+        fn two_phase_steady_state_cycle_skips_idle_settle_and_folds_clk_b_fall_into_latch() {
+            // 2 周期目以降 (first=false): idle settle をせず、前周期の手順 6 で収束済みの
+            // prev_cells からそのままバスを読む。手順 5' の書込に clkB=false が含まれ、
+            // 前周期の clkB=1 の立ち下がりを畳み込む。収束は 1 周期 3 回だけ (data_in, phaseA, phaseB)
+            let mut d = driver();
+            let mut mem = Memory::new(vec![], MemoryConfig::default());
+            let mut prev = prev_cells();
+            prev[CLK_B.x as usize] = pin_cell(true); // 前周期の終わり (clkA=0, clkB=1) を模す
+            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(None), &mut mem, W, &prev, false).unwrap();
+            let mut expected = data_in_writes(); // idle settle なし。いきなり data_in の書込から始まる
+            expected.extend([
+                Settle,                                             // 4 (クロックには触れない)
+                Write(CLK_A, true), Write(CLK_B, false), Settle,    // 5' (前周期の clkB=1 をここで下ろす)
+                Write(CLK_A, false), Write(CLK_B, true), Settle,    // 6
+            ]);
+            assert_eq!(d.events, expected);
+            assert_eq!(r.phases.len(), 3);
+            assert_eq!(r.gens_str(), "data_in=7g phaseA=7g phaseB=7g");
+            // バスは prev_cells からそのまま読む (idle settle していない)
+            assert_eq!(r.setup_cells(), prev.as_slice());
+            assert_eq!(r.data_in, 0x5A);
+        }
+
+        #[test]
         fn interrupt_ack_is_applied_before_irq_is_written() {
             let mut d = driver();
             let mut mem = Memory::new(vec![], MemoryConfig::default());
             mem.write(crate::memory::INTERRUPT_ENABLE_ADDR, 0x1F);
             mem.write(crate::memory::INTERRUPT_FLAG_ADDR, 0x03);
-            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(Some(0x01)), &mut mem, W).unwrap();
+            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(Some(0x01)), &mut mem, W, &prev_cells(), false).unwrap();
             assert_eq!(r.irq, 0x02);
-            // data_in → irq → クロック休止 → settle の順
+            // data_in → irq → 収束 (クロックには触れない) の順
             let irq_writes: Vec<Event> = IRQ.iter().enumerate().map(|(i, c)| Write(*c, (0x02 >> i) & 1 == 1)).collect();
             let mut expected_tail = data_in_writes();
             expected_tail.extend(irq_writes);
-            expected_tail.extend([Write(CLK_A, false), Write(CLK_B, false), Settle]);
-            assert_eq!(&d.events[3..3 + expected_tail.len()], expected_tail.as_slice());
+            expected_tail.push(Settle);
+            assert_eq!(&d.events[..expected_tail.len()], expected_tail.as_slice());
         }
 
         #[test]
-        fn reset_cycle_is_idle_then_latch() {
+        fn reset_cycle_is_idle_then_latch_only_on_first_pulse() {
+            // 1 パルス目 (first=true): 従来どおり idle settle → latch
             let mut d = driver();
-            let phases = run_reset_cycle(&mut d, &TWO_PHASE, &bus(None)).unwrap();
+            let phases = run_reset_cycle(&mut d, &TWO_PHASE, &bus(None), true).unwrap();
             assert_eq!(d.events, vec![
                 Write(RST, true),
                 Write(CLK_A, false), Write(CLK_B, false), Settle,
-                Write(CLK_A, true), Settle,
+                Write(CLK_A, true), Write(CLK_B, false), Settle,
                 Write(CLK_A, false), Write(CLK_B, true), Settle,
             ]);
             assert_eq!(phases.len(), 3);
+
+            // 2 パルス目以降 (first=false): idle settle を挟まず、latch が clkB の立ち下がりも兼ねる
             let mut d = driver();
-            run_reset_cycle(&mut d, &SINGLE, &bus(None)).unwrap();
+            let phases = run_reset_cycle(&mut d, &TWO_PHASE, &bus(None), false).unwrap();
+            assert_eq!(d.events, vec![
+                Write(RST, true),
+                Write(CLK_A, true), Write(CLK_B, false), Settle,
+                Write(CLK_A, false), Write(CLK_B, true), Settle,
+            ]);
+            assert_eq!(phases.len(), 2);
+
+            // 単相は `first` によらず毎回 idle settle する
+            let mut d = driver();
+            run_reset_cycle(&mut d, &SINGLE, &bus(None), false).unwrap();
             assert_eq!(d.events, vec![Write(RST, true), Write(CLK, false), Settle, Write(CLK, true), Settle]);
         }
 
