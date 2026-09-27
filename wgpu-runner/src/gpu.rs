@@ -4,17 +4,28 @@ use std::fs;
 use std::path::Path;
 use anyhow::{Context, Result};
 
-/// WireLevel の 1 世代を計算するシェーダー (step_dense)
+/// WireLevel の世代を進めるシェーダー。先頭に BLOCK_GENS の定義を付け足して使う (shader_source)
 const WGSL_SHADER: &str = include_str!("wirelevel.wgsl");
 
 /// タイル (= workgroup) の一辺。wirelevel.wgsl の TILE / @workgroup_size と一致させる
 const TILE_SIZE: u32 = 16;
 /// 1 回の読み戻しで扱える最大世代数 (changeLog と GenParams テーブルの長さ)
 const MAX_GENS_PER_BATCH: u32 = 1024;
-/// 1 回の submit に積む世代数。小さいほど GPU が早く走り出し、CPU の記録と重なる
-const SUBMIT_CHUNK_GENS: u32 = 16;
+/// Tiled で 1 dispatch に進める最大世代数 (= halo の幅)。shared memory は 2×(16+2K)² × 4 バイト
+const BLOCK_GENS: u32 = 8;
+// block_* の shared memory (計算範囲 (16+2K)² の 2 面) が既定の上限 16 KiB に収まること
+const _: () = assert!(2 * (TILE_SIZE + 2 * BLOCK_GENS) * (TILE_SIZE + 2 * BLOCK_GENS) * 4 <= 16384);
+/// pack_bytes の workgroup の大きさ (wirelevel.wgsl の PACK_WORKGROUP)
+const PACK_WORKGROUP: u32 = 256;
+/// 1 回の submit に積む dispatch 数。小さいほど GPU が早く走り出し、CPU の記録と重なる
+const SUBMIT_CHUNK_DISPATCHES: usize = 16;
 /// GenParams テーブルの 1 エントリの間隔 (dynamic offset の既定アラインメント)
 const GEN_PARAMS_STRIDE: u64 = 256;
+/// GenParams テーブルのエントリ: 0..MAX_GENS_PER_BATCH は { slot: i, gens: BLOCK_GENS } (固定)、
+/// 全タイル計算用は { slot: 0, gens: 1 } (固定)、端数ブロック用はバッチごとに書く
+const GEN_PARAMS_FULL_ENTRY: u32 = MAX_GENS_PER_BATCH;
+const GEN_PARAMS_PARTIAL_ENTRY: u32 = MAX_GENS_PER_BATCH + 1;
+const GEN_PARAMS_ENTRIES: u32 = MAX_GENS_PER_BATCH + 2;
 /// Dims uniform のバイト数 (5 × u32 を 16 バイト境界に切り上げ)
 const DIMS_SIZE: u64 = 32;
 /// DispatchArgs.x の初期値 = 制御用 workgroup の数 (wirelevel.wgsl の ARGS_CONTROL_WORKGROUPS)
@@ -72,18 +83,18 @@ pub fn save_bin(path: &Path, w: u32, h: u32, cells: &[u8]) -> Result<()> {
 /// セルは u32 に 1 個 (下位 8 ビット)。ping-pong 2 バッファで、front が現在の世代を持つ。
 /// Tiled エンジンの GPU 資源と、世代をまたいで持ち越す状態。
 struct TiledStepper {
-    step_full: wgpu::ComputePipeline,
-    step_list: wgpu::ComputePipeline,
+    block_full: wgpu::ComputePipeline,
+    block_list: wgpu::ComputePipeline,
     /// args[i]: list[i] の dispatch_workgroups_indirect 引数 (x = 1 + タイル数)
     args: [wgpu::Buffer; LIST_ROTATION],
-    /// list_bind_groups[r]: cur = list[r]、next = list[r+1]、free = args[r+2] (mod 3)
+    /// list_bind_groups[r]: cur = list[r]、next = list[r+1]、free = args[r+2] (mod 3)。dispatch ごとに回す
     list_bind_groups: [wgpu::BindGroup; LIST_ROTATION],
     stamps: wgpu::Buffer,
-    /// 次の世代が cur として使うリストの添字
+    /// 次の dispatch が cur として使うリストの添字
     rot: usize,
     /// 次のバッチの Dims.stamp_base
     stamp_base: u32,
-    /// 次の世代を step_full で計算するか (初回と、ホストがセルを書いた直後)
+    /// 次の世代を block_full で計算するか (初回と、ホストがセルを書いた直後)
     needs_full_step: bool,
 }
 
@@ -97,12 +108,18 @@ pub struct GpuSim {
     queue: wgpu::Queue,
     stepper: Stepper,
     dims_buf: wgpu::Buffer,
+    /// GenParams テーブル (端数ブロックのエントリだけバッチごとに書く)
+    gen_params_buf: wgpu::Buffer,
     cell_bufs: [wgpu::Buffer; 2],
     /// cell_bind_groups[i]: cell_bufs[i] を読み cell_bufs[1-i] に書く
     cell_bind_groups: [wgpu::BindGroup; 2],
     /// 世代ごとの「変化したタイル数」。changeLog[slot] == 0 ⇔ その世代で step(g) == g
     change_log: wgpu::Buffer,
     change_log_read: wgpu::Buffer,
+    /// pack_bytes: 現在の世代を 1 セル 1 バイトに詰めて packed_cells に書く
+    pack_bytes: wgpu::ComputePipeline,
+    pack_bind_group: wgpu::BindGroup,
+    packed_cells: wgpu::Buffer,
     cells_read: wgpu::Buffer,
     pub w: u32,
     pub h: u32,
@@ -112,6 +129,61 @@ pub struct GpuSim {
     batch: u32,
     /// 現在の世代を持つバッファの添字 (0 or 1)
     front: usize,
+}
+
+/// バッチ内の 1 dispatch
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchPlan {
+    /// step_dense で世代 slot を計算する
+    Dense { slot: u32 },
+    /// block_full で世代 0 を全タイル計算する
+    Full,
+    /// block_list で世代 slot..slot+gens をアクティブタイルだけ計算する
+    Block { slot: u32, gens: u32 },
+}
+
+impl DispatchPlan {
+    /// この dispatch が使う GenParams テーブルのエントリ
+    fn gen_params_entry(&self) -> u32 {
+        match *self {
+            DispatchPlan::Dense { slot } => slot,
+            DispatchPlan::Full => GEN_PARAMS_FULL_ENTRY,
+            DispatchPlan::Block { slot, gens } if gens == BLOCK_GENS => slot,
+            DispatchPlan::Block { .. } => GEN_PARAMS_PARTIAL_ENTRY,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PipelineKind { Dense, BlockFull, BlockList }
+
+/// Tiled のバッチ n 世代を dispatch 列にする: (全タイル 1 世代) + BLOCK_GENS 世代のブロック + 端数ブロック 1 個以下
+fn plan_tiled_batch(n: u32, starts_with_full: bool) -> Vec<DispatchPlan> {
+    let mut plan = Vec::new();
+    let mut slot = 0;
+    if starts_with_full {
+        plan.push(DispatchPlan::Full);
+        slot = 1;
+    }
+    while slot < n {
+        let gens = BLOCK_GENS.min(n - slot);
+        plan.push(DispatchPlan::Block { slot, gens });
+        slot += gens;
+    }
+    plan
+}
+
+/// pack_bytes の dispatch (x, y): words 個の u32 を PACK_WORKGROUP ずつ、x が上限を超えないように 2 次元に並べる
+fn pack_dispatch_size(words: u64, max_per_dimension: u32) -> (u32, u32) {
+    let workgroups = words.div_ceil(PACK_WORKGROUP as u64).max(1);
+    let gx = workgroups.min(max_per_dimension as u64);
+    let gy = workgroups.div_ceil(gx);
+    (gx as u32, gy as u32)
+}
+
+/// wirelevel.wgsl の先頭にホスト側の定数を付け足したもの
+fn shader_source() -> String {
+    format!("const BLOCK_GENS: u32 = {BLOCK_GENS}u;\n{WGSL_SHADER}")
 }
 
 /// run_logged が返す、世代ごとの変化タイル数 (添字 = バッチ内の世代番号)
@@ -172,14 +244,18 @@ impl GpuSim {
         // GenParams テーブル: エントリ slot は { slot }。dynamic offset slot*STRIDE で世代ごとに選ぶ
         let gen_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gen_params"),
-            size: GEN_PARAMS_STRIDE * MAX_GENS_PER_BATCH as u64,
+            size: GEN_PARAMS_STRIDE * GEN_PARAMS_ENTRIES as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut gen_params = vec![0u32; (GEN_PARAMS_STRIDE / 4) as usize * MAX_GENS_PER_BATCH as usize];
+        let mut gen_params = vec![0u32; (GEN_PARAMS_STRIDE / 4) as usize * GEN_PARAMS_ENTRIES as usize];
+        let entry_word = |entry: u32| (entry as u64 * GEN_PARAMS_STRIDE / 4) as usize;
         for slot in 0..MAX_GENS_PER_BATCH {
-            gen_params[(slot as u64 * GEN_PARAMS_STRIDE / 4) as usize] = slot;
+            gen_params[entry_word(slot)] = slot;
+            gen_params[entry_word(slot) + 1] = BLOCK_GENS;
         }
+        gen_params[entry_word(GEN_PARAMS_FULL_ENTRY)] = 0;
+        gen_params[entry_word(GEN_PARAMS_FULL_ENTRY) + 1] = 1;
         queue.write_buffer(&gen_params_buf, 0, bytemuck::cast_slice(&gen_params));
 
         let change_log_size = 4 * MAX_GENS_PER_BATCH as u64;
@@ -195,9 +271,17 @@ impl GpuSim {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // 1 セル 1 バイトに詰めた読み戻し用 (u32 境界に切り上げ)
+        let packed_size = (cell_count as u64).div_ceil(4) * 4;
+        let packed_cells = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("packed_cells"),
+            size: packed_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let cells_read = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cells_read"),
-            size: cell_buf_size,
+            size: packed_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -235,7 +319,7 @@ impl GpuSim {
         let gen_params_binding = wgpu::BufferBinding {
             buffer: &gen_params_buf,
             offset: 0,
-            size: Some(std::num::NonZeroU64::new(4).expect("4 != 0")),
+            size: Some(std::num::NonZeroU64::new(8).expect("8 != 0")),
         };
         let make_cell_bind_group = |src: &wgpu::Buffer, dst: &wgpu::Buffer| device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -255,7 +339,7 @@ impl GpuSim {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wirelevel"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WGSL_SHADER)),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(shader_source())),
         });
         let make_pipeline = |label: &str, layout: &wgpu::PipelineLayout| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(label),
@@ -265,6 +349,22 @@ impl GpuSim {
             cache: None,
             compilation_options: Default::default(),
         });
+
+        let pack_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pack"),
+            entries: &[storage_entry(0, false)],
+        });
+        let pack_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pack"),
+            layout: &pack_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: packed_cells.as_entire_binding() }],
+        });
+        let pack_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pack"),
+            bind_group_layouts: &[&cell_layout, &pack_layout],
+            push_constant_ranges: &[],
+        });
+        let pack_bytes = make_pipeline("pack_bytes", &pack_pipeline_layout);
 
         let stepper = match engine {
             Engine::Dense => {
@@ -332,8 +432,8 @@ impl GpuSim {
                     push_constant_ranges: &[],
                 });
                 Stepper::Tiled(TiledStepper {
-                    step_full: make_pipeline("step_full", &layout),
-                    step_list: make_pipeline("step_list", &layout),
+                    block_full: make_pipeline("block_full", &layout),
+                    block_list: make_pipeline("block_list", &layout),
                     args, list_bind_groups, stamps,
                     rot: 0,
                     stamp_base: 0,
@@ -344,9 +444,10 @@ impl GpuSim {
         };
 
         Ok(GpuSim {
-            device, queue, stepper, dims_buf,
+            device, queue, stepper, dims_buf, gen_params_buf,
             cell_bufs, cell_bind_groups,
-            change_log, change_log_read, cells_read,
+            change_log, change_log_read,
+            pack_bytes, pack_bind_group, packed_cells, cells_read,
             w, h, tiles_x, tiles_y, batch,
             front: 0,
         })
@@ -357,22 +458,38 @@ impl GpuSim {
         &self.cell_bufs[self.front]
     }
 
-    /// バッチ (changeLog の slot 0..n を使う連続した世代) の準備。Tiled では stamp_base と、
-    /// 全タイル計算から始めるなら args の初期化を queue.write_buffer で行う。
-    /// write_buffer は次の submit の前に実行されるので、呼び出し側は encoder を次に submit すること。
-    fn begin_batch(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        let Stepper::Tiled(t) = &mut self.stepper else { return };
+    /// バッチ (changeLog の slot 0..n を使う連続した n 世代) の dispatch 列を決め、準備をする。
+    /// Tiled では stamp_base、端数ブロックの GenParams、全タイル計算から始めるなら args の初期化を
+    /// queue.write_buffer で行う。write_buffer は次の submit の前に実行されるので、呼び出し側は
+    /// バッチの最初の encoder を次に submit すること。
+    fn begin_batch(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) -> Vec<DispatchPlan> {
+        debug_assert!((1..=MAX_GENS_PER_BATCH).contains(&n));
+        let t = match &mut self.stepper {
+            Stepper::Dense { .. } => return (0..n).map(|slot| DispatchPlan::Dense { slot }).collect(),
+            Stepper::Tiled(t) => t,
+        };
         if t.stamp_base > STAMP_RESET_THRESHOLD {
             encoder.clear_buffer(&t.stamps, 0, None);
             t.stamp_base = 0;
         }
         self.queue.write_buffer(&self.dims_buf, 16, bytemuck::cast_slice(&[t.stamp_base]));
+        let plan = plan_tiled_batch(n, t.needs_full_step);
         if t.needs_full_step {
-            // step_full は argsNext に積み、argsFree は触らない。全リストを空にしてから始める
+            // block_full は argsNext に積み、argsFree は触らない。全リストを空にしてから始める
             for a in &t.args {
                 self.queue.write_buffer(a, 0, bytemuck::cast_slice(&[ARGS_CONTROL_WORKGROUPS, 1, 1]));
             }
+            t.needs_full_step = false;
         }
+        for d in &plan {
+            if let DispatchPlan::Block { slot, gens } = *d {
+                if gens != BLOCK_GENS {
+                    let offset = GEN_PARAMS_PARTIAL_ENTRY as u64 * GEN_PARAMS_STRIDE;
+                    self.queue.write_buffer(&self.gen_params_buf, offset, bytemuck::cast_slice(&[slot, gens]));
+                }
+            }
+        }
+        plan
     }
 
     /// バッチを閉じる (n = バッチの世代数)。次のバッチのスタンプが今回のものより大きくなるようにする
@@ -382,68 +499,64 @@ impl GpuSim {
         }
     }
 
-    /// バッチ内の世代 slots のコマンドを 1 つの compute pass に積む。世代 slot は changeLog[slot] に
-    /// 変化タイル数を足す。
-    fn encode_gens(&mut self, encoder: &mut wgpu::CommandEncoder, slots: std::ops::Range<u32>) {
-        debug_assert!(slots.end <= MAX_GENS_PER_BATCH);
+    /// dispatch 列を 1 つの compute pass に積む。
+    fn encode_dispatches(&mut self, encoder: &mut wgpu::CommandEncoder, plan: &[DispatchPlan]) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
         });
-        if let Stepper::Dense { step_dense } = &self.stepper {
-            pass.set_pipeline(step_dense);
-        }
-        // Tiled で今 pass に設定しているパイプライン (step_list なら true)
-        let mut list_pipeline_set = false;
-        for slot in slots {
-            let offset = (slot as u64 * GEN_PARAMS_STRIDE) as u32;
+        // 今 pass に設定しているパイプライン (同じなら設定し直さない)
+        let mut current: Option<PipelineKind> = None;
+        for d in plan {
+            let offset = (d.gen_params_entry() as u64 * GEN_PARAMS_STRIDE) as u32;
             pass.set_bind_group(0, &self.cell_bind_groups[self.front], &[offset]);
-            match &mut self.stepper {
-                Stepper::Dense { .. } => {
+            match (&mut self.stepper, *d) {
+                (Stepper::Dense { step_dense }, DispatchPlan::Dense { .. }) => {
+                    if current != Some(PipelineKind::Dense) {
+                        pass.set_pipeline(step_dense);
+                        current = Some(PipelineKind::Dense);
+                    }
                     pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
                 }
-                Stepper::Tiled(t) => {
+                (Stepper::Tiled(t), DispatchPlan::Full) => {
                     pass.set_bind_group(1, &t.list_bind_groups[t.rot], &[]);
-                    if t.needs_full_step {
-                        pass.set_pipeline(&t.step_full);
-                        list_pipeline_set = false;
-                        pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
-                        t.needs_full_step = false;
-                    } else {
-                        if !list_pipeline_set {
-                            pass.set_pipeline(&t.step_list);
-                            list_pipeline_set = true;
-                        }
-                        pass.dispatch_workgroups_indirect(&t.args[t.rot], 0);
+                    if current != Some(PipelineKind::BlockFull) {
+                        pass.set_pipeline(&t.block_full);
+                        current = Some(PipelineKind::BlockFull);
                     }
+                    pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
                     t.rot = (t.rot + 1) % LIST_ROTATION;
                 }
+                (Stepper::Tiled(t), DispatchPlan::Block { .. }) => {
+                    pass.set_bind_group(1, &t.list_bind_groups[t.rot], &[]);
+                    if current != Some(PipelineKind::BlockList) {
+                        pass.set_pipeline(&t.block_list);
+                        current = Some(PipelineKind::BlockList);
+                    }
+                    pass.dispatch_workgroups_indirect(&t.args[t.rot], 0);
+                    t.rot = (t.rot + 1) % LIST_ROTATION;
+                }
+                (_, plan) => unreachable!("dispatch {plan:?} does not match the engine"),
             }
             self.front = 1 - self.front;
         }
     }
 
-    /// n 世代 (1 バッチ) を submit_chunk 世代ずつ submit する。GPU が前の塊を実行している間に
+    /// n 世代 (1 バッチ) を SUBMIT_CHUNK_DISPATCHES 個ずつ submit する。GPU が前の塊を実行している間に
     /// CPU が次の塊を記録するので、記録と実行が重なる。
     /// first は最初の encoder への追加 (changeLog のクリア等)、last は最後の encoder への追加 (読み戻しのコピー等)
     fn submit_batch(&mut self, n: u32,
                     first: impl FnOnce(&mut wgpu::CommandEncoder),
                     last: impl FnOnce(&mut wgpu::CommandEncoder)) {
-        debug_assert!((1..=MAX_GENS_PER_BATCH).contains(&n));
-        let mut first = Some(first);
-        let mut last = Some(last);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
-        if let Some(f) = first.take() { f(&mut encoder); }
-        self.begin_batch(&mut encoder);
-        let mut slot = 0;
-        loop {
-            let end = (slot + SUBMIT_CHUNK_GENS).min(n);
-            self.encode_gens(&mut encoder, slot..end);
-            slot = end;
-            if slot == n {
+        first(&mut encoder);
+        let plan = self.begin_batch(&mut encoder, n);
+        let mut chunks = plan.chunks(SUBMIT_CHUNK_DISPATCHES).peekable();
+        let mut last = Some(last);
+        while let Some(chunk) = chunks.next() {
+            self.encode_dispatches(&mut encoder, chunk);
+            if chunks.peek().is_none() {
                 if let Some(f) = last.take() { f(&mut encoder); }
-                self.queue.submit([encoder.finish()]);
-                break;
             }
             self.queue.submit([encoder.finish()]);
             encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
@@ -474,15 +587,26 @@ impl GpuSim {
         map_read(&self.device, &self.change_log_read, log_bytes, |bytes| bytemuck::cast_slice::<u8, u32>(bytes).to_vec())
     }
 
+    /// 現在の世代のセル配列を読み戻す。GPU 上で 1 セル 1 バイトに詰めてから転送する。
     pub fn read_cells(&mut self) -> Result<Vec<u8>> {
         let cell_count = (self.w as usize) * (self.h as usize);
-        let buf_size = (cell_count * 4) as u64;
+        let packed_size = (cell_count as u64).div_ceil(4) * 4;
+        let (gx, gy) = pack_dispatch_size(packed_size / 4, self.device.limits().max_compute_workgroups_per_dimension);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-        encoder.copy_buffer_to_buffer(self.front_buf(), 0, &self.cells_read, 0, buf_size);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pack"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pack_bytes);
+            // pack_bytes は b1 (= front) だけを読む。GenParams は見ないのでエントリ 0 でよい
+            pass.set_bind_group(0, &self.cell_bind_groups[self.front], &[0]);
+            pass.set_bind_group(1, &self.pack_bind_group, &[]);
+            pass.dispatch_workgroups(gx, gy, 1);
+        }
+        encoder.copy_buffer_to_buffer(&self.packed_cells, 0, &self.cells_read, 0, packed_size);
         self.queue.submit([encoder.finish()]);
-        map_read(&self.device, &self.cells_read, buf_size, |bytes| {
-            bytemuck::cast_slice::<u8, u32>(bytes).iter().map(|&v| (v & 0xFF) as u8).collect()
-        })
+        map_read(&self.device, &self.cells_read, packed_size, |bytes| bytes[..cell_count].to_vec())
     }
 
     /// front バッファの 1 セルを書き換える。Pin セルは step で不変・毎世代コピーされる
@@ -538,4 +662,56 @@ fn map_read<T>(device: &wgpu::Device, buf: &wgpu::Buffer, size: u64, f: impl FnO
     };
     buf.unmap();
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiled_batch_starts_with_full_step_then_covers_every_generation_once() {
+        let plan = plan_tiled_batch(20, true);
+        assert_eq!(plan[0], DispatchPlan::Full);
+        let mut next_slot = 1;
+        for d in &plan[1..] {
+            let DispatchPlan::Block { slot, gens } = *d else { panic!("unexpected {d:?}") };
+            assert_eq!(slot, next_slot);
+            assert!((1..=BLOCK_GENS).contains(&gens));
+            next_slot += gens;
+        }
+        assert_eq!(next_slot, 20);
+    }
+
+    #[test]
+    fn tiled_batch_has_at_most_one_partial_block_at_the_end() {
+        for n in 1..=3 * BLOCK_GENS + 1 {
+            for full in [false, true] {
+                let plan = plan_tiled_batch(n, full);
+                let partial: Vec<usize> = plan.iter().enumerate()
+                    .filter(|(_, d)| matches!(d, DispatchPlan::Block { gens, .. } if *gens != BLOCK_GENS))
+                    .map(|(i, _)| i)
+                    .collect();
+                assert!(partial.len() <= 1, "n={n} full={full}: {plan:?}");
+                if let Some(&i) = partial.first() {
+                    assert_eq!(i, plan.len() - 1, "partial block must be last (n={n} full={full})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gen_params_entry_of_partial_block_is_the_per_batch_entry() {
+        assert_eq!(DispatchPlan::Block { slot: 3, gens: BLOCK_GENS }.gen_params_entry(), 3);
+        assert_eq!(DispatchPlan::Block { slot: 3, gens: BLOCK_GENS - 1 }.gen_params_entry(), GEN_PARAMS_PARTIAL_ENTRY);
+        assert_eq!(DispatchPlan::Full.gen_params_entry(), GEN_PARAMS_FULL_ENTRY);
+    }
+
+    #[test]
+    fn pack_dispatch_covers_all_words_within_dimension_limit() {
+        for (words, max) in [(1u64, 65535u32), (771_962, 65535), (40_000_000, 65535), (1000, 3)] {
+            let (gx, gy) = pack_dispatch_size(words, max);
+            assert!(gx <= max && gy <= max);
+            assert!(gx as u64 * gy as u64 * PACK_WORKGROUP as u64 >= words);
+        }
+    }
 }
