@@ -2,7 +2,10 @@
 
 任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス: WireLevel CA ルールで SM83 CPU (380 gates, 69k cells) を E2E コンパイル・検証済み。GPU (RTX 3060) で byte-exact 一致を確認。テスト 222/222 通過。**
+> **ステータス (2026-09-27, PR #5): SM83 CPU フルセット (sm83_full、通常命令 256 + CB prefix 256 + 割込み、
+> 組合せ 10,859 + DFF 181) を WireLevel CA 上で配線完走。RTL の正しさは blargg `cpu_instrs` 個別版 11/11 PASS、
+> RTL ≡ CA は GPU 全周期照合 37/37 で確認済み。テスト F# 287/287 / cargo test 44/44 / GPU golden 24/24 /
+> memory-test.sh 5/5 通過。**
 
 ---
 
@@ -66,20 +69,25 @@ WireWorld Grid → Golly RLE
 
 ```
 src/
-  Domain.fs      # Units, Domain, Rule, Netlist
-  WireLevel.fs   # 独自CAルール (レベル駆動・pull型有向配線) — 新ターゲット
-  Library.fs     # StdCell definitions, CellTest
-  Place.fs       # Placement algorithm
-  Route.fs       # Lee/BFS routing algorithm
-  Sta.fs         # Static timing analysis
-  Sim.fs         # Clock-gated simulation
-  Pipeline.fs    # Yosys JSON frontend + WireWorld pipeline (legacy)
-  PipelineWL.fs  # Yosys Netlist → WireLevel コンパイラ (P0)
+  Domain.fs        # Units, Domain, Rule, Netlist
+  WireLevel.fs     # 独自CAルール (レベル駆動・pull型有向配線) — メインターゲット
+  TwoPhaseClock.fs # 2 相ノンオーバーラップクロック (DFF のマスタ/スレーブ分割)
+  Library.fs       # StdCell definitions, CellTest (WireWorld legacy)
+  GatePlacement.fs # ゲート配置のシミュレーテッドアニーリング (アーク距離最小化)
+  Place.fs         # Placement algorithm (WireWorld legacy)
+  Route.fs         # Lee/BFS routing algorithm (WireWorld legacy)
+  Sta.fs           # Static timing analysis (WireWorld legacy)
+  Sim.fs           # Clock-gated simulation (WireWorld legacy)
+  Pipeline.fs      # Yosys JSON frontend + WireWorld pipeline (legacy)
+  PipelineWL.fs    # Yosys Netlist → WireLevel コンパイラ (配置・A* 配線・クロック均等化)
   RoutedArtifact.fs # 配線結果 (.bin + meta JSON) の保存・再読込・鮮度確認
-  NetlistSim.fs  # ゲートレベル周期シミュレータ (CA と同じ規則、検証の期待値生成用)
-  Testbench.fs   # メモリバス TB (runner --memory と同じプログラム JSON、golden 生成)
-  E2eTests.fs    # All test modules
-routed/          # 配線成果物 (<circuit>.bin / <circuit>.meta.json)
+  HoldAnalysis.fs  # 配線済みグリッドの hold 静的解析
+  NetlistSim.fs    # ゲートレベル周期シミュレータ (CA と同じ規則、検証の期待値生成用)
+  Testbench.fs     # メモリバス TB (runner --memory と同じプログラム JSON、golden 生成)
+  E2eTests.fs      # All test modules
+  TestbenchTests.fs # Testbench 単体テスト + sm83_full 仕様テスト
+  TwoPhaseTests.fs  # 2 相クロックの単体テスト・skew 耐性の実証テスト
+routed/          # 配線成果物 (<circuit>.bin / <circuit>.meta.json / golden)
 wgpu-runner/     # Rust + wgpu GPU シミュレータ
 web/             # WebGPU フロントエンド (WGSL compute)
 ```
@@ -129,12 +137,17 @@ match compileWL defaultLib json with
 
 ```bash
 dotnet build src/WwHdl.fsproj                    # build（テスト前に必須）
-dotnet fsi src/RunTests.fsx                       # F# テスト (222/222)
-web/run-test.sh                                   # WebGPU golden tests (Playwright/SiftShader)
-wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060)
-wgpu-runner/memory-test.sh [program.json ...]     # メモリバス CPU の golden 照合 + 検証器の検証 (subset smoke/call_stack/pc_carry)
+dotnet fsi src/RunTests.fsx                       # F# テスト (287/287)
+web/run-test.sh                                   # WebGPU golden tests (Playwright/SwiftShader)
+wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060) — 24/24
+cd wgpu-runner && cargo test                      # Rust 側ユニットテスト — 44/44
+wgpu-runner/memory-test.sh [program.json ...]     # メモリバス CPU の golden 照合 + 検証器の検証 — 5/5
 dotnet fsi src/DiffTestGbfs.fsx [--variants N]    # sm83_full ネットリストと ../gbfs の CPU の全命令差分テスト (要 gbfs.Lib Release ビルド)
+dotnet build src/WwHdl.fsproj -c Release && dotnet fsi src/CoSimGbfs.fsx --lockstep <rom.gb>
+                                                   # sm83_full RTL + gbfs 周辺回路で公開テスト ROM (blargg cpu_instrs) を流す
 ```
+
+（テスト数は 2026-09-28 時点で実測。Playwright (`web/run-test.sh`) は 2026-08-14 時点の 24/24 のまま未再計測）
 
 ## 開発フロー（fsx 駆動）
 
@@ -161,7 +174,7 @@ dotnet fsi src/DiffTestGbfs.fsx [--variants N]    # sm83_full ネットリスト
 
 | パターン | 用途 | 例 |
 |---------|------|-----|
-| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 222/222）, `RunWl.fsx`, `RunBackfire.fsx` |
+| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 287/287）, `RunWl.fsx`, `RunBackfire.fsx` |
 | `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
 | `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `src/LoadRouted.fsx` |
 | `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
@@ -181,7 +194,7 @@ F# の `WireLevel.step` がリファレンス実装で、`encodeCell` の byte �
 
 GPU 結果は F# `settle` と **byte-exact 一致**。
 
-### ベンチマーク (RTX 3060, Vulkan)
+### ベンチマーク (RTX 3060, Vulkan、2026-06-11 時点。以後未再計測)
 
 | テスト | Cells | Steps | 時間 | 比較 |
 |--------|-------|-------|------|------|
@@ -190,15 +203,18 @@ GPU 結果は F# `settle` と **byte-exact 一致**。
 | mincpu-clk1 | 105k | 3500 | 0.39s | F# ref 比 205x |
 | sm83-mc-add-high | 139k | 2419 | 0.56s | F# ref 比 280x |
 
+sm83_full 全 33 本 (33 プログラム) の GPU 全周期照合は、収束判定の GPU 化・tiled エンジン・
+クロック木最短経路化により約 2 時間 → **191 秒** まで高速化した (2026-09-27、PR #5)。
+
 ## SM83 CPU テスト
 
 SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している。規模は 3 段階:
 
-| 回路 | gates | 状態 |
+| 回路 | gates (最終) | 状態 |
 |------|------|------|
 | sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
-| sm83_subset | 3,553 | ✅ 配線完走 (20x14、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
-| sm83_full | 10,767 | 全命令セット (通常 256 + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで全命令一致 (NetlistSim)。配線は今後の課題 |
+| sm83_subset | 3,553 | ✅ 配線完走 (20x14、行優先、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
+| sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (20x14、アニーリング配置 + 2 相クロック、16.1 分、rip-up 0、2026-09-27)。全命令セット (通常 256 + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
 
 ### コンパイル
 
@@ -206,15 +222,18 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 # 配線して routed/<circuit>.{bin,meta.json} に保存 (保存後に再読込して整合性を確認)
 dotnet fsi src/ExportRouted.fsx sm83_subset
 
-# 長時間の配線はバックグラウンドで
-nohup dotnet fsi src/ExportRouted.fsx sm83_full > routed/sm83_full.log 2>&1 &
+# sm83_full はアニーリング配置 + 2 相クロックで約 16 分 (行優先・単相だと輻輳失敗するか数時間かかる。TODO.md 参照)
+nohup dotnet fsi src/ExportRouted.fsx sm83_full --pitch 20 14 --place anneal --clocking two-phase > routed/sm83_full.log 2>&1 &
 
 # 保存済みの結果を確認 (寸法・ピン座標の整合性、verilog JSON が配線時から変わっていないか)
 dotnet fsi src/LoadRouted.fsx sm83_subset
 ```
 
 - compileWL はピッチを回路規模から自動決定し、輻輳失敗時は自動拡大する (16x12 → 20x14)。`--pitch X Y` で固定も可能
-- クロック終端は優先配線され、balanceClockNet がスキューを均等化する
+- 配置は既定で行優先 (`--place rowmajor`)。`--place anneal` はアーク距離 (駆動元→受け手のマンハッタン距離の総和)
+  を最小化するシミュレーテッドアニーリング配置で、sm83_full のような密な回路では配線完走率を大きく上げる
+  (詳細は TODO.md 「経緯」表)
+- クロック終端は優先配線され、既定 (`--clocking single`) では balanceClockNet がスキューを均等化する
 - `--clocking two-phase` は各 DFF をマスター (clk_a) / スレーブ (clk_b) に分ける 2 相ノンオーバーラップクロックで配線する。
   skew を均等化せず、hold は相の間の settle で構造的に守る (駆動手順は DESIGN-VERIFY.md §5.2.1、検査は
   `dotnet fsi src/AnalyzeHold.fsx <circuit>` が meta の clocking に従って行う)
@@ -289,7 +308,7 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 - [x] rip-up 撤去対象を「ブロッカー記録ベース」に改善
 - [x] クロック優先配線 (skew 1068 → 46)
 
-### 🔲 M8 — SM83 フルセット
+### ✅ M8 — SM83 フルセット (2026-09-27, PR #5)
 
 - [x] CB prefix 命令 (0xCB) のデコード有効化 (9,059 gates、`d008cbe`)
 - [x] 即値読出の off-by-one 修正 (FETCH2/IMM で加算前の pc を addr に出していた。9,155 gates)
@@ -297,10 +316,17 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 - [x] gbfs との差分テストで RTL 不具合 6 分類を修正し、494 命令すべて一致 (10,650 gates)
 - [x] 割込み (IE/IF は CPU の外、EI の 1 命令遅延、RETI、HALT 復帰) を実装 (10,654 gates)
 - [x] HALT バグ (Pan Docs 準拠) を実装 (10,767 gates)。STOP は未実装
-- [ ] sm83_full の配線完走 (5〜8 時間見込み)
-- [ ] CB 命令の動作検証 (配線後に実施)
-- [ ] 配線時間の短縮 (ネット単位の並列化 / ヒューリスティック改善)
-- [ ] 通常命令「全 256」の網羅確認
+- [x] DAA を含む全命令の RTL 不具合を修正し gbfs 差分 0 件に (最終 10,859 combinational + 181 DFF)
+- [x] 配置をシミュレーテッドアニーリング (`GatePlacement.fs`) に切替え、2 相ノンオーバーラップクロック
+      (`TwoPhaseClock.fs`) を導入。sm83_full の配線完走 (20x14、16.1 分、rip-up 0)。
+      行優先・単相では 89% で輻輳失敗していた (経緯は TODO.md 参照)
+- [x] CB 命令の動作検証 (gbfs 差分 498 命令 × 4 パターン一致 + GPU golden)
+- [x] 配線時間の短縮 (アニーリング配置切替で 142 分 → 16.1 分)
+- [x] 通常命令「全 256」の網羅確認 (STOP・未定義 opcode を除く)
+- [x] RTL の正しさを公開テスト ROM で確認: blargg `cpu_instrs` 個別版 11/11 PASS (`CoSimGbfs.fsx --lockstep`)
+- [x] RTL ≡ CA の確認: GPU 全周期照合 37/37 (`wgpu-runner/memory-test.sh`)
+- [ ] 残課題 (CA 高速化の続き、`compileWL` 既定値の見直し、サイクル精度、mooneye acceptance 系、
+      STOP 未実装など) は TODO.md 「残課題」節を参照
 
 ## テスト
 
@@ -314,13 +340,18 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 | MultiStageTest | 多段 NOT チェーン | ✅ |
 | NandGateTest | NAND ゲート | ✅ |
 | MultiGateTest | 複数ゲート | ✅ |
-| WlSm83Test | SM83 CPU | 7/7 ✅ |
-| RoutedArtifactTest | 配線結果の保存・再読込 | 8/8 ✅ |
-| NetlistSimTest | ゲートレベルシミュレータ (sm83_min 20 命令ほか) | 11/11 ✅ |
-| TestbenchTest | メモリバス TB (I/O・割込み含む) + sm83_full 仕様テスト 33 本 (手書き 21 + gbfs 差分の回帰 12) | 45/45 ✅ |
-| GPU Golden | byte-exact 一致 | 24/24 ✅ |
+| WlSm83Test | SM83 CPU | ✅ |
+| RoutedArtifactTest | 配線結果の保存・再読込 | ✅ |
+| NetlistSimTest | ゲートレベルシミュレータ (sm83_min 20 命令ほか) | ✅ |
+| TestbenchTest | メモリバス TB (I/O・割込み含む) + sm83_full 仕様テスト (手書き + gbfs 差分の回帰、DAA 追加分含む) | ✅ |
+| WlPlacementTest | ゲート配置のシミュレーテッドアニーリング最適化 (`GatePlacement.fs`) | ✅ |
+| WlTwoPhaseTest (WL-2PH) | 2 相ノンオーバーラップクロック (DFF 分割・skew 耐性・sm83_min 検証) | 38/38 ✅ |
+| GPU Golden (`wgpu-runner/run-tests.sh`) | byte-exact 一致 | 24/24 ✅ |
+| cargo test (`wgpu-runner`) | Rust 側ユニットテスト | 44/44 ✅ |
+| `wgpu-runner/memory-test.sh` | メモリバス golden 照合 + 検証器の自己検証 | 5/5 ✅ |
 
-**合計**: 222/222 通過 (mincpu.json を moon 側で追加済み)
+**合計 (F#, `dotnet fsi src/RunTests.fsx`)**: **287/287** 通過 (2026-09-28 実測。内訳の正確な数はコマンド出力を参照)。
+上記の個別カウントを持つ行以外は複数テストを含むモジュールで、正確な内訳は `RunTests.fsx` の出力を参照のこと。
 
 ## ライセンス
 
