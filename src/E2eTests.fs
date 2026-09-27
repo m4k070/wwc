@@ -1426,26 +1426,45 @@ module WlCounterTest =
     let private jsonPath =
         System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "counter4.json")
 
+    /// 収束待ちの上限 (世代)。counter4 の 1 相は数百世代で収束する。
+    let private settleLimit = 2000
+
     /// コンパイル済み counter4 をクロック駆動し (初期値 0 か, 1..18 を mod 16 で数えるか) を返す。
+    /// クロック方式 (単相 / 2 相) は clocks で、収束待ちの実装は settler で選ぶ。
+    /// 収束しない相があれば失敗 (結果を信用できない) として扱う。
+    let verifyCountingWith
+        (settler: ClockDrive.Settler)
+        (clocks: ClockDrive.ClockPins)
+        (qBits: int list)
+        (grid: LGrid)
+        (placed: WlPlaced list)
+        : bool * bool =
+        let outOf n =
+            placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
+        let value g =
+            qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
+            |> List.sum
+        let report (e: ClockDrive.DriveError) =
+            printfn "  WL_CNT_UNSETTLED: %s" (ClockDrive.describeDriveError e)
+        match ClockDrive.settleLow settler settleLimit clocks grid with   // 初期収束 (clk=0)
+        | Error e -> report e; false, false
+        | Ok g0 ->
+            let rec count (k: int) (g: LGrid) (ok: bool) =
+                if k > 18 then ok
+                else
+                    match ClockDrive.cycle settler settleLimit clocks g with
+                    | Error e -> report e; false
+                    | Ok next -> count (k + 1) next (ok && value next = k % 16)
+            value g0 = 0, count 1 g0 true
+
+    /// 単相で compileWL した counter4 を検証する (クロックピンは唯一の入力ピン)。
     /// 配置戦略を変えた場合 (WlPlacementTest) も同じ検証を使う。
     let verifyCounting
         (qBits: int list)
         (grid: LGrid, placed: WlPlaced list, pins: Map<NetId, Coord>)
         : bool * bool =
-        let outOf n =
-            placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
         let clkPin = pins |> Map.toList |> List.head |> snd
-        let value g =
-            qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
-            |> List.sum
-        let mutable g = fst (settle 2000 grid)   // 初期収束 (clk=0)
-        let init0 = value g = 0
-        let mutable ok = true
-        for k in 1 .. 18 do
-            g <- fst (settle 2000 (setPin clkPin true g))
-            g <- fst (settle 2000 (setPin clkPin false g))
-            if value g <> k % 16 then ok <- false
-        init0, ok
+        verifyCountingWith settle (ClockDrive.SingleEdgePins clkPin) qBits grid placed
 
     let runAll () : (string * bool) list =
         if not (System.IO.File.Exists jsonPath) then
@@ -1481,42 +1500,56 @@ module WlReg8Test =
     let private jsonPath =
         System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "verilog", "reg8.json")
 
+    /// 収束待ちの上限 (世代)。
+    let private settleLimit = 2000
+
+    /// reg8.json のデータ入力 d[0..7] のネット (NetId 3..10)。
+    let private dataNet (bit: int) = NetId (3 + bit)
+
     /// コンパイル済み reg8 に 4 値を書き込み・読み出して (初期値 0 か, 全値一致か) を返す。
+    /// クロック方式 (単相 / 2 相) は clocks で、収束待ちの実装は settler で選ぶ。
+    let verifyWriteReadWith
+        (settler: ClockDrive.Settler)
+        (clocks: ClockDrive.ClockPins)
+        (qBits: int list)
+        (grid: LGrid)
+        (placed: WlPlaced list)
+        (pins: Map<NetId, Coord>)
+        : bool * bool =
+        let outOf n =
+            placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
+        let value g =
+            qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
+            |> List.sum
+        let setData (v: int) (gr: LGrid) =
+            [ 0 .. 7 ] |> List.fold (fun acc i -> setPin pins.[dataNet i] ((v >>> i) &&& 1 = 1) acc) gr
+        let report (e: ClockDrive.DriveError) =
+            printfn "  WL_REG8_UNSETTLED: %s" (ClockDrive.describeDriveError e)
+        // 初期収束 (clk=0, d=0)
+        match ClockDrive.settleLow settler settleLimit clocks grid with
+        | Error e -> report e; false, false
+        | Ok g0 ->
+            // 書き込み & クロック実行 → 値を確認。
+            // 注: データを先に伝播させてからクロックをアサートしないと (settleLow)、
+            // クロックがデータより先に DFF に到達し古い値をキャプチャする。
+            let writeRead (state: Result<LGrid, ClockDrive.DriveError> * bool) (v: int) =
+                match state with
+                | Error e, _ -> Error e, false
+                | Ok g, ok ->
+                    match ClockDrive.cycle settler settleLimit clocks (setData v g) with
+                    | Error e -> Error e, false
+                    | Ok next -> Ok next, ok && value next = v
+            let final, ok = [ 0xAB; 0x55; 0x00; 0xFF ] |> List.fold writeRead (Ok g0, true)
+            (match final with Error e -> report e | Ok _ -> ())
+            value g0 = 0, ok
+
+    /// 単相で compileWL した reg8 を検証する (クロックピンは NetId 2)。
     /// 配置戦略を変えた場合 (WlPlacementTest) も同じ検証を使う。
     let verifyWriteRead
         (qBits: int list)
         (grid: LGrid, placed: WlPlaced list, pins: Map<NetId, Coord>)
         : bool * bool =
-        let outOf n =
-            placed |> List.find (fun p -> p.Gate.Output = NetId n) |> fun p -> p.Coord
-        let clkPin = pins.[NetId 2]
-        let value g =
-            qBits |> List.mapi (fun i n -> if levelOf g (outOf n) then 1 <<< i else 0)
-            |> List.sum
-
-        // 初期収束 (clk=0, d=0)
-        let mutable g = fst (settle 2000 grid)
-        let init0 = value g = 0
-
-        // 値 0xAB を書き込む (d[0..7] = 1,1,0,1,0,1,0,1)
-        let setData (v: int) (gr: LGrid) =
-            let mutable gr = gr
-            for i in 0 .. 7 do
-                let pin = pins.[NetId (3 + i)]
-                gr <- setPin pin ((v >>> i) &&& 1 = 1) gr
-            gr
-        let mutable ok = true
-
-        // 書き込み & クロック実行 → 値を確認
-        // 注: データを先に伝播させてからクロックをアサートしないと、
-        // クロックがデータより先に DFF に到達し古い値をキャプチャする (ホールド違反)。
-        for (writeVal, expected) in [0xAB; 0x55; 0x00; 0xFF] |> List.map (fun v -> v, v) do
-            g <- setData writeVal g
-            g <- fst (settle 2000 g)                          // データ伝播待ち
-            g <- fst (settle 2000 (setPin clkPin true g))     // クロックアサート
-            g <- fst (settle 2000 (setPin clkPin false g))    // クロックデアサート
-            if value g <> expected then ok <- false
-        init0, ok
+        verifyWriteReadWith settle (ClockDrive.SingleEdgePins pins.[NetId 2]) qBits grid placed pins
 
     let runAll () : (string * bool) list =
         if not (System.IO.File.Exists jsonPath) then

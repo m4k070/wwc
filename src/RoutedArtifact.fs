@@ -12,6 +12,12 @@ namespace WwHdl
 //   * .meta — ポート名 → ビット毎の座標 (LSB first、.bin と同じ正規化座標)、
 //             元 verilog JSON の SHA-256 (陳腐化検出)、生成時の git commit (監査用)
 //
+// クロック方式 (formatVersion 2 で追加、DESIGN-VERIFY.md §6.3):
+//   * "clocking": {"scheme": "singleEdge"} — 従来。inputs に clk がある
+//   * "clocking": {"scheme": "twoPhase", "clockPort": "clk", "clkA": {x,y}, "clkB": {x,y}}
+//     — 元の clk ポートは inputs に載せず、ホストは clkA / clkB を §5.2 の 2 相手順で駆動する
+//   * formatVersion 1 (clocking なし) は singleEdge として読む (既存成果物との互換)
+//
 // yosys の bits 配列は数値ネットと定数文字列 ("0"/"1") が混在する。
 // Pipeline.parseYosysJson は定数を捨てるためビット位置がずれる → ここでは位置を保って保持する。
 // ---------------------------------------------------------------------
@@ -25,8 +31,13 @@ module RoutedArtifact =
     open PipelineWL
 
     /// meta JSON の形式バージョン。互換性のない変更で上げる。
+    /// 2: clocking (クロック方式) を追加
     [<Literal>]
-    let CurrentFormatVersion = 1
+    let CurrentFormatVersion = 2
+
+    /// clocking を持たない旧形式。読むときは SingleEdgeClocking とみなす。
+    [<Literal>]
+    let LegacyFormatVersion = 1
 
     type PortDirection =
         | InputPort
@@ -52,6 +63,14 @@ module RoutedArtifact =
         /// 駆動元が grid 上に存在しない (未駆動ネット)。
         | Unobservable of NetId
 
+    /// grid のクロック方式 (ホストの駆動手順を決める)。
+    type ClockingMeta =
+        /// 単相: inputs のクロックポート (通常 "clk") を 0→1 で駆動する
+        | SingleEdgeClocking
+        /// 2 相: clockPort (元のクロックポート名、inputs には無い) の代わりに
+        /// clkA / clkB ピンを DESIGN-VERIFY.md §5.2 の手順で駆動する
+        | TwoPhaseClocking of clockPort: string * clkA: Coord * clkB: Coord
+
     type RoutedMeta =
         { FormatVersion: int
           Circuit: string
@@ -67,7 +86,9 @@ module RoutedArtifact =
           /// 入力ポート名 → ピンセル座標 (正規化、LSB first)。
           Inputs: Map<string, Coord list>
           /// 出力ポート名 → ビット毎の観測方法 (正規化、LSB first)。
-          Outputs: Map<string, OutputProbe list> }
+          Outputs: Map<string, OutputProbe list>
+          /// クロック方式 (座標は正規化済み)
+          Clocking: ClockingMeta }
 
     /// 生成時の環境情報。時刻・git の取得 (副作用) は呼び出し側で行って渡す。
     type Provenance =
@@ -86,6 +107,13 @@ module RoutedArtifact =
         | BinTruncated of path: string * expectedBytes: int * actualBytes: int
         | ProbeCellMismatch of port: string * bitIndex: int * at: Coord * found: LCell
         | StaleSource of circuit: string * metaSha: string * currentSha: string
+        /// 2 相化したクロックネットに対応する入力ポートが見つからない / 1 ビットでない
+        | ClockPortNotFound of clock: NetId
+        | ClockPortNotSingleBit of port: string * width: int
+        /// 2 相のクロックピン (clkA / clkB) が配置されていない
+        | MissingClockPin of name: string * net: NetId
+        | ClockPinMismatch of name: string * at: Coord * found: LCell
+        | UnknownClockingScheme of scheme: string
 
     let describeError (e: ArtifactError) : string =
         let short (s: string) = if s.Length > 12 then s.Substring (0, 12) else s
@@ -96,13 +124,18 @@ module RoutedArtifact =
         | MissingInputPin (port, NetId n) -> sprintf "入力ポート %s のネット %d にピンが配置されていない" port n
         | FileMissing path -> sprintf "ファイルがない: %s" path
         | MetaParseFailed (path, reason) -> sprintf "meta JSON のパースに失敗 (%s): %s" path reason
-        | FormatVersionMismatch (expected, actual) -> sprintf "meta 形式バージョン不一致: 期待 %d / 実際 %d" expected actual
+        | FormatVersionMismatch (expected, actual) -> sprintf "meta 形式バージョン不一致: 期待 %d (または %d) / 実際 %d" expected LegacyFormatVersion actual
         | GridSizeMismatch ((mw, mh), (bw, bh)) -> sprintf "meta の寸法 %dx%d と .bin の寸法 %dx%d が一致しない" mw mh bw bh
         | BinTruncated (path, expected, actual) -> sprintf ".bin が不完全: %s (期待 %d byte / 実際 %d byte)" path expected actual
         | ProbeCellMismatch (port, i, c, cell) -> sprintf "%s[%d] の座標 (%d,%d) のセルが想定外: %A" port i c.X c.Y cell
         | StaleSource (circuit, metaSha, currentSha) ->
             sprintf "%s の配線結果は現在と異なる verilog JSON から生成されている (meta %s… / 現在 %s…)"
                 circuit (short metaSha) (short currentSha)
+        | ClockPortNotFound (NetId n) -> sprintf "クロック (ネット %d) に対応する入力ポートがない" n
+        | ClockPortNotSingleBit (port, width) -> sprintf "クロックポート %s が %d ビット (1 ビットのみ対応)" port width
+        | MissingClockPin (name, NetId n) -> sprintf "2 相クロック %s (ネット %d) のピンが配置されていない" name n
+        | ClockPinMismatch (name, c, cell) -> sprintf "2 相クロック %s の座標 (%d,%d) のセルが Pin でない: %A" name c.X c.Y cell
+        | UnknownClockingScheme scheme -> sprintf "未知のクロック方式: %s" scheme
 
     let private traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
         let folder x acc =
@@ -176,8 +209,18 @@ module RoutedArtifact =
         let maxY = coords |> Array.map (fun c -> c.Y) |> Array.max
         { X = minX; Y = minY }, maxX - minX + 1, maxY - minY + 1
 
-    /// compileWL の結果とポート情報から meta を組み立てる (純粋関数)。
-    let buildMeta
+    /// 2 相で inputs から外す元のクロックポートを探す (1 ビットのポートであること)。
+    let private findClockPort (ports: YosysPortBits list) (clock: NetId) : Result<string, ArtifactError> =
+        ports
+        |> List.tryFind (fun p -> p.Direction = InputPort && List.contains (NetBit clock) p.Bits)
+        |> function
+           | None -> Error (ClockPortNotFound clock)
+           | Some p when p.Bits.Length <> 1 -> Error (ClockPortNotSingleBit (p.Name, p.Bits.Length))
+           | Some p -> Ok p.Name
+
+    /// コンパイル結果とポート情報から meta を組み立てる (純粋関数)。
+    /// clocking が TwoPhaseClock なら、元のクロックポートを inputs から外し、clkA / clkB の座標を記録する。
+    let buildMetaWithClocking
         (circuit: string)
         (sourceSha: string)
         (provenance: Provenance)
@@ -185,6 +228,7 @@ module RoutedArtifact =
         (grid: LGrid)
         (placed: WlPlaced list)
         (pins: Map<NetId, Coord>)
+        (clocking: CircuitClocking)
         : Result<RoutedMeta, ArtifactError> =
         let origin, width, height = gridBounds grid
         let normalize (c: Coord) = { X = c.X - origin.X; Y = c.Y - origin.Y }
@@ -211,26 +255,68 @@ module RoutedArtifact =
                 | None, Some c -> CellProbe (normalize c)
                 | None, None -> Unobservable net
 
-        let inputPorts = ports |> List.filter (fun p -> p.Direction = InputPort)
+        let clockPin (name: string) (net: NetId) : Result<Coord, ArtifactError> =
+            match Map.tryFind net pins with
+            | Some c -> Ok (normalize c)
+            | None -> Error (MissingClockPin (name, net))
+
+        // (clocking の meta 表現, inputs から外すポート名)
+        let clockingMeta : Result<ClockingMeta * string option, ArtifactError> =
+            match clocking with
+            | SingleEdgeClock _ -> Ok (SingleEdgeClocking, None)
+            | TwoPhaseClock tp ->
+                findClockPort ports tp.OriginalClock
+                |> Result.bind (fun clockPort ->
+                    clockPin "clkA" tp.ClockA
+                    |> Result.bind (fun a ->
+                        clockPin "clkB" tp.ClockB
+                        |> Result.map (fun b -> TwoPhaseClocking (clockPort, a, b), Some clockPort)))
+
         let outputPorts = ports |> List.filter (fun p -> p.Direction = OutputPort)
 
-        inputPorts
-        |> traverse (fun p -> inputCoords p |> Result.map (fun cs -> p.Name, cs))
-        |> Result.map (fun inputs ->
-            let outputs = outputPorts |> List.map (fun p -> p.Name, p.Bits |> List.map outputProbe)
-            let dffCount = placed |> List.filter (fun p -> p.Gate.Kind = Dff) |> List.length
-            ({ FormatVersion = CurrentFormatVersion
-               Circuit = circuit
-               SourceSha256 = sourceSha
-               GitCommit = provenance.GitCommit
-               CreatedAtUtc = provenance.CreatedAtUtc
-               Width = width
-               Height = height
-               Origin = origin
-               GateCount = placed.Length
-               DffCount = dffCount
-               Inputs = Map.ofList inputs
-               Outputs = Map.ofList outputs } : RoutedMeta))
+        clockingMeta
+        |> Result.bind (fun (clockingValue, removedPort) ->
+            ports
+            |> List.filter (fun p -> p.Direction = InputPort && Some p.Name <> removedPort)
+            |> traverse (fun p -> inputCoords p |> Result.map (fun cs -> p.Name, cs))
+            |> Result.map (fun inputs ->
+                let outputs = outputPorts |> List.map (fun p -> p.Name, p.Bits |> List.map outputProbe)
+                let dffCount = placed |> List.filter (fun p -> p.Gate.Kind = Dff) |> List.length
+                ({ FormatVersion = CurrentFormatVersion
+                   Circuit = circuit
+                   SourceSha256 = sourceSha
+                   GitCommit = provenance.GitCommit
+                   CreatedAtUtc = provenance.CreatedAtUtc
+                   Width = width
+                   Height = height
+                   Origin = origin
+                   GateCount = placed.Length
+                   DffCount = dffCount
+                   Inputs = Map.ofList inputs
+                   Outputs = Map.ofList outputs
+                   Clocking = clockingValue } : RoutedMeta)))
+
+    /// 単相のコンパイル結果から meta を組み立てる (純粋関数)。
+    let buildMeta
+        (circuit: string)
+        (sourceSha: string)
+        (provenance: Provenance)
+        (ports: YosysPortBits list)
+        (grid: LGrid)
+        (placed: WlPlaced list)
+        (pins: Map<NetId, Coord>)
+        : Result<RoutedMeta, ArtifactError> =
+        buildMetaWithClocking circuit sourceSha provenance ports grid placed pins (SingleEdgeClock None)
+
+    /// WlCompiled から meta を組み立てる (クロック方式は compiled.Clocking に従う)。
+    let buildMetaOfCompiled
+        (circuit: string)
+        (sourceSha: string)
+        (provenance: Provenance)
+        (ports: YosysPortBits list)
+        (compiled: WlCompiled)
+        : Result<RoutedMeta, ArtifactError> =
+        buildMetaWithClocking circuit sourceSha provenance ports compiled.Grid compiled.Placed compiled.Pins compiled.Clocking
 
     // --- meta JSON --------------------------------------------------------
 
@@ -251,6 +337,12 @@ module RoutedArtifact =
             w.WriteStartObject ()
             w.WriteNumber ("unobservable", net)
             w.WriteEndObject ()
+
+    /// meta JSON の clocking.scheme の値。
+    [<Literal>]
+    let SchemeSingleEdge = "singleEdge"
+    [<Literal>]
+    let SchemeTwoPhase = "twoPhase"
 
     let private writeMeta (w: Utf8JsonWriter) (meta: RoutedMeta) =
         w.WriteStartObject ()
@@ -279,6 +371,17 @@ module RoutedArtifact =
                 writeProbe w p
             w.WriteEndArray ()
         w.WriteEndObject ()
+        w.WriteStartObject "clocking"
+        match meta.Clocking with
+        | SingleEdgeClocking -> w.WriteString ("scheme", SchemeSingleEdge)
+        | TwoPhaseClocking (clockPort, a, b) ->
+            w.WriteString ("scheme", SchemeTwoPhase)
+            w.WriteString ("clockPort", clockPort)
+            w.WritePropertyName "clkA"
+            writeCoord w a
+            w.WritePropertyName "clkB"
+            writeCoord w b
+        w.WriteEndObject ()
         w.WriteEndObject ()
 
     let metaToJson (meta: RoutedMeta) : string =
@@ -302,27 +405,44 @@ module RoutedArtifact =
         |> Seq.map (fun p -> p.Name, (p.Value.EnumerateArray () |> Seq.map readItem |> List.ofSeq))
         |> Map.ofSeq
 
+    /// clocking を読む。旧形式 (formatVersion 1) は clocking を持たず単相。
+    let private readClocking (version: int) (root: JsonElement) : Result<ClockingMeta, ArtifactError> =
+        if version = LegacyFormatVersion then Ok SingleEdgeClocking
+        else
+            let clocking = root.GetProperty "clocking"
+            match clocking.GetProperty("scheme").GetString () with
+            | SchemeSingleEdge -> Ok SingleEdgeClocking
+            | SchemeTwoPhase ->
+                Ok (TwoPhaseClocking (clocking.GetProperty("clockPort").GetString (),
+                                      readCoord (clocking.GetProperty "clkA"),
+                                      readCoord (clocking.GetProperty "clkB")))
+            | other -> Error (UnknownClockingScheme other)
+
     /// meta JSON を読む。source はエラーメッセージ用のラベル (通常はファイルパス)。
+    /// formatVersion 1 (clocking なし) と 2 を読める。
     let metaOfJson (source: string) (json: string) : Result<RoutedMeta, ArtifactError> =
         try
             use doc = JsonDocument.Parse json
             let root = doc.RootElement
             let version = root.GetProperty("formatVersion").GetInt32 ()
-            if version <> CurrentFormatVersion then
+            if version <> CurrentFormatVersion && version <> LegacyFormatVersion then
                 Error (FormatVersionMismatch (CurrentFormatVersion, version))
             else
-                Ok ({ FormatVersion = version
-                      Circuit = root.GetProperty("circuit").GetString ()
-                      SourceSha256 = root.GetProperty("sourceSha256").GetString ()
-                      GitCommit = root.GetProperty("gitCommit").GetString ()
-                      CreatedAtUtc = root.GetProperty("createdAtUtc").GetDateTimeOffset ()
-                      Width = root.GetProperty("width").GetInt32 ()
-                      Height = root.GetProperty("height").GetInt32 ()
-                      Origin = readCoord (root.GetProperty "origin")
-                      GateCount = root.GetProperty("gateCount").GetInt32 ()
-                      DffCount = root.GetProperty("dffCount").GetInt32 ()
-                      Inputs = readBitMap root "inputs" readCoord
-                      Outputs = readBitMap root "outputs" readProbe } : RoutedMeta)
+                readClocking version root
+                |> Result.map (fun clocking ->
+                    ({ FormatVersion = version
+                       Circuit = root.GetProperty("circuit").GetString ()
+                       SourceSha256 = root.GetProperty("sourceSha256").GetString ()
+                       GitCommit = root.GetProperty("gitCommit").GetString ()
+                       CreatedAtUtc = root.GetProperty("createdAtUtc").GetDateTimeOffset ()
+                       Width = root.GetProperty("width").GetInt32 ()
+                       Height = root.GetProperty("height").GetInt32 ()
+                       Origin = readCoord (root.GetProperty "origin")
+                       GateCount = root.GetProperty("gateCount").GetInt32 ()
+                       DffCount = root.GetProperty("dffCount").GetInt32 ()
+                       Inputs = readBitMap root "inputs" readCoord
+                       Outputs = readBitMap root "outputs" readProbe
+                       Clocking = clocking } : RoutedMeta))
         with ex ->
             Error (MetaParseFailed (source, ex.Message))
 
@@ -351,7 +471,16 @@ module RoutedArtifact =
                         match getL grid c with
                         | Pin _ | LNand _ | LDff _ -> None
                         | cell -> Some (ProbeCellMismatch (name, i, c, cell))))
-        match Seq.append inputErrors outputErrors |> Seq.choose id |> Seq.tryHead with
+        let clockErrors =
+            match meta.Clocking with
+            | SingleEdgeClocking -> Seq.empty
+            | TwoPhaseClocking (_, a, b) ->
+                [ "clkA", a; "clkB", b ]
+                |> Seq.map (fun (name, c) ->
+                    match getL grid c with
+                    | Pin _ -> None
+                    | cell -> Some (ClockPinMismatch (name, c, cell)))
+        match Seq.concat [ inputErrors; outputErrors; clockErrors ] |> Seq.choose id |> Seq.tryHead with
         | Some e -> Error e
         | None -> Ok meta
 

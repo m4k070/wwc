@@ -83,37 +83,46 @@ module WireLevel =
 
     let private allSides = [E; W; N; S]
 
-    /// 1 世代進める。各セルの次状態は自セルと 4 近傍のみで決まる (von Neumann)。
+    /// 1 セルの次状態。neighbour side = side 方向の隣セル。
+    /// 各セルの次状態は自セルと 4 近傍のみで決まる (von Neumann)。
+    /// step と settleIncremental がこの 1 つの定義を共有する (意味論の二重実装を避ける)。
+    let nextCell (neighbour: Dir -> LCell) (cell: LCell) : LCell =
+        let pull (side: Dir) = presentedTo (neighbour side) (opposite side)
+        match cell with
+        | LEmpty | Pin _ -> cell
+        | LWire (dir, _) ->
+            let level = pull (opposite dir) |> Option.defaultValue false
+            LWire (dir, level)
+        | LNand (dir, _) ->
+            let inputs =
+                allSides
+                |> List.filter (fun s -> s <> dir)
+                |> List.choose pull
+            // 全入力の AND の否定。入力なしは 0 (非接続ゲートは沈黙)。
+            let level =
+                match inputs with
+                | [] -> false
+                | _  -> not (inputs |> List.forall id)
+            LNand (dir, level)
+        | Cross (hd, vd, _, _) ->
+            let hv = pull (opposite hd) |> Option.defaultValue false
+            let vv = pull (opposite vd) |> Option.defaultValue false
+            Cross (hd, vd, hv, vv)
+        | LDff (dir, q, prevClk) ->
+            let dIn = pull (opposite dir) |> Option.defaultValue false
+            let clkSides = match dir with E | W -> [N; S] | N | S -> [E; W]
+            let clk =
+                clkSides |> List.exists (fun s ->
+                    pull s |> Option.defaultValue false)
+            let q' = if clk && not prevClk then dIn else q
+            LDff (dir, q', clk)
+
+    /// 1 世代進める。
     let step (g: LGrid) : LGrid =
         g |> Map.map (fun c cell ->
-            match cell with
-            | LEmpty | Pin _ -> cell
-            | LWire (dir, _) ->
-                let level = pullFrom g c (opposite dir) |> Option.defaultValue false
-                LWire (dir, level)
-            | LNand (dir, _) ->
-                let inputs =
-                    allSides
-                    |> List.filter (fun s -> s <> dir)
-                    |> List.choose (pullFrom g c)
-                // 全入力の AND の否定。入力なしは 0 (非接続ゲートは沈黙)。
-                let level =
-                    match inputs with
-                    | [] -> false
-                    | _  -> not (inputs |> List.forall id)
-                LNand (dir, level)
-            | Cross (hd, vd, _, _) ->
-                let hv = pullFrom g c (opposite hd) |> Option.defaultValue false
-                let vv = pullFrom g c (opposite vd) |> Option.defaultValue false
-                Cross (hd, vd, hv, vv)
-            | LDff (dir, q, prevClk) ->
-                let dIn = pullFrom g c (opposite dir) |> Option.defaultValue false
-                let clkSides = match dir with E | W -> [N; S] | N | S -> [E; W]
-                let clk =
-                    clkSides |> List.exists (fun s ->
-                        pullFrom g c s |> Option.defaultValue false)
-                let q' = if clk && not prevClk then dIn else q
-                LDff (dir, q', clk))
+            nextCell (fun side ->
+                let d = delta side
+                getL g { X = c.X + d.X; Y = c.Y + d.Y }) cell)
 
     let stepN (n: int) (g: LGrid) : LGrid =
         Seq.fold (fun acc _ -> step acc) g (seq { 1 .. n })
@@ -128,6 +137,70 @@ module WireLevel =
                 if next = cur then cur, t
                 else go next (t + 1)
         go g 0
+
+    /// settle と同じ結果 (収束後グリッドと世代数) を、前世代で変化したセルとその 4 近傍だけ
+    /// 再評価して求める (密配列 + 変化集合)。大きなグリッドの収束待ちを速くするためのもの。
+    ///
+    /// 同値性: 自セルと 4 近傍がどれも前世代で変化していないセルは、前世代と同じ入力に
+    /// nextCell を適用することになるので状態が変わらない。初回だけ全セルを評価する
+    /// (ホストがピンを書いた直後などは不動点とは限らないため)。
+    let settleIncremental (limit: int) (g: LGrid) : LGrid * int =
+        if Map.isEmpty g then g, 0
+        else
+            let coords = g |> Map.toArray |> Array.map fst
+            let minX = coords |> Array.map (fun c -> c.X) |> Array.min
+            let maxX = coords |> Array.map (fun c -> c.X) |> Array.max
+            let minY = coords |> Array.map (fun c -> c.Y) |> Array.min
+            let maxY = coords |> Array.map (fun c -> c.Y) |> Array.max
+            let width = maxX - minX + 1
+            let height = maxY - minY + 1
+            let cells = Array.create (width * height) LEmpty
+            let indexOf (c: Coord) = (c.Y - minY) * width + (c.X - minX)
+            for KeyValue (c, cell) in g do
+                cells.[indexOf c] <- cell
+            let neighbourIndex (i: int) (side: Dir) : int =
+                let x = i % width + (delta side).X
+                let y = i / width + (delta side).Y
+                if x < 0 || y < 0 || x >= width || y >= height then -1 else y * width + x
+            let neighbourOf (i: int) (side: Dir) : LCell =
+                match neighbourIndex i side with
+                | -1 -> LEmpty
+                | j -> cells.[j]
+            // 評価対象の重複排除用 (世代番号でスタンプする)
+            let stamp = Array.create cells.Length -1
+            let touched = System.Collections.Generic.HashSet<int>()
+            let mutable active = coords |> Array.map indexOf
+            let mutable t = 0
+            let mutable finished = false
+            while not finished do
+                if t >= limit then finished <- true
+                else
+                    let changes = ResizeArray<int * LCell>()
+                    for i in active do
+                        let cell = cells.[i]
+                        let next = nextCell (neighbourOf i) cell
+                        if next <> cell then changes.Add ((i, next))
+                    if changes.Count = 0 then finished <- true
+                    else
+                        // 同期更新: 全セルの次状態を求めてから書き込む
+                        for (i, next) in changes do
+                            cells.[i] <- next
+                            touched.Add i |> ignore
+                        t <- t + 1
+                        let nextActive = ResizeArray<int>()
+                        let enqueue (j: int) =
+                            let occupied = j >= 0 && (match cells.[j] with LEmpty -> false | _ -> true)
+                            if occupied && stamp.[j] <> t then
+                                stamp.[j] <- t
+                                nextActive.Add j
+                        for (i, _) in changes do
+                            enqueue i
+                            for side in allSides do enqueue (neighbourIndex i side)
+                        active <- nextActive.ToArray ()
+            let result =
+                touched |> Seq.fold (fun acc i ->
+                    Map.add { X = minX + i % width; Y = minY + i / width } cells.[i] acc) g
+            result, (if t >= limit then limit else t)
 
     /// ピン値の書き込み (ホスト操作)。セル種別を保持し、レベルだけ更新する。
     let setPin (c: Coord) (v: bool) (g: LGrid) : LGrid =

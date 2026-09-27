@@ -6,6 +6,7 @@
   <ItemGroup>
     <Compile Include="Domain.fs" />
     <Compile Include="WireLevel.fs" />
+    <Compile Include="TwoPhaseClock.fs" />
     <Compile Include="Library.fs" />
     <Compile Include="GatePlacement.fs" />
     <Compile Include="Place.fs" />
@@ -15,9 +16,11 @@
     <Compile Include="Pipeline.fs" />
     <Compile Include="PipelineWL.fs" />
     <Compile Include="RoutedArtifact.fs" />
+    <Compile Include="HoldAnalysis.fs" />
     <Compile Include="NetlistSim.fs" />
     <Compile Include="Testbench.fs" />
     <Compile Include="E2eTests.fs" />
     <Compile Include="TestbenchTests.fs" />
+    <Compile Include="TwoPhaseTests.fs" />
   </ItemGroup>
 </Project>

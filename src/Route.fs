@@ -16,6 +16,8 @@ module Route =
         | TimingViolation of NetId * expected: int<gen> * actual: int<gen>
         | ClockSkewUnresolved of NetId * residual: int
         | InvalidPlacementConfig of string
+        /// 指定したクロック方式に変換できない回路 (2 相化の前提外)
+        | UnsupportedClocking of Clocking.TwoPhaseError
 
     /// 1 本の配線。長さ (= Path のセル数) がそのまま遅延になる。
     /// Consumer は、この Wire を消費するゲートの Output NetId。

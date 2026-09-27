@@ -4,12 +4,17 @@
 // 使い方:
 //   dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR]
 //                                   [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P]
+//                                   [--clocking single|two-phase]
 //     <circuit>  verilog/<circuit>.json を読む (例: sm83_subset)
 //     --pitch    ピッチ固定 (省略時は compileWL の自動決定 + 輻輳時の自動拡大)
 //     --out      出力先 (既定: routed/)
 //     --place    配置戦略 (既定 rowmajor)。anneal = アーク距離のアニーリング最適化
 //     --moves / --seed / --backward
 //                anneal のパラメータ (既定は GatePlacement.defaultAnnealConfig)
+//     --clocking クロック方式 (既定 single)。two-phase = 各 DFF をマスター (clk_a) / スレーブ (clk_b) に
+//                分ける 2 相ノンオーバーラップクロック。skew 均等化をせず、hold は相間の settle で守る。
+//                meta の clocking に clkA / clkB の座標が入り、元の clk は inputs に載らない
+//                (駆動手順は DESIGN-VERIFY.md §5.2)
 //
 // 長時間配線 (sm83_subset 約 100 分 / sm83_full 5〜8 時間) はバックグラウンドで:
 //   nohup dotnet fsi src/ExportRouted.fsx sm83_full > routed/sm83_full.log 2>&1 &
@@ -35,6 +40,7 @@ type Options =
       Pitch: (int * int) option
       OutDir: string
       Place: PlaceChoice
+      Clocking: Clocking.ClockingScheme
       /// --place の前後どちらに --moves 等を書いても効くよう、anneal 設定は常に保持する
       Anneal: GatePlacement.AnnealConfig }
 
@@ -55,6 +61,9 @@ let parseArgs (args: string list) : Result<Options, string> =
         | "--place" :: "rowmajor" :: tail -> go { opts with Place = PlaceRowMajor } tail
         | "--place" :: "anneal" :: tail -> go { opts with Place = PlaceAnneal } tail
         | "--place" :: v :: _ -> Error (sprintf "--place は rowmajor|anneal: %s" v)
+        | "--clocking" :: "single" :: tail -> go { opts with Clocking = Clocking.SingleEdge } tail
+        | "--clocking" :: "two-phase" :: tail -> go { opts with Clocking = Clocking.TwoPhase } tail
+        | "--clocking" :: v :: _ -> Error (sprintf "--clocking は single|two-phase: %s" v)
         | "--moves" :: n :: tail ->
             match Int32.TryParse n with
             | true, v when v >= 0 -> go { opts with Anneal = { opts.Anneal with Moves = v } } tail
@@ -67,13 +76,14 @@ let parseArgs (args: string list) : Result<Options, string> =
             match Double.TryParse (p, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
             | true, v when v >= 0.0 -> go { opts with Anneal = { opts.Anneal with BackwardPenalty = v } } tail
             | _ -> Error (sprintf "--backward には 0 以上の数が必要: %s" p)
-        | ("--place" | "--moves" | "--seed" | "--backward" | "--out") as o :: [] ->
+        | ("--place" | "--moves" | "--seed" | "--backward" | "--out" | "--clocking") as o :: [] ->
             Error (sprintf "%s の引数が足りない" o)
         | arg :: _ when arg.StartsWith "--" -> Error (sprintf "不明なオプション: %s" arg)
         | name :: tail when opts.Circuit = "" -> go { opts with Circuit = name } tail
         | extra :: _ -> Error (sprintf "余分な引数: %s" extra)
     let defaults =
         { Circuit = ""; Pitch = None; OutDir = Path.Combine (repoRoot, "routed"); Place = PlaceRowMajor
+          Clocking = Clocking.SingleEdge
           Anneal = GatePlacement.defaultAnnealConfig }
     match go defaults args with
     | Ok opts when opts.Circuit = "" -> Error "回路名が必要 (例: sm83_subset)"
@@ -116,6 +126,10 @@ let printSummary (opts: Options) (meta: RoutedMeta) =
     printfn "[export] grid %dx%d, gates=%d (DFF %d)" meta.Width meta.Height meta.GateCount meta.DffCount
     printfn "[export] inputs:  %s" (meta.Inputs |> Map.toList |> List.map (fun (n, cs) -> sprintf "%s[%d]" n cs.Length) |> String.concat " ")
     printfn "[export] outputs: %s" (meta.Outputs |> Map.toList |> List.map (fun (n, ps) -> sprintf "%s[%d]" n ps.Length) |> String.concat " ")
+    match meta.Clocking with
+    | SingleEdgeClocking -> printfn "[export] clocking: singleEdge"
+    | TwoPhaseClocking (port, a, b) ->
+        printfn "[export] clocking: twoPhase (%s → clkA (%d,%d) / clkB (%d,%d))" port a.X a.Y b.X b.Y
     if not constBits.IsEmpty then
         printfn "[export] 定数ビット (%d): %s" constBits.Length (String.concat " " constBits)
     if not unobservable.IsEmpty then
@@ -147,20 +161,30 @@ let exportCircuit (opts: Options) : int =
                 | GatePlacement.Annealed c ->
                     sprintf "anneal moves=%d seed=%d T0=%g T1=%g backward=%g"
                         c.Moves c.Seed c.InitialTemperature c.FinalTemperature c.BackwardPenalty
-            printfn "[export] %s: compileWL 開始 (pitch=%s, place=%s, %s)" opts.Circuit pitchLabel placeLabel (DateTimeOffset.Now.ToString "yyyy-MM-dd HH:mm:ss")
+            let clockingLabel =
+                match opts.Clocking with
+                | Clocking.SingleEdge -> "single"
+                | Clocking.TwoPhase -> "two-phase"
+            printfn "[export] %s: compileWL 開始 (pitch=%s, place=%s, clocking=%s, %s)"
+                opts.Circuit pitchLabel placeLabel clockingLabel (DateTimeOffset.Now.ToString "yyyy-MM-dd HH:mm:ss")
             let sw = Stopwatch.StartNew ()
-            let compiled =
-                match opts.Pitch with
-                | Some (px, py) -> compileWLWithPitchAndStrategy (placementStrategy opts) px py json
-                | None -> compileWLWithStrategy (placementStrategy opts) json
+            let compileOptions =
+                { Placement = placementStrategy opts
+                  Pitch =
+                    match opts.Pitch with
+                    | Some (px, py) -> FixedPitch (px, py)
+                    | None -> AutoPitch
+                  Clocking = opts.Clocking }
+            let compiled = compileWLWithOptions compileOptions json
             match compiled with
             | Error e ->
                 eprintfn "COMPILE ERROR (%.1f 分): %A" sw.Elapsed.TotalMinutes e
                 1
-            | Ok (grid, placed, pins) ->
+            | Ok compiledCircuit ->
+                let grid = compiledCircuit.Grid
                 printfn "[export] compileWL OK (%.1f 分)" sw.Elapsed.TotalMinutes
                 let provenance : Provenance = { GitCommit = currentGitCommit (); CreatedAtUtc = DateTimeOffset.UtcNow }
-                match buildMeta opts.Circuit (sourceSha256 sourceBytes) provenance ports grid placed pins with
+                match buildMetaOfCompiled opts.Circuit (sourceSha256 sourceBytes) provenance ports compiledCircuit with
                 | Error e ->
                     // 配線結果は失わない: meta なしでも grid を退避する
                     Directory.CreateDirectory opts.OutDir |> ignore
@@ -183,7 +207,7 @@ let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P]"
+        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P] [--clocking single|two-phase]"
         2
     | Ok opts -> exportCircuit opts
 
