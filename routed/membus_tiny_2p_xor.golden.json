@@ -1,0 +1,202 @@
+{
+  "format": "wwc-golden/1",
+  "circuit": "membus_tiny",
+  "program": "membus_tiny_2p_xor",
+  "sourceSha256": "c06da28e91c409510b7adba5267745837917723455e035a0a2e8ce6690879a2b",
+  "romSha256": "6a89b44777b80dc78406f17af1d3e3be7cf3b7f8a0965398eb8b10b5893a07a0",
+  "rstPulses": 2,
+  "cycles": [
+    {
+      "dataIn": 17,
+      "irq": 0,
+      "outputs": {
+        "a_out": 17,
+        "addr": 49153,
+        "data_out": 17,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 1
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 17,
+        "addr": 1,
+        "data_out": 17,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 1
+      }
+    },
+    {
+      "dataIn": 34,
+      "irq": 0,
+      "outputs": {
+        "a_out": 51,
+        "addr": 49154,
+        "data_out": 51,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 2
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 51,
+        "addr": 2,
+        "data_out": 51,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 2
+      }
+    },
+    {
+      "dataIn": 68,
+      "irq": 0,
+      "outputs": {
+        "a_out": 119,
+        "addr": 49155,
+        "data_out": 119,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 3
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 119,
+        "addr": 3,
+        "data_out": 119,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 3
+      }
+    },
+    {
+      "dataIn": 136,
+      "irq": 0,
+      "outputs": {
+        "a_out": 255,
+        "addr": 49156,
+        "data_out": 255,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 4
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 255,
+        "addr": 4,
+        "data_out": 255,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 4
+      }
+    },
+    {
+      "dataIn": 15,
+      "irq": 0,
+      "outputs": {
+        "a_out": 240,
+        "addr": 49157,
+        "data_out": 240,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 5
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 240,
+        "addr": 5,
+        "data_out": 240,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 5
+      }
+    },
+    {
+      "dataIn": 240,
+      "irq": 0,
+      "outputs": {
+        "a_out": 0,
+        "addr": 49158,
+        "data_out": 0,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 6
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 0,
+        "addr": 6,
+        "data_out": 0,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 6
+      }
+    },
+    {
+      "dataIn": 90,
+      "irq": 0,
+      "outputs": {
+        "a_out": 90,
+        "addr": 49159,
+        "data_out": 90,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 7
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 90,
+        "addr": 7,
+        "data_out": 90,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 7
+      }
+    },
+    {
+      "dataIn": 165,
+      "irq": 0,
+      "outputs": {
+        "a_out": 255,
+        "addr": 49160,
+        "data_out": 255,
+        "mem_read": 0,
+        "mem_write": 1,
+        "pc_out": 8
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 255,
+        "addr": 8,
+        "data_out": 255,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 8
+      }
+    }
+  ]
+}

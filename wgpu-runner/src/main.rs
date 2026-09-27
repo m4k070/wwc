@@ -1,7 +1,9 @@
+mod clocking;
 mod gpu;
 mod memory;
 mod memory_program;
 mod program;
+mod routed_meta;
 
 use std::env;
 use std::path::PathBuf;

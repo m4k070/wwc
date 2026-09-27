@@ -83,6 +83,20 @@ fn fmt_val(name: &str, v: u64) -> String {
     if name == "flags" { format!("0x{v:X}") } else { format!("{v}") }
 }
 
+/// --program の meta は ExportSm83MinInstr.fsx の pins/regs 形式 (単相の clk ピンを直接駆動する)。
+/// RoutedArtifact の meta (formatVersion あり、2 相なら clk が無い) を渡されたら、serde の
+/// "missing field" ではなく、何が違うかを伝えるエラーにする。2 相の駆動は --memory だけが対応する。
+fn reject_routed_meta(meta_json: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(meta_json).context("meta is not valid JSON")?;
+    if value.get("formatVersion").is_none() {
+        return Ok(());
+    }
+    let scheme = value.pointer("/clocking/scheme").and_then(|s| s.as_str()).unwrap_or("singleEdge");
+    anyhow::bail!(
+        "--program expects a pins/regs meta (ExportSm83MinInstr.fsx), but got a routed meta \
+         (RoutedArtifact, clocking={scheme}). Use --memory for routed artifacts — it supports singleEdge and twoPhase")
+}
+
 pub fn run_program(prog_path: &Path, opts: &ProgOpts) -> Result<i32> {
     let prog: Program = serde_json::from_str(
         &fs::read_to_string(prog_path).with_context(|| format!("reading {prog_path:?}"))?
@@ -90,9 +104,9 @@ pub fn run_program(prog_path: &Path, opts: &ProgOpts) -> Result<i32> {
     let dir = prog_path.parent().unwrap_or_else(|| Path::new("."));
 
     let meta_path = dir.join(&prog.meta);
-    let meta: Meta = serde_json::from_str(
-        &fs::read_to_string(&meta_path).with_context(|| format!("reading {meta_path:?}"))?
-    ).with_context(|| format!("parsing {meta_path:?}"))?;
+    let meta_json = fs::read_to_string(&meta_path).with_context(|| format!("reading {meta_path:?}"))?;
+    reject_routed_meta(&meta_json).with_context(|| format!("checking {meta_path:?}"))?;
+    let meta: Meta = serde_json::from_str(&meta_json).with_context(|| format!("parsing {meta_path:?}"))?;
 
     if let Some(circuit) = &prog.circuit {
         anyhow::ensure!(circuit == &meta.circuit,
@@ -207,4 +221,23 @@ pub fn run_program(prog_path: &Path, opts: &ProgOpts) -> Result<i32> {
     println!();
     println!("{passed}/{} passed", passed + failed);
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_pins_regs_meta() {
+        assert!(reject_routed_meta(r#"{"circuit":"c","width":1,"height":1,"pins":{},"regs":{}}"#).is_ok());
+    }
+
+    #[test]
+    fn rejects_routed_meta_with_explicit_message() {
+        let two_phase = r#"{"formatVersion":2,"clocking":{"scheme":"twoPhase"}}"#;
+        let err = reject_routed_meta(two_phase).unwrap_err().to_string();
+        assert!(err.contains("clocking=twoPhase") && err.contains("--memory"), "{err}");
+        let v1 = reject_routed_meta(r#"{"formatVersion":1}"#).unwrap_err().to_string();
+        assert!(v1.contains("clocking=singleEdge"), "{v1}");
+    }
 }

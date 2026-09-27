@@ -259,9 +259,12 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
     §5.2.1 の手順で駆動する。`clockPort` は元のクロックポート名 (プログラムや golden がクロックを名前で
     参照しているときの対応付け用)
 - runner は起動時に `clocking.scheme` を見て駆動手順を選ぶ。未知の `scheme` はエラーにする
-- 2026-09-27 時点で wgpu-runner (`memory_program.rs` の `META_FORMAT_VERSION = 1`) は formatVersion 2 を読めない。
-  F# が新しく書く meta は単相でも formatVersion 2 になるので、runner は 1 と 2 の両方を受け付け、
-  `clocking` が無ければ singleEdge とみなすよう対応させる (未対応)
+- wgpu-runner (`wgpu-runner/src/routed_meta.rs`、2026-09-27 対応) は formatVersion 1 (clocking 無し → singleEdge) と
+  2 (clocking 必須) を受け付ける。次は起動時にエラー: 1 と 2 以外、v1 に clocking がある、v2 に clocking が無い、
+  未知の scheme / 余分なキー、twoPhase で `clkA` / `clkB` / `clockPort` が無い、`inputs` に clockPort が残っている、
+  clkA = clkB、clkA / clkB が入力ピンと重なる、clkA / clkB が grid 上で Pin セルでない
+- 2 相の meta を受け取るのは `--memory` だけ。単発の .bin 実行 (`run-tests.sh`) は meta を読まない。
+  `--program` (pins/regs 形式の meta) に routed meta を渡すと、`--memory` を使うよう促すエラーにする
 
 ## 7. 実装計画
 
@@ -310,6 +313,11 @@ val readPorts : YosysPortBits list -> SimState -> Map<string, uint64>           
   - 不一致時: 周期番号、ポート、期待値/実測値 (16 進)、異なるビット位置、settle 世代数を表示し停止。
     `--dump-dir` 指定時はその周期の setup/high グリッドを保存
   - 終了コード: 0=全周期一致 / 1=不一致・未収束 / それ以外=入力エラー
+- 2 相 (§5.2.1): `clocking.rs` の `ClockPins` が idle (手順 1・4) と latch (手順 5・6) の書込と収束を組み立てる。
+  GPU は `CaDriver` trait 越しに呼ぶので、書込と収束の順序は GPU なしの単体テストで固定している。
+  settle 世代数は `setup=..g data_in=..g phaseA=..g phaseB=..g` (単相は `... high=..g`)。
+  実機の回帰は `wgpu-runner/memory-test.sh` の `routed/membus_tiny_2p_xor.json`
+  (`verilog/membus_tiny.v`: バスを持つ 17 DFF の最小回路。sm83_min はバスを持たないので `--memory` に使えない)
 
 ## 8. 決定事項と未決事項
 

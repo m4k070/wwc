@@ -1,0 +1,30 @@
+{
+  "circuit": "membus_tiny",
+  "meta": "membus_tiny_2p.meta.json",
+  "init": "membus_tiny_2p.bin",
+  "memory": {
+    "rom": "rom_membus_tiny_xor.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 16,
+  "maxStepsPerPhase": 20000,
+  "checkInterval": 64,
+  "expect": {
+    "a_out": 255,
+    "pc_out": 8
+  },
+  "expectMem": {
+    "0xC001": 17,
+    "0xC002": 51,
+    "0xC003": 119,
+    "0xC004": 255,
+    "0xC005": 240,
+    "0xC006": 0,
+    "0xC007": 90,
+    "0xC008": 255
+  },
+  "golden": "membus_tiny_2p_xor.golden.json",
+  "trace": true
+}
