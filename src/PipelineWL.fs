@@ -636,9 +636,19 @@ module PipelineWL =
                       | Some p -> yield p.Coord, 0
                       | None -> () ]
                 let tapCandidates = sourceTaps @ trunkArrivals
+                // 終端ごとの均等化は互いに独立。1 本が失敗しても残りの終端は延長を続け、
+                // 最悪の残差だけを報告する。Result.bind で連鎖させると最初の失敗で
+                // 残り全部の延長が飛ばされ、WARN の値 (その 1 本の残差) より実際の skew が
+                // 桁違いに大きくなる (sm83_full: WARN 112 / 実測 skew 2892、hold 違反 144 組)。
+                let worseSkew (acc: Result<unit, CompileError>) (r: Result<unit, CompileError>) =
+                    match acc, r with
+                    | Ok (), _ -> r
+                    | Error (ClockSkewUnresolved (n, a)), Error (ClockSkewUnresolved (_, b)) ->
+                        Error (ClockSkewUnresolved (n, max a b))
+                    | Error _, _ -> acc
                 paths
                 |> List.fold (fun acc path ->
-                    acc |> Result.bind (fun () ->
+                    worseSkew acc ((fun () ->
                         let need = (tMax - List.length path) / 2 * 2
                         if need = 0 then Ok ()
                         else
@@ -694,7 +704,7 @@ module PipelineWL =
                                                      tapSources.Add tapC |> ignore
                                                  | _ -> ())
                                             | [] -> ())
-                                           Ok ()))
+                                           Ok ()) ()))
                     (Ok ())
 
         let balanceClocks () : Result<unit, CompileError> =
