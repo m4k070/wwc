@@ -666,7 +666,9 @@ module sm83_full (
                     daa_c = 0;
                     if (f[6] == 0) begin
                         if (f[5] || (daa_a & 8'h0F) > 8'h09) daa_a = daa_a + 8'h06;
-                        if (f[4] || daa_a > 8'h9F) begin daa_a = daa_a + 8'h60; daa_c = 1; end
+                        // 上位補正の判定は元の a で行う（下位補正後の daa_a で判定すると
+                        // A=0xFA-0xFF 付近で 8 ビット桁あふれし、補正が欠落するため）
+                        if (f[4] || a > 8'h99) begin daa_a = daa_a + 8'h60; daa_c = 1; end
                     end else begin
                         if (f[5]) daa_a = daa_a - 8'h06;
                         if (f[4]) begin daa_a = daa_a - 8'h60; daa_c = 1; end

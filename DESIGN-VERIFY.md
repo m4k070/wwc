@@ -24,7 +24,7 @@
 | (旧記述) sm83_full のフェッチは正常。ただし即値読出に off-by-one があった (2026-09-16 修正) | `PHASE_FETCH` で `addr <= pc`、`PHASE_FETCH2` で `data_in` を読む 2 段階。`exec_normal` / `exec_imm` は `pc <= pc + 1` と同じ周期に `addr <= pc` を出しており、opcode 自身の番地から即値を読んでいた → `addr <= pc + 1` に修正 (B-2 の仕様テストで発見) | CPU としての意味の検証は full で行う。手書きの期待値 (SM83 仕様) による仕様テストも NetlistSim 上で持つ |
 | ゲートは 3 種類だけ | subset/full は `$_NAND_` / `$_NOT_` / `$_DFF_P_` のみ (sm83_min は `$_DFF_PP0_`、R は無視) | ゲートレベルのシミュレータは小さく書ける |
 | Verilog シミュレータ | iverilog / verilator はない。`yosys sim` (`-clock` `-reset` `-n` `-vcd`) は flake にある | RTL 側の参照は yosys で取れる |
-| GPU の収束判定が重い | `run_until_settled` は判定のたびにグリッド全体 (w×h×4 byte) を 2 回読み戻す | subset 1197x1126 (約 1.35M セル) で周期あたり秒単位になりうる (§7 B-6) |
+| (解消済み、2026-09-27) GPU の収束判定が重い | 旧 `run_until_settled` は判定のたびにグリッド全体 (w×h×4 byte) を 2 回読み戻していた。現在はシェーダーが世代ごとの変化タイル数を書き、ホストはそれだけを読む (§7 B-6) | 世代数は「最初に step(g) == g となった世代」に正確になった (旧実装は `checkInterval`+1 の倍数に切り上がっていた) |
 
 ## 3. 方針
 
@@ -77,6 +77,15 @@ F# ExportGolden.fsx │                              │ wgpu-runner --memory
 
 `rstPulses` 周期、`rst=1` で次の 1 周期を行う (`data_in` は 0)。その後 `rst=0`。
 
+- 単相 (meta `clocking.scheme = "singleEdge"`): 1 周期 = `clk=0` で収束 → `clk=1` で収束 (変更なし)
+- 2 相 (`"twoPhase"`、§5.2.1、2026-09-27 短縮): **最初のパルスだけ** `clkA=0, clkB=0` で収束させて
+  グリッドの初期状態 (クロックが低いという前提) を確立してから、`clkA=1, clkB=0` を同時に書いて
+  収束 → `clkA=0, clkB=1` を同時に書いて収束。**2 パルス目以降は** `clkA=0, clkB=0` の収束を行わず、
+  前パルスの終わり (`clkA=0, clkB=1`) から直接 `clkA=1, clkB=0` を同時に書いて収束する
+  (前パルスの `clkB=1` の立ち下がりを、次のパルスの立ち上がりと同じ収束にまとめる)。
+  根拠は §5.2.1 の「なぜ短縮できるか」と同じ (マスターは立ち上がりしか、スレーブは立ち下がりを
+  見ないので、この畳み込みは安全)。
+
 ### 5.2 1 周期 (`cycles` 回)
 
 wgpu-runner `memory_program.rs` の実装を契約とする。
@@ -96,6 +105,86 @@ wgpu-runner `memory_program.rs` の実装を契約とする。
 
 `mem_read=0` で `data_in=0` を渡すため、sm83_subset の壊れたフェッチ (`mem_read=0` のまま次の opcode を読む) は
 NOP (0x00) を読んだものとして進む。スモーク `sm83_subset_smoke` (`LD A,0x42` → a=0x42, pc=0x102) はこの挙動に依存している。
+
+### 5.2.1 2 相クロックの 1 周期 (meta `clocking.scheme = "twoPhase"`、2026-09-27)
+
+`ExportRouted.fsx --clocking two-phase` で配線したグリッドは、各 DFF がマスター (clkA で駆動) と
+スレーブ (clkB で駆動) の 2 個に分かれている (`src/TwoPhaseClock.fs`)。**元の `clk` ポートは grid 上に無く、
+meta の `inputs` にも載らない**。代わりに meta の `clocking.clkA` / `clocking.clkB` の 2 つのピンセルを駆動する。
+出力 probe (元の Q ネット) はスレーブ DFF を指すので、読み方は単相と同じ。
+
+「収束させる」は単相と同じ (`run_until_settled`、`maxStepsPerPhase` 以内に変化しなくなること。
+収束しなければその周期は失敗)。ピンへの書込は収束待ちの直前にまとめて行う。
+
+`run_until_settled` の判定は F# `WireLevel.settle` (`next = cur` で停止) と同じ意味。GPU は世代 t の計算で
+変化したタイル数を `changeLog` に書き、ホストは `checkInterval` 世代ごとにそれだけを読み戻して、
+変化 0 の最初の世代 t を探す。表示する世代数は t+1 (固定点を確かめる 1 世代を含む実行世代数)。
+固定点に達した後に同じバッチ内で余分に回した世代は状態を変えないので、読み戻すグリッドは g_t と同じ。
+`checkInterval` は判定の粒度ではなく「何世代ごとにホストと同期するか」だけを決める。
+
+世代の進め方は `--engine tiled` (既定) と `--engine dense` (参照実装、1 dispatch = 1 世代で全タイル) がある。
+tiled は変化のあるタイル (16x16) だけを `dispatch_workgroups_indirect` で計算し、さらに 1 dispatch で最大
+`BLOCK_GENS` (=8) 世代をまとめて進める。workgroup はタイルと周囲 8 セル (halo) を shared memory に読み、
+8 世代を shared memory 内で進めて内側 16x16 だけを書き戻す (von Neumann 近傍 1 セルなので内側は 8 世代後まで正しい)。
+変化ログは内側のサブ世代ごとの変化で取るので、世代単位で正確なまま。
+
+次のブロックで計算するタイル (アクティブリスト、GPU 上でタイルごとのスタンプ付き atomic で作る):
+- 前のブロックの最後の世代に、マンハッタン距離 8 以内 (自身と 8 近傍タイル) で変化があったタイル。
+  世代 g にセルが変化するには世代 g-1 に近傍 (自身を含む) のどれかが変化している必要があるので、
+  これ以外のタイルはブロックの間ずっと不変
+- ブロックの前後で値が変わったタイル (ping-pong の片方のバッファにだけ新しい値があるので、もう一度書いて揃える)
+
+どちらでもないタイルは両バッファとも現在の世代と同じ値を持つので、書かなくてよい。ホストがピンを書いた直後の
+1 世代は全タイルを計算する (F# `settleIncremental` の「初回は全セル評価」と同じ)。
+両エンジンは周期ごとの収束後グリッドが byte 単位で一致する。収束後のグリッドは GPU 上で 1 セル 1 バイトに
+詰めてから読み戻す。
+
+**手順 (2026-09-27 短縮)**: 「最初の周期 (リセット直後) だけ」`clkA=0, clkB=0` の収束を挟み、
+2 周期目以降はそれを行わない。前周期の `clkB=1` の立ち下がりは、次の周期の `clkA=1` の立ち上がりと
+同じ収束にまとめる (手順 5' 参照)。
+
+1'. **最初の周期だけ**: `clkA=0`、`clkB=0` を書き、収束させる (従来の「runner は `rst=0` を書いた
+    直後に最初の settle を行う」に相当。グリッドの初期状態からクロックが低いという前提を確立する)。
+    **2 周期目以降はこの収束を行わない**
+2. 出力 `addr` / `mem_read` / `mem_write` / `data_out` / `int_ack` を読む。最初の周期は手順 1' の
+   収束後の状態、2 周期目以降は**前周期の手順 6 で収束済みの状態をそのまま**読む (追加の収束はしない)
+3. メモリ操作 (単相の手順 3 と同じ: **書込 → 割込み受付 → 読出**、`irq = IE & IF & 0x1F`)
+4. `data_in` と `irq` を書き、**クロックには一切触れずに**収束させる (マスターの D に伝播させる)。
+   2 周期目以降、この時点のクロックは前周期の終わりの値 (`clkA=0, clkB=1`) のまま — ここでは動かさない
+5'. `clkA=1` と `clkB=0` を**同時に**書き、収束させる (**マスターが D を取り込む**。2 周期目以降は
+    ここで前周期の `clkB=1` が下がる。最初の周期は `clkB` が既に 0 なので単なる no-op 書込)
+6. `clkA=0` と `clkB=1` を**同時に**書き、収束させる (**スレーブがマスター Q を取り込む**。
+   マスターは立ち下がりしか見ないので動かない)
+7. 全出力を読む → この周期の出力 (golden の `outputs` と比較する時点。単相の手順 6 に対応)
+8. 次の周期の手順 2 でこの状態 (`clkA=0, clkB=1`) のまま読む。手順 1' の収束はしない
+
+リセット周期 (§5.1) も同じ手順で行う (`rst=1`, `data_in=0`、出力の比較はしない): 最初のパルスだけ
+手順 1' を行い、手順 5' → 6 で latch する。2 パルス目以降は手順 1' を省き、前パルスの手順 6 から
+直接手順 5' → 6 を行う。
+
+**なぜ短縮しても安全か** (根拠):
+- LDff は立ち上がり (`clk ∧ ¬prevClk`) でしか取り込まない。手順 5' で `clkB` を下げる (立ち下がり) 波が
+  グリッド上のどこを伝わっていても、スレーブはそれを見ないので変わらない
+- マスターの D はスレーブ Q (と外部入力) の組合せ関数で、手順 5' の収束の間はどちらも変化しないので、
+  `clkA` の立ち上がりが `clkB` の立ち下がりと同じ収束に混ざっていても、マスターが取り込む D の値に影響しない
+- 2 相で守るべき不変条件は「`clkA` と `clkB` の**立ち上がり**どうしの間に収束を挟む」ことだけで
+  (下記「なぜ skew に強いか」参照)、手順 5' はこれを崩さない (`clkB` の立ち上がりは手順 6 のまま、
+  独立した収束を保っている)
+- 手順 2 で読む値は、従来の手順 1 (`clkA=0, clkB=0` へ収束) の後に読んでいた値と同じ。立ち下がりでは
+  回路の出力 (スレーブ Q) は変化せず、`data_in` も前周期の手順 4 から変わっていないため
+
+なぜ skew に強いか: 手順 5' の間、マスターの D はスレーブ Q と外部入力の組合せ関数で、どちらも変化しない。
+手順 6 の間、スレーブの D はマスター Q そのもので、マスターは変化しない。相の間に収束待ちがあるので、
+クロックがどれだけ遅れて届いても「同じ相の DFF の新しい値を取り込む」ことが起こらない (hold 違反が構造的に無い)。
+この前提 (同じ相の DFF → DFF の組合せ経路が 0 本) は `AnalyzeHold.fsx` が 2 相グリッドで検査する。
+
+注意:
+- 手順 5' と 6 を 1 回の収束待ちにまとめてはいけない (clkA と clkB が重なると hold の保護が消える)
+- 手順 5' の後の収束を待たずに手順 6 に進んではいけない (マスターが取り込む前に clkA を下ろすと取りこぼす)
+- golden (NetlistSim) は単相のまま、**かつ変更しない**。2 相の手順 7 の出力は単相の手順 6 の出力と
+  同じ値になる — 既存の golden がそのまま合格することでこの短縮の正しさを確認する
+- この短縮は 2 相 (`twoPhase`) だけに適用する。単相 (`singleEdge`) の手順は変えない
+  (毎周期 `clk=0` で収束 → `clk=1` で収束のまま)
 
 ### 5.3 メモリモデル
 
@@ -185,6 +274,52 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
 - 出力はポート単位の整数 (LSB first)。runner は meta の probe に従って読み、
   `Unobservable` のビットは比較から除外する
 
+### 6.3 routed meta (`routed/<circuit>.meta.json`、`src/RoutedArtifact.fs` が生成)
+
+`formatVersion` 2 (2026-09-27)。1 との違いは `clocking` の追加だけ。**`formatVersion` 1 (clocking なし) は
+`"singleEdge"` として読む** (既存の `routed/sm83_subset.meta.json` 等)。それ以外のバージョンはエラー。
+座標はすべて .bin の (0,0) 基点 (正規化済み)。以下の値は説明用の例。
+
+```json
+{
+  "formatVersion": 2,
+  "circuit": "counter4",
+  "sourceSha256": "…",
+  "gitCommit": "…",
+  "createdAtUtc": "2026-09-27T01:34:15.68+00:00",
+  "width": 102,
+  "height": 68,
+  "origin": { "x": 10, "y": 2 },
+  "gateCount": 25,
+  "dffCount": 8,
+  "inputs": { "rst": [ { "x": 0, "y": 16 } ] },
+  "outputs": { "q": [ { "x": 26, "y": 16 }, { "const": 0 }, { "unobservable": 42 } ] },
+  "clocking": {
+    "scheme": "twoPhase",
+    "clockPort": "clk",
+    "clkA": { "x": 62, "y": 40 },
+    "clkB": { "x": 86, "y": 40 }
+  }
+}
+```
+
+- `inputs`: 入力ポート名 → ビットごとのピンセル座標 (LSB first)。**2 相では `clocking.clockPort` のポート (元の clk) を含まない**
+- `outputs`: 出力ポート名 → ビットごとの観測方法 (LSB first)。`{x,y}` はそのセルのレベル bit0 を読む、
+  `{"const":0|1}` は yosys が定数に畳んだビット、`{"unobservable":netId}` は grid 上に駆動元が無いビット
+- `gateCount` / `dffCount`: 配置したゲート数・DFF 数。**2 相では DFF が倍 (マスター + スレーブ) になり、gateCount もその分増える**
+- `clocking`: クロック方式
+  - `{"scheme": "singleEdge"}` — 従来。`inputs.clk` を §5.2 の手順で駆動する
+  - `{"scheme": "twoPhase", "clockPort": "clk", "clkA": {x,y}, "clkB": {x,y}}` — `clkA` / `clkB` はピンセル (Pin) の座標。
+    §5.2.1 の手順で駆動する。`clockPort` は元のクロックポート名 (プログラムや golden がクロックを名前で
+    参照しているときの対応付け用)
+- runner は起動時に `clocking.scheme` を見て駆動手順を選ぶ。未知の `scheme` はエラーにする
+- wgpu-runner (`wgpu-runner/src/routed_meta.rs`、2026-09-27 対応) は formatVersion 1 (clocking 無し → singleEdge) と
+  2 (clocking 必須) を受け付ける。次は起動時にエラー: 1 と 2 以外、v1 に clocking がある、v2 に clocking が無い、
+  未知の scheme / 余分なキー、twoPhase で `clkA` / `clkB` / `clockPort` が無い、`inputs` に clockPort が残っている、
+  clkA = clkB、clkA / clkB が入力ピンと重なる、clkA / clkB が grid 上で Pin セルでない
+- 2 相の meta を受け取るのは `--memory` だけ。単発の .bin 実行 (`run-tests.sh`) は meta を読まない。
+  `--program` (pins/regs 形式の meta) に routed meta を渡すと、`--memory` を使うよう促すエラーにする
+
 ## 7. 実装計画
 
 | 段 | 内容 | 成果物 | 完了条件 |
@@ -195,7 +330,7 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
 | B-3b | `--memory` に golden 照合を追加 | `memory_program.rs` | smoke の golden で全周期一致。**わざと 1 セル壊した .bin で不一致を検出する** (検証器の検証) |
 | B-4 | subset で長いプログラムを通す (= Step C) | `programs/`、golden | 全周期一致、または不一致の原因特定 |
 | B-5 | RTL との照合 | テストベンチ Verilog + `yosys sim -vcd` + VCD 比較 | NetlistSim と RTL が x 以外で一致 |
-| B-6 | GPU 収束判定の高速化 (必要なら) | 変化フラグを compute shader で集計し 4 byte だけ読み戻す | B-4 の実測で周期あたりの時間が問題になったときだけ着手 |
+| B-6 | GPU 収束判定の高速化 (2026-09-27 済) | `wgpu-runner/src/gpu.rs`、`wirelevel.wgsl` | 変化タイル数を compute shader で世代ごとに集計し、`checkInterval` 世代ぶんをまとめて読み戻す。golden・周期ごとのバス値は旧実装と一致し、世代数は旧値以下かつ差が `checkInterval`+1 未満 |
 
 ### モジュール設計 (F#)
 
@@ -232,6 +367,17 @@ val readPorts : YosysPortBits list -> SimState -> Map<string, uint64>           
   - 不一致時: 周期番号、ポート、期待値/実測値 (16 進)、異なるビット位置、settle 世代数を表示し停止。
     `--dump-dir` 指定時はその周期の setup/high グリッドを保存
   - 終了コード: 0=全周期一致 / 1=不一致・未収束 / それ以外=入力エラー
+- 2 相 (§5.2.1): `clocking.rs` の `ClockPins` が settle_idle (手順 1'、最初の周期だけ)・
+  settle_after_data (手順 4、クロックには触れない)・latch (手順 5'・6) の書込と収束を組み立てる。
+  `run_bus_cycle` / `run_reset_cycle` の `first` 引数が「最初の周期 (パルス) か」を表し、
+  `first` のときだけ手順 1' の settle_idle を呼ぶ。2 周期目以降はバスを `prev_cells`
+  (前周期の手順 6 のセル) からそのまま読み、`latch` の手順 5' が前周期の `clkB=1` の
+  立ち下がりも畳み込む (2026-09-27 短縮)。GPU は `CaDriver` trait 越しに呼ぶので、書込と収束の
+  順序は GPU なしの単体テスト (`memory_program.rs` の `cycle_order` モジュール) で固定している。
+  settle 世代数は最初の周期が `setup=..g data_in=..g phaseA=..g phaseB=..g`、2 周期目以降は
+  `data_in=..g phaseA=..g phaseB=..g` (単相は毎周期 `setup=..g data_in=..g high=..g` のまま)。
+  実機の回帰は `wgpu-runner/memory-test.sh` の `routed/membus_tiny_2p_xor.json`
+  (`verilog/membus_tiny.v`: バスを持つ 17 DFF の最小回路。sm83_min はバスを持たないので `--memory` に使えない)
 
 ## 8. 決定事項と未決事項
 

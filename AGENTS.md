@@ -8,6 +8,7 @@ dotnet fsi src/RunTests.fsx            # all tests
 web/run-test.sh                        # WebGPU golden tests (Playwright/SwiftShader)
 wgpu-runner/run-tests.sh               # GPU golden tests (Rust + wgpu, RTX 3060)
 wgpu-runner/target/release/wgpu-runner # Rust native wgpu CLI (run single .bin)
+dotnet build src/WwHdl.fsproj -c Release && dotnet fsi src/CoSimGbfs.fsx [--lockstep] [--tsv out.tsv] <rom.gb>  # sm83_full RTL + gbfs 周辺回路で公開テスト ROM (blargg) を流す
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
@@ -25,7 +26,9 @@ Route.fs       # Lee/BFS routing algorithm                (255 lines)
 Sta.fs         # Static timing analysis                   (290 lines)
 Sim.fs         # Clock-gated simulation                   (189 lines)
 Pipeline.fs    # Yosys JSON frontend/parse + WireWorld pipeline (legacy)   (765 lines)
+TwoPhaseClock.fs # 2 相ノンオーバーラップクロック (toTwoPhase) と CA のクロック駆動 (ClockDrive)
 PipelineWL.fs  # yosys Netlist → WireLevel コンパイラ (P0)
+HoldAnalysis.fs  # 配線済みグリッドの hold 静的解析 (AnalyzeHold.fsx の本体、2 相の不変条件検査)
 E2eTests.fs    # All test modules                         (~1500 lines)
 ```
 
@@ -136,3 +139,13 @@ WireWorld 系パイプライン (junc3/STA/クロック注入 Sim) は組合せ�
 - **fsharp-testing**: テストアーキテクチャ, 8つのテストパターン, ヘルパー関数
 - **sta-simulation**: 到達時刻/スラック, 遅延挿入 (waypoint/U字), クロックシミュレーション
 - **wireworld-domain**: StdCell全定義, JUNC3/NAND/NOT/DIODE/SPLIT/OR2設計, 遷移規則
+
+## 2026-09-27: 2 相ノンオーバーラップクロック (`--clocking two-phase`)
+
+アニーリング配置で密になると skew 均等化の蛇行余地がなく、sm83_full で hold 違反 144 組が出た。
+`PipelineWL.compileWLWithOptions { ... Clocking = Clocking.TwoPhase }` (CLI: `ExportRouted.fsx --clocking two-phase`) は
+WL コンパイル経路の中だけで各 DFF をマスター (clk_a) / スレーブ (clk_b) に分け、skew 均等化をしない。
+ホストは「clk_a=1 → settle → clk_a=0, clk_b=1 → settle」で駆動する (DESIGN-VERIFY.md §5.2.1)。
+論理 Netlist / NetlistSim / golden は単相のまま。meta は formatVersion 2 (`clocking` を追加、1 は単相として読む)。
+`AnalyzeHold.fsx` は 2 相グリッドで「同相 DFF 間の組合せ経路 0 本」を検査する。
+CA レベルの F# 検証は `WireLevel.settleIncremental` (settle と同値、sm83_min で約 190 倍速) を使う。

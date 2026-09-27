@@ -45,7 +45,10 @@ type Options =
       /// (期待値は gbfs の結果。SM83 仕様で判定済みの命令にだけ使う)
       Export: Set<int>
       /// 割込みシナリオの本数 (0 で省略)
-      Interrupts: int }
+      Interrupts: int
+      /// DAA (0x27) を A 256 通り × F 上位ニブル 16 通り = 4096 通り全数、gbfs と照合する
+      /// (通常の opcode/interrupts 差分テストは省略する専用モード)
+      DaaExhaustive: bool }
 
 let parseArgs (args: string list) : Result<Options, string> =
     let parseHex (s: string) =
@@ -60,8 +63,9 @@ let parseArgs (args: string list) : Result<Options, string> =
         | "--only" :: list :: tail -> go { opts with Only = Some (list.Split ',' |> Array.map parseHex |> Set.ofArray) } tail
         | "--export" :: list :: tail -> go { opts with Export = list.Split ',' |> Array.map parseHex |> Set.ofArray } tail
         | "--interrupts" :: n :: tail -> go { opts with Interrupts = int n } tail
+        | "--daa-exhaustive" :: tail -> go { opts with DaaExhaustive = true } tail
         | other :: _ -> Error (sprintf "不明な引数: %s" other)
-    go { Variants = 4; Seed = 20260917; Only = None; Export = Set.empty; Interrupts = 200 } args
+    go { Variants = 4; Seed = 20260917; Only = None; Export = Set.empty; Interrupts = 200; DaaExhaustive = false } args
 
 // --- CPU 状態のスナップショット ------------------------------------------------
 
@@ -433,21 +437,67 @@ let runInterruptDiffTest (opts: Options) circuit (rng: Random) : bool =
         if failures.Length > 12 then printfn "  ... ほか %d シナリオ" (failures.Length - 12)
         false
 
+/// DAA (0x27) の全数差分テスト: A 256 通り × F 上位ニブル 16 通り = 4096 通りを gbfs と照合する。
+/// gbfs (Cpu.fs の Daa) は補正量を 8bit に丸めない int で計算するため、RTL で見つかった
+/// 「下位補正後の値で上位補正を判定して 8bit 桁あふれる」不具合を踏まない。したがって Pan Docs 準拠の
+/// 外部参照として使える (境界値は手計算でも確認済み。SM83.md / 本コミットの報告を参照)
+let runDaaExhaustiveTest circuit : bool =
+    printfn "=== DAA 全数差分テスト: A 256 × F 上位ニブル 16 = 4096 通り (gbfs 比較) ==="
+    let sw = Diagnostics.Stopwatch.StartNew ()
+    let daaCycles = 60
+    let sp = 0xDFFE
+    let buildDaaCase (a: int) (f: int) : TestCase =
+        let rom = Array.create 0x8000 0x76uy
+        let code =
+            [| 0x31uy; byte (sp &&& 0xFF); byte (sp >>> 8)   // LD SP,sp
+               0x01uy; byte f; byte a                          // LD BC,a:f (B=a, C=f)
+               0xC5uy                                           // PUSH BC
+               0xF1uy                                           // POP AF (A=a, F=f)
+               0x27uy                                           // DAA
+               0x76uy |]                                        // HALT
+        Array.blit code 0 rom 0x0100 code.Length
+        { Opcode = 0x27; Instruction = [| 0x27uy |]; Preset = sprintf "A=%02X F=%02X" a f; Rom = rom }
+    let failures =
+        [ for a in 0 .. 255 do
+            for fHi in 0 .. 15 do
+                let f = fHi <<< 4
+                let case = buildDaaCase a f
+                let expected, halted = runGbfs case.Rom
+                match runNetlistCycles daaCycles circuit case.Rom with
+                | Error msg -> yield case, [ sprintf "netlist error: %s" msg ]
+                | Ok actual ->
+                    let diffs = diffSnapshots expected actual
+                    let diffs = if halted then diffs else "gbfs が HALT に到達しない" :: diffs
+                    if not diffs.IsEmpty then yield case, diffs ]
+    printfn "所要 %.1f 秒\n" sw.Elapsed.TotalSeconds
+    if failures.IsEmpty then
+        printfn "DAA 全数 4096/4096 が gbfs と一致\n"
+        true
+    else
+        printfn "DAA 食い違い: %d / 4096" failures.Length
+        for (case, diffs) in failures |> List.truncate 20 do
+            printfn "  [%s] %s" case.Preset (String.concat "; " diffs)
+        if failures.Length > 20 then printfn "  ... ほか %d 件" (failures.Length - 20)
+        false
+
 let runDiffTest (opts: Options) : int =
     let gbfsOk = checkGbfsAgainstSpecPrograms ()
     if not gbfsOk then
         printfn "WARN: gbfs が手書き仕様テストに合格しない。以降の差分は gbfs 側の誤りも疑うこと\n"
     let circuit = loadFull ()
-    let rng = Random opts.Seed
-    let opcodesOk = runOpcodeDiffTest opts circuit rng
-    let interruptsOk = opts.Interrupts = 0 || runInterruptDiffTest opts circuit (Random (opts.Seed + 1))
-    if opcodesOk && interruptsOk then 0 else 1
+    if opts.DaaExhaustive then
+        if runDaaExhaustiveTest circuit then 0 else 1
+    else
+        let rng = Random opts.Seed
+        let opcodesOk = runOpcodeDiffTest opts circuit rng
+        let interruptsOk = opts.Interrupts = 0 || runInterruptDiffTest opts circuit (Random (opts.Seed + 1))
+        if opcodesOk && interruptsOk then 0 else 1
 
 let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46] [--interrupts N]"
+        eprintfn "使い方: dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46] [--interrupts N] [--daa-exhaustive]"
         2
     | Ok opts -> runDiffTest opts
 

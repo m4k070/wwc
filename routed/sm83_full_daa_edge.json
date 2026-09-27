@@ -1,0 +1,41 @@
+{
+  "circuit": "sm83_full",
+  "comment": "DAA 境界値 9 通り (加算後の 8bit 桁あふれ再修正の回帰、減算後の H/C 単独・重複、Z フラグ) を連続実行し、各ケースの結果 (A,F) を 0xC000 から 2 バイトずつ RAM に書く。期待値は Pan Docs の DAA 仕様から手で導いた (RTL の模倣ではない)",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_sm83_full_daa_edge.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 400,
+  "maxStepsPerPhase": 40000,
+  "checkInterval": 256,
+  "expect": {
+    "a_out": 192,
+    "f_out": 192
+  },
+  "expectMem": {
+    "0xC000": 96,
+    "0xC001": 16,
+    "0xC002": 101,
+    "0xC003": 16,
+    "0xC004": 0,
+    "0xC005": 144,
+    "0xC006": 153,
+    "0xC007": 0,
+    "0xC008": 96,
+    "0xC009": 16,
+    "0xC00A": 250,
+    "0xC00B": 64,
+    "0xC00C": 160,
+    "0xC00D": 80,
+    "0xC00E": 154,
+    "0xC00F": 80,
+    "0xC010": 0,
+    "0xC011": 192
+  },
+  "golden": "sm83_full_daa_edge.golden.json",
+  "trace": true
+}

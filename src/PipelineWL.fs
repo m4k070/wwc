@@ -65,22 +65,211 @@ module PipelineWL =
         elif nGates <= 1000 then 20, 14
         else 16, 12
 
-    /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版)。
-    let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
-        let n = max 1 nl.Gates.Length
-        let ncols = int (ceil (sqrt (float n)))
+    /// ゲート格子の左上 (外部入力ピン列 X=0 との間に配線用の余白を取る)。
+    let private gateOrigin : Coord = { X = gateX0; Y = 2 }
+
+    /// 外部入力ピン (クロックを含む) の左端列の座標。i 番目のピンは Y = 2 + i*pitchY。
+    let private leftEdgePins (pitchY: int) (nl: Netlist) : Map<NetId, Coord> =
+        nl.PrimaryInputs
+        |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
+        |> Map.ofList
+
+    // --- クロック方式 ---------------------------------------------------
+
+    /// 配置配線が扱うクロック網 (クロック方式の変換後)。
+    type CircuitClocking =
+        /// 単相。クロックは元のネットリストの ClockNet (組合せ回路なら None)
+        | SingleEdgeClock of clock: NetId option
+        /// 2 相。配置配線するのは TwoPhaseNetlist.Netlist (マスター / スレーブ分割後)
+        | TwoPhaseClock of Clocking.TwoPhaseNetlist
+
+    /// クロック終端 (DFF のクロック端子) を配線する順番。
+    type ClockTerminalOrder =
+        /// ピンから遠い終端から (幹を先に引き、近い終端はそこからタップする)
+        | FarthestFirst
+        /// ピンに近い終端から (木を内側から外へ育てる)。
+        /// sm83_subset (2 相 anneal) で FarthestFirst と最大到達時間は同じ (下限どおり) で、
+        /// 木のセル数が約 25% 少なく (9,520 vs 12,688)、配線も速い (13 秒 vs 33 秒)。
+        /// 遠い終端が先に育った内側の木から枝を伸ばせるため
+        | NearestFirst
+
+    /// クロック網の配線方針。
+    type ClockRouting =
+        /// クロック優先配線 + 終端近傍のタップ禁止 + skew 均等化 (単相の hold 対策)
+        | BalancedSkew
+        /// クロック優先配線のみ。新しく引く配線の長さを最小にする (skew も latency も揃えない)
+        | ShortestOnly
+        /// クロック優先配線を最短経路木 (shortest-path tree) で行う: 各終端への経路を
+        /// 「ピンからの到達時間」最小で選ぶ (同点なら新しく引く配線が短いほう)。
+        /// 2 相は相の間の settle で hold を守るので、クロックに要るのは最大到達時間の短さだけ
+        | MinLatency of order: ClockTerminalOrder
+
+    /// 配置配線にかける回路 (クロック方式の変換を済ませたもの)。
+    type PreparedCircuit =
+        { Netlist: Netlist
+          Clocking: CircuitClocking }
+
+    /// クロックネット (ピンを DFF 群の重心に置く対象) と、それぞれが駆動する DFF の判定。
+    let clockNetsOf (clocking: CircuitClocking) : NetId list =
+        match clocking with
+        | SingleEdgeClock clock -> Option.toList clock
+        | TwoPhaseClock tp -> [ tp.ClockA; tp.ClockB ]
+
+    let clockRoutingOf (clocking: CircuitClocking) : ClockRouting =
+        match clocking with
+        | SingleEdgeClock _ -> BalancedSkew
+        | TwoPhaseClock _ -> MinLatency NearestFirst
+
+    /// クロック方式に応じてネットリストを変換する (純粋関数)。
+    let prepareCircuit (scheme: Clocking.ClockingScheme) (nl: Netlist) : Result<PreparedCircuit, CompileError> =
+        match scheme with
+        | Clocking.SingleEdge -> Ok { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
+        | Clocking.TwoPhase ->
+            Clocking.toTwoPhase nl
+            |> Result.mapError UnsupportedClocking
+            |> Result.map (fun tp -> { Netlist = tp.Netlist; Clocking = TwoPhaseClock tp })
+
+    /// クロック端子群 terminals への最大マンハッタン距離が最小になる格子の隙間 (taken 以外)。
+    /// L1 のミニマックス中心は、u = x+y と v = x−y それぞれの最小と最大の中点
+    /// (u, v 座標では L1 球が軸平行の正方形になり、各軸で独立に中点を取れる)。
+    /// 中心を格子の隙間 (ピッチの半分ずらし) にスナップし、周囲の隙間から最大距離が最小のものを選ぶ。
+    let private minimaxGapPin
+        (grid: GatePlacement.SlotGrid)
+        (terminals: Coord list)
+        (taken: Set<Coord>)
+        : Coord =
+        let maxDist (c: Coord) =
+            terminals |> List.map (fun t -> abs (t.X - c.X) + abs (t.Y - c.Y)) |> List.max
+        let midpoint (f: Coord -> int) =
+            let vs = terminals |> List.map f
+            float (List.min vs + List.max vs) / 2.0
+        let uc = midpoint (fun t -> t.X + t.Y)
+        let vc = midpoint (fun t -> t.X - t.Y)
+        let cx = (uc + vc) / 2.0
+        let cy = (uc - vc) / 2.0
+        // 隙間 k 番目の座標 = origin + k*pitch + pitch/2 (k = 0 .. slots-1)
+        let gapIndex (v: float) (pitch: int) (origin: int) =
+            int (floor ((v - float origin - float (pitch / 2)) / float pitch))
+        let gapAt (k: int) (pitch: int) (origin: int) = origin + k * pitch + pitch / 2
+        let kx = gapIndex cx grid.PitchX grid.Origin.X
+        let ky = gapIndex cy grid.PitchY grid.Origin.Y
+        let clampTo (hi: int) (k: int) = max 0 (min (hi - 1) k)
+        // 半径 SearchRadius 個分の隙間を候補にする (中心が塞がっていても近くに置ける)
+        let searchRadius = 3
+        [ for dx in -searchRadius .. searchRadius do
+            for dy in -searchRadius .. searchRadius do
+                yield { X = gapAt (clampTo grid.Columns (kx + dx)) grid.PitchX grid.Origin.X
+                        Y = gapAt (clampTo grid.Rows (ky + dy)) grid.PitchY grid.Origin.Y } ]
+        |> List.distinct
+        |> List.filter (fun c -> not (Set.contains c taken))
+        |> List.minBy (fun c -> maxDist c, abs (float c.X - cx) + abs (float c.Y - cy))
+
+    /// クロックピンの座標。単相は各クロックのピンを、そのクロックが駆動する DFF 群の重心に置く:
+    /// 左端からだと DFF までの距離差がそのままクロックスキューになるため (sm83_full の行優先配置で
+    /// skew 494〜578、hold 違反の許容は約 316)。重心はゲート格子の隙間 (ピッチの半分ずらし) に取り、
+    /// ゲートや終端と重ならないようにする。2 相でマスター群とスレーブ群の重心が同じ隙間に
+    /// 落ちたら、後のクロックを 1 ピッチずつ右へずらす。
+    /// 2 相は最大到達時間の下限 (ピンから最も遠い端子までの距離) を最小にするため、
+    /// 端子群の L1 ミニマックス中心 (minimaxGapPin) に置く。
+    let private clockPinCoords
+        (grid: GatePlacement.SlotGrid)
+        (placed: WlPlaced list)
+        (clocking: CircuitClocking)
+        : (NetId * Coord) list =
+        let dffs = placed |> List.filter (fun p -> p.Gate.Kind = Dff)
+        let drivenBy (clk: NetId) =
+            match clocking with
+            // 単相は従来どおり全 DFF の重心 (DFF の C が ClockNet 以外でも同じ位置になるように)
+            | SingleEdgeClock _ -> dffs
+            | TwoPhaseClock _ -> dffs |> List.filter (fun p -> List.tryHead p.Gate.Inputs = Some clk)
+        let snap (v: int) (pitch: int) (origin: int) =
+            origin + ((v - origin) / pitch) * pitch + pitch / 2
+        clockNetsOf clocking
+        |> List.fold (fun (acc: (NetId * Coord) list) clk ->
+            match drivenBy clk with
+            | [] -> acc
+            | group ->
+                let taken = acc |> List.map snd |> Set.ofList
+                let pin =
+                    match clocking with
+                    | SingleEdgeClock _ ->
+                        let cx = group |> List.averageBy (fun p -> float p.Coord.X) |> int
+                        let cy = group |> List.averageBy (fun p -> float p.Coord.Y) |> int
+                        let centroid = { X = snap cx grid.PitchX grid.Origin.X; Y = snap cy grid.PitchY grid.Origin.Y }
+                        let rec freeFrom (c: Coord) =
+                            if Set.contains c taken then freeFrom { c with X = c.X + grid.PitchX } else c
+                        freeFrom centroid
+                    | TwoPhaseClock _ ->
+                        minimaxGapPin grid (group |> List.map (fun p -> toward p.Coord S)) taken
+                acc @ [ clk, pin ])
+            []
+
+    /// 割り当て (ゲート → スロット) から配置とピン座標を作る。
+    let private placeFromAssignment
+        (grid: GatePlacement.SlotGrid)
+        (circuit: PreparedCircuit)
+        (assignment: GatePlacement.Assignment)
+        : WlPlaced list * Map<NetId, Coord> =
+        let nl = circuit.Netlist
         let placed =
             nl.Gates |> List.mapi (fun i g ->
-                let col = i % ncols
-                let row = i / ncols
                 { Gate = g
-                  Coord = { X = gateX0 + col * pitchX; Y = 2 + row * pitchY }
+                  Coord = GatePlacement.slotCoord grid assignment.[i]
                   Dir = E })
         let pins =
-            nl.PrimaryInputs
-            |> List.mapi (fun i netId -> netId, { X = 0; Y = 2 + i * pitchY })
-            |> Map.ofList
+            clockPinCoords grid placed circuit.Clocking
+            |> List.fold (fun acc (clk, c) -> Map.add clk c acc) (leftEdgePins grid.PitchY nl)
         placed, pins
+
+    /// 配置結果。Annealing は Annealed 戦略のときだけ Some (最適化の前後コスト)。
+    type WlPlacement =
+        { Placed: WlPlaced list
+          Pins: Map<NetId, Coord>
+          Annealing: GatePlacement.AnnealOutcome option }
+
+    /// クロック方式変換済みの回路を配置する。RowMajor は placeWLWithPitch と同一の結果 (単相時)。
+    /// Annealed は行優先を初期解にアーク距離を最小化する (クロックネット除外、
+    /// 外部入力ピンは左端列の固定端子としてコストに含める)。
+    let placeCircuitWithStrategy
+        (strategy: GatePlacement.PlacementStrategy)
+        (pitchX: int)
+        (pitchY: int)
+        (circuit: PreparedCircuit)
+        : Result<WlPlacement, CompileError> =
+        let nl = circuit.Netlist
+        let grid = GatePlacement.squareSlotGrid nl.Gates.Length gateOrigin pitchX pitchY
+        let initial = GatePlacement.rowMajorAssignment nl.Gates.Length
+        match strategy with
+        | GatePlacement.RowMajor ->
+            let placed, pins = placeFromAssignment grid circuit initial
+            Ok { Placed = placed; Pins = pins; Annealing = None }
+        | GatePlacement.Annealed cfg ->
+            // クロックは固定端子にしない (ピンは配置後に DFF 群の重心へ動かすため)。
+            // 固定端子に無いネットのアークは buildArcs が捨てる
+            let fixedPins =
+                clockNetsOf circuit.Clocking
+                |> List.fold (fun acc clk -> Map.remove clk acc) (leftEdgePins pitchY nl)
+            let arcs = GatePlacement.buildArcs nl fixedPins
+            GatePlacement.anneal cfg grid nl.Gates.Length arcs initial
+            |> Result.mapError (GatePlacement.describeConfigError >> InvalidPlacementConfig)
+            |> Result.map (fun outcome ->
+                let placed, pins = placeFromAssignment grid circuit outcome.Best
+                { Placed = placed; Pins = pins; Annealing = Some outcome })
+
+    /// 配置戦略を指定して配置する (単相)。
+    let placeWLWithStrategy
+        (strategy: GatePlacement.PlacementStrategy)
+        (pitchX: int)
+        (pitchY: int)
+        (nl: Netlist)
+        : Result<WlPlacement, CompileError> =
+        placeCircuitWithStrategy strategy pitchX pitchY { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
+
+    /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版、行優先、単相)。
+    let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
+        let grid = GatePlacement.squareSlotGrid nl.Gates.Length gateOrigin pitchX pitchY
+        placeFromAssignment grid { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
+            (GatePlacement.rowMajorAssignment nl.Gates.Length)
 
     /// 回路規模に応じたピッチで配置する。
     let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
@@ -109,10 +298,24 @@ module PipelineWL =
 
     // --- 配線 -----------------------------------------------------------
 
+    /// 1 終端の A* で何を最小化するか。
+    type private TapCost =
+        /// 新しく引く配線の長さ (+ 転回ペナルティ)。データネットと従来のクロック配線
+        | MinNewWire
+        /// ネットの駆動源からの到達時間 (セル数 = 世代) を第 1 キー、新しく引く配線を第 2 キーにする。
+        /// arrivals は既存の木の各セルの到達時間 (駆動源 = 0)。経路を確定したら新セルを書き足す
+        | MinArrival of arrivals: System.Collections.Generic.Dictionary<Coord, int>
+
+    /// MinArrival で到達時間 1 世代に掛ける重み。新配線の長さ (+ 転回) は常にこれより小さいので、
+    /// 到達時間が辞書式の第 1 キーになる
+    [<Literal>]
+    let private ArrivalWeight = 65536L
+
     /// 全ネットを配線して占有グリッドを返す。
     /// 各終端へは「既配線セルからのタップ (ファンアウト)」または
     /// 「駆動ゲートの出力先頭セル」から (Coord, Dir) 状態の A* で配線する。
-    let routeWL (placed: WlPlaced list) (pins: Map<NetId, Coord>) : Result<OccGrid, CompileError> =
+    /// clockRouting: BalancedSkew = 単相 (タップ禁止 + skew 均等化)、ShortestOnly = 2 相 (均等化しない)。
+    let routeWLWith (clockRouting: ClockRouting) (placed: WlPlaced list) (pins: Map<NetId, Coord>) : Result<OccGrid, CompileError> =
         let mutable occ : OccGrid =
             Map.ofList
                 [ for p in placed do yield p.Coord, OccGate p.Gate.Output
@@ -146,6 +349,15 @@ module PipelineWL =
         // タップ元セル (分岐の読み出し元)。クロック均等化のリップアップ対象から除外する。
         let tapSources = System.Collections.Generic.HashSet<Coord>()
 
+        // タップ禁止半径と、その対象となる終端群 (0 なら制限なし)。
+        // クロック配線で使う: タップが終端の直前まで寄ると専有部分 (リーフ edge) が
+        // 1〜3 セルしか残らず、スキュー均等化のバンプを 1 つも打てなくなる。
+        // 自分のゴールだけでなく「すべてのクロック終端」の近傍を禁止する。
+        // 後から配線する枝が先の枝の終端手前にタップすると、その枝の専有部分を奪うため。
+        // バンプは 1 か所で 2h (h ≤ 512) 伸ばせるので、数セルの直線区間があれば足りる。
+        let mutable tapGuard = 0
+        let mutable tapGuardPoints : Coord list = []
+
         // ネット → タップ可能セル (Cross 化されたセルは除外していく)
         let netCells = System.Collections.Generic.Dictionary<NetId, ResizeArray<Coord>>()
         let addNetCell n c =
@@ -154,7 +366,7 @@ module PipelineWL =
             | _ -> let l = ResizeArray<Coord>() in l.Add c; netCells.[n] <- l
         for KeyValue (n, c) in pins do addNetCell n c
 
-        let routeOne (netId: NetId) (goal: Coord) : Result<unit, NetId list> =
+        let routeOneWith (tapCost: TapCost) (netId: NetId) (goal: Coord) : Result<unit, NetId list> =
             // 探索中に passOk false となったセルを占有する他ネットをブロック回数付きで記録。
             // 失敗時にこれを返し、rip-up が「実際に経路を塞いだネット」を撤去できるようにする。
             let blockedCount = System.Collections.Generic.Dictionary<NetId, int>()
@@ -164,20 +376,38 @@ module PipelineWL =
                 | _ -> blockedCount.[n] <- 1
             let tapCells =
                 match netCells.TryGetValue netId with
-                | true, l -> List.ofSeq l
+                | true, l ->
+                    let cells = List.ofSeq l
+                    if tapGuard <= 0 then cells
+                    else
+                        let farEnough (t: Coord) =
+                            tapGuardPoints
+                            |> List.forall (fun g -> abs (t.X - g.X) + abs (t.Y - g.Y) >= tapGuard)
+                        match cells |> List.filter farEnough with
+                        | [] -> cells   // 候補が消えるなら制限しない (接続を優先)
+                        | filtered -> filtered
                 | _ -> []
+            // タップ元セルの到達時間 (MinArrival のみ意味を持つ。駆動源は 0)
+            let arrivalOf (t: Coord) =
+                match tapCost with
+                | MinArrival arrivals ->
+                    match arrivals.TryGetValue t with
+                    | true, a -> a
+                    | _ -> 0
+                | MinNewWire -> 0
+            // シード: (セル, 進入方向, そのセルでの到達時間)
             let seeds =
                 if tapCells.IsEmpty then
                     match Map.tryFind netId driver with
-                    | Some p -> [ (toward p.Coord p.Dir, p.Dir) ]
+                    | Some p -> [ (toward p.Coord p.Dir, p.Dir, 1) ]
                     | None ->
                         match Map.tryFind netId pins with
-                        | Some c -> [ for d in [E; W; N; S] do yield toward c d, d ]
+                        | Some c -> [ for d in [E; W; N; S] do yield toward c d, d, 1 ]
                         | None -> []
                 else
                     [ for t in tapCells do
                         for d in [E; W; N; S] do
-                            yield (toward t d, d) ]
+                            yield (toward t d, d, arrivalOf t + 1) ]
 
             let isCrossingCell (c: Coord) =
                 match Map.tryFind c occ with
@@ -188,7 +418,12 @@ module PipelineWL =
             // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、後続ネットが
             // 交差できるセルを増やす (輻輳対策)。
             let h (c: Coord) = abs (c.X - goal.X) + abs (c.Y - goal.Y)
-            let pts = goal :: (seeds |> List.map fst)
+            let pts = goal :: (seeds |> List.map (fun (c, _, _) -> c))
+            // 1 歩あたりの到達時間の重み (MinNewWire では 0 = 従来どおり新配線の長さだけ)
+            let arrivalWeight =
+                match tapCost with
+                | MinArrival _ -> ArrivalWeight
+                | MinNewWire -> 0L
             let mutable exploreMult = 1
             let mutable result = None
             while result.IsNone && exploreMult <= 16 do
@@ -221,21 +456,25 @@ module PipelineWL =
                 // 序盤のグリッドはほぼ空で同コストの経路が大量にあり、素の f だけだと
                 // その「平地」を一様に広げて探索が爆発する (24x16 のクロックネットで
                 // 1 終端 12 分・上限 500 万到達)。同点処理を入れても経路の最適性は保たれる。
-                let inline priorityOf (g: int) (hv: int) = (g + hv) * 1024 + hv
+                // g は arrivalWeight × 到達時間 + 新配線の長さ (+ 転回)。1 歩で g は
+                // arrivalWeight + 1 以上増えるので、h × (arrivalWeight + 1) は許容的かつ一貫的
+                let inline priorityOf (g: int64) (hv: int) =
+                    (g + int64 hv * (arrivalWeight + 1L)) * 1024L + int64 hv
                 // 転回ペナルティ: コーナーは交差不可なので直線経路を優先し、
                 // 後続ネットが交差できるセルを増やす (輻輳対策)。
                 // リトライが進むほど下げる (4→2→1) — 初回は直線優先で交差余地を
                 // 温存し、輻輳が深刻なリトライでは柔軟な経路選択を許容する。
                 let turnPenalty = max 1 (4 / exploreMult)
-                let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int>()
-                let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int>()
+                let pq = System.Collections.Generic.PriorityQueue<Coord * Dir, int64>()
+                let gScore = System.Collections.Generic.Dictionary<Coord * Dir, int64>()
                 let prev = System.Collections.Generic.Dictionary<Coord * Dir, (Coord * Dir) option>()
                 let closed = System.Collections.Generic.HashSet<Coord * Dir>()
-                for (c, d) in seeds do
-                    if passOk c d && not (gScore.ContainsKey ((c, d))) then
-                        gScore.[(c, d)] <- 1
+                for (c, d, arrival) in seeds do
+                    let g0 = arrivalWeight * int64 arrival + 1L
+                    if passOk c d && (not (gScore.ContainsKey ((c, d))) || g0 < gScore.[(c, d)]) then
+                        gScore.[(c, d)] <- g0
                         prev.[(c, d)] <- None
-                        pq.Enqueue ((c, d), priorityOf 1 (h c))
+                        pq.Enqueue ((c, d), priorityOf g0 (h c))
                 let mutable explored = 0
                 let mutable goalState = None
                 while goalState.IsNone && pq.Count > 0 && explored < maxExplore do
@@ -250,7 +489,7 @@ module PipelineWL =
                                 let c' = toward c nd
                                 if not (closed.Contains ((c', nd))) then
                                     if passOk c' nd then
-                                        let ng = gc + 1 + (if nd <> d then turnPenalty else 0)
+                                        let ng = gc + arrivalWeight + 1L + (if nd <> d then int64 turnPenalty else 0L)
                                         if not (gScore.ContainsKey ((c', nd))) || ng < gScore.[(c', nd)] then
                                             gScore.[(c', nd)] <- ng
                                             prev.[(c', nd)] <- Some (c, d)
@@ -279,6 +518,12 @@ module PipelineWL =
                          occ <- Map.add tapC (OccWire (n2, f2, false)) occ
                          tapSources.Add tapC |> ignore
                      | _ -> ())
+                    // 新セルの到達時間 = タップ元 + 1, +2, … (Cross も 1 世代。WireLevel.clockArrivals と同じ数え方)
+                    (match tapCost with
+                     | MinArrival arrivals ->
+                         let tapArrival = arrivalOf tapC
+                         path |> Array.iteri (fun i (c, _) -> arrivals.[c] <- tapArrival + i + 1)
+                     | MinNewWire -> ())
                     path |> Array.iteri (fun i (c, d) ->
                         let straight = i < path.Length - 1 && snd path.[i + 1] = d
                         match Map.tryFind c occ with
@@ -307,6 +552,9 @@ module PipelineWL =
                     eprintfn "[route] NetId %A ok after mult=%d" netId exploreMult
                 r
             | None -> Error (blockedCount |> Seq.sortByDescending (fun (KeyValue (_, k)) -> k) |> Seq.map (fun (KeyValue (n, _)) -> n) |> List.ofSeq)
+
+        let routeOne (netId: NetId) (goal: Coord) : Result<unit, NetId list> =
+            routeOneWith MinNewWire netId goal
 
         // --- クロックスキュー均等化 (P1: hold 対策) -----------------------
         // WireLevel は配線セル 1 個 = 1 世代なので、クロック枝の長さを揃えれば
@@ -555,15 +803,28 @@ module PipelineWL =
                       | Some p -> yield p.Coord, 0
                       | None -> () ]
                 let tapCandidates = sourceTaps @ trunkArrivals
+                // 終端ごとの均等化は互いに独立。1 本が失敗しても残りの終端は延長を続け、
+                // 最悪の残差だけを報告する。Result.bind で連鎖させると最初の失敗で
+                // 残り全部の延長が飛ばされ、WARN の値 (その 1 本の残差) より実際の skew が
+                // 桁違いに大きくなる (sm83_full: WARN 112 / 実測 skew 2892、hold 違反 144 組)。
+                let worseSkew (acc: Result<unit, CompileError>) (r: Result<unit, CompileError>) =
+                    match acc, r with
+                    | Ok (), _ -> r
+                    | Error (ClockSkewUnresolved (n, a)), Error (ClockSkewUnresolved (_, b)) ->
+                        Error (ClockSkewUnresolved (n, max a b))
+                    | Error _, _ -> acc
                 paths
                 |> List.fold (fun acc path ->
-                    acc |> Result.bind (fun () ->
+                    worseSkew acc ((fun () ->
                         let need = (tMax - List.length path) / 2 * 2
                         if need = 0 then Ok ()
                         else
                             let leafEdge =
                                 path |> List.skipWhile (fun (c, _) -> ownerCount.[c] > 1)
                             let added, edge' = padEdge netId leafEdge need
+                            let g = fst (List.last path)
+                            eprintfn "[skew] 終端 (%d,%d): パス長 %d / 目標 %d / 必要 %d / バンプ追加 %d / リーフ edge %d セル"
+                                g.X g.Y (List.length path) tMax need added (List.length leafEdge)
                             if added >= need then Ok ()
                             else
                                 // バンプで不足 → リーフ edge を撤去し、幹の任意点から
@@ -592,6 +853,8 @@ module PipelineWL =
                                         |> Option.map (fun p -> p, target))
                                     |> function
                                        | None ->
+                                           eprintfn "[skew] 終端 (%d,%d): 指定長 %d/%d での引き直しも失敗 (タップ候補 %d 個)"
+                                               goal.X goal.Y tMax (tMax - 1) tapCandidates.Length
                                            restoreEdge ()
                                            Error failure
                                        | Some (newPath, _) ->
@@ -608,7 +871,7 @@ module PipelineWL =
                                                      tapSources.Add tapC |> ignore
                                                  | _ -> ())
                                             | [] -> ())
-                                           Ok ()))
+                                           Ok ()) ()))
                     (Ok ())
 
         let balanceClocks () : Result<unit, CompileError> =
@@ -633,6 +896,12 @@ module PipelineWL =
         // 全ゲートの全入力終端を順に配線 (短いネット優先で輻輳軽減)。
         // routeOne が輻輳失敗した場合は Rip-up & reroute (残課題 2): そのネットの
         // bbox 内の先行ネットを最大 10 個撤去して再ルーティングする。
+        // クロック終端の手前に残す専有部分の長さ (バンプを打つ余地)。
+        // 均等化しない (2 相) ならバンプも打たないので制限しない
+        let clockTapGuard =
+            match clockRouting with
+            | BalancedSkew -> 12
+            | ShortestOnly | MinLatency _ -> 0
         let routeSw = System.Diagnostics.Stopwatch.StartNew()
         let terminals =
             placed |> List.collect (fun p -> fst (gateTerminals p))
@@ -648,30 +917,102 @@ module PipelineWL =
                 | Dff, (clkNet :: _) -> [ clkNet, toward p.Coord S ]
                 | _ -> [])
         let clockNetIds = clockTerminals |> List.map fst |> Set.ofList
-        let clockResult =
-            eprintfn "[clock] 終端 %d 本の配線を開始" clockTerminals.Length
+        // MinLatency: クロックネットごとの「既存の木のセル → ピンからの到達時間」(ピン = 0)
+        let clockArrivalMaps =
+            match clockRouting with
+            | MinLatency _ ->
+                clockNetIds
+                |> Set.toList
+                |> List.map (fun nid ->
+                    let arrivals = System.Collections.Generic.Dictionary<Coord, int>()
+                    match Map.tryFind nid pins with
+                    | Some c -> arrivals.[c] <- 0
+                    | None -> ()
+                    nid, arrivals)
+                |> Map.ofList
+            | BalancedSkew | ShortestOnly -> Map.empty
+        let clockTapCost (nid: NetId) : TapCost =
+            match Map.tryFind nid clockArrivalMaps with
+            | Some arrivals -> MinArrival arrivals
+            | None -> MinNewWire
+        // 配線順。MinLatency は ピンからのマンハッタン距離で並べ替える (同距離は配置順のまま)
+        let orderedClockTerminals =
+            let distFromPin (nid: NetId, goal: Coord) =
+                match Map.tryFind nid pins with
+                | Some c -> abs (goal.X - c.X) + abs (goal.Y - c.Y)
+                | None -> 0
+            match clockRouting with
+            | MinLatency FarthestFirst -> clockTerminals |> List.sortByDescending distFromPin
+            | MinLatency NearestFirst -> clockTerminals |> List.sortBy distFromPin
+            | BalancedSkew | ShortestOnly -> clockTerminals
+        // クロック終端をまとめて配線する。guard > 0 なら終端近傍でのタップを禁止して
+        // スキュー均等化用の専有部分を残す。失敗したら呼び出し側が guard=0 で引き直す。
+        let routeClockTerminals (guard: int) : Result<unit, CompileError> =
+            eprintfn "[clock] 終端 %d 本の配線を開始 (タップ禁止半径 %d)" clockTerminals.Length guard
+            tapGuard <- guard
+            tapGuardPoints <- if guard > 0 then clockTerminals |> List.map snd else []
             let mutable cr : Result<unit, CompileError> = Ok ()
             let mutable clockDone = 0
-            for (nid, goal) in clockTerminals do
+            for (nid, goal) in orderedClockTerminals do
                 let sw = System.Diagnostics.Stopwatch.StartNew ()
-                match routeOne nid goal with
+                match routeOneWith (clockTapCost nid) nid goal with
                 | Ok () -> ()
                 | Error _ ->
-                    eprintfn "[clock] 配線失敗: NetId %A (%d/%d) — 最終的に RoutingCongestion で終わる" nid (clockDone + 1) clockTerminals.Length
-                    cr <- Error (RoutingCongestion nid)
+                    eprintfn "[clock] 配線失敗: NetId %A (%d/%d)" nid (clockDone + 1) clockTerminals.Length
+                    match cr with
+                    | Ok () -> cr <- Error (RoutingCongestion nid)   // 最初の失敗を記録する
+                    | Error _ -> ()
                 clockDone <- clockDone + 1
                 if sw.Elapsed.TotalSeconds >= 10.0 then
                     eprintfn "[clock] 遅い終端: NetId %A %.0f s (%d/%d)" nid sw.Elapsed.TotalSeconds clockDone clockTerminals.Length
                 if clockDone % 20 = 0 then
                     eprintfn "[clock] %d/%d 本 %d s" clockDone clockTerminals.Length (int routeSw.Elapsed.TotalSeconds)
             eprintfn "[clock] 配線完了 %d s" (int routeSw.Elapsed.TotalSeconds)
+            for KeyValue (nid, arrivals) in clockArrivalMaps do
+                let terminalArrivals =
+                    clockTerminals
+                    |> List.filter (fun (n, _) -> n = nid)
+                    |> List.choose (fun (_, g) ->
+                        match arrivals.TryGetValue g with
+                        | true, a -> Some a
+                        | _ -> None)
+                if not terminalArrivals.IsEmpty then
+                    // arrivals はピン (到達 0) と木の全セルを持つ
+                    eprintfn "[clock] NetId %A 到達 min %d / max %d 世代 (終端 %d 本、木 %d セル)"
+                        nid (List.min terminalArrivals) (List.max terminalArrivals) terminalArrivals.Length
+                        (arrivals.Count - 1)
+            tapGuard <- 0
+            tapGuardPoints <- []
             cr
+
+        let clockResult =
+            let savedOcc = occ
+            let savedTaps = tapSources |> List.ofSeq
+            match routeClockTerminals clockTapGuard with
+            | Ok () -> Ok ()
+            | Error e when clockTapGuard > 0 ->
+                // タップ禁止で配線できない場合は制限なしでやり直す (接続を優先し、
+                // スキューは均等化できなければ WARN で続行する)
+                eprintfn "[clock] タップ禁止半径 %d では配線できず (%A) — 制限なしで引き直す" clockTapGuard e
+                occ <- savedOcc
+                tapSources.Clear ()
+                for c in savedTaps do tapSources.Add c |> ignore
+                netCells.Clear ()
+                for KeyValue (c, cell) in occ do
+                    match cell with
+                    | OccWire (n, _, true) -> addNetCell n c
+                    | _ -> ()
+                routeClockTerminals 0
+            | Error e -> Error e
             |> Result.bind (fun () ->
-                match balanceClocks () with
-                | Ok x -> Ok x
-                | Error e ->
-                    eprintfn "WARN: %A — クロックスキュー非調整で続行" e
-                    Ok ())
+                match clockRouting with
+                | ShortestOnly | MinLatency _ -> Ok ()
+                | BalancedSkew ->
+                    match balanceClocks () with
+                    | Ok x -> Ok x
+                    | Error e ->
+                        eprintfn "WARN: %A — クロックスキュー非調整で続行" e
+                        Ok ())
         let netLen (nid: NetId) (goal: Coord) =
             match Map.tryFind nid driver with
             | Some p ->
@@ -802,6 +1143,10 @@ module PipelineWL =
         |> Result.bind (fun () -> clockResult)
         |> Result.map (fun () -> occ)
 
+    /// 全ネットを配線する (単相: クロック skew 均等化あり)。
+    let routeWL (placed: WlPlaced list) (pins: Map<NetId, Coord>) : Result<OccGrid, CompileError> =
+        routeWLWith BalancedSkew placed pins
+
     // --- 合成 -----------------------------------------------------------
 
     /// 配置 + 占有グリッドを LGrid に合成する。
@@ -829,46 +1174,137 @@ module PipelineWL =
         | Not | Nand | Dff -> true
         | _ -> false
 
-    /// yosys JSON → WireLevel グリッド (ピッチ指定版)。
+    let private ensureMappable (nl: Netlist) : Result<Netlist, CompileError> =
+        match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
+        | Some g -> Error (UnmappableGate g.Kind)
+        | None -> Ok nl
+
+    /// 配置ピッチの選び方。
+    type PitchChoice =
+        /// 回路規模から基本ピッチを決め、輻輳で失敗したら pitchSequence に沿って広げて再試行する
+        | AutoPitch
+        /// このピッチで 1 回だけ試す
+        | FixedPitch of pitchX: int * pitchY: int
+
+    /// WireLevel コンパイルのオプション。
+    type WlCompileOptions =
+        { Placement: GatePlacement.PlacementStrategy
+          Pitch: PitchChoice
+          Clocking: Clocking.ClockingScheme }
+
+    /// 既定: 行優先・自動ピッチ・単相 (従来の compileWL と同じ)。
+    let defaultCompileOptions : WlCompileOptions =
+        { Placement = GatePlacement.RowMajor
+          Pitch = AutoPitch
+          Clocking = Clocking.SingleEdge }
+
+    /// コンパイル結果。Placed / Pins は配置配線した (クロック方式変換後の) ネットリストのもの。
+    /// 出力ネットの観測は駆動ゲートのセルで行う (2 相でも元の Q ネットはスレーブが駆動する)。
+    type WlCompiled =
+        { Grid: LGrid
+          Placed: WlPlaced list
+          Pins: Map<NetId, Coord>
+          Clocking: CircuitClocking }
+
+    /// 配置 → 配線 → グリッド生成 (1 ピッチ分)。
+    let private placeAndRoute
+        (strategy: GatePlacement.PlacementStrategy)
+        (pitchX: int)
+        (pitchY: int)
+        (circuit: PreparedCircuit)
+        : Result<WlCompiled, CompileError> =
+        placeCircuitWithStrategy strategy pitchX pitchY circuit
+        |> Result.bind (fun p ->
+            routeWLWith (clockRoutingOf circuit.Clocking) p.Placed p.Pins
+            |> Result.map (fun occ ->
+                { Grid = emitWL p.Placed p.Pins occ
+                  Placed = p.Placed
+                  Pins = p.Pins
+                  Clocking = circuit.Clocking }))
+
+    /// ピッチを自動決定し、輻輳失敗時はより広いピッチで自動再試行する (pitchSequence)。
+    /// 配置の最適化はピッチごとにやり直す (スロット座標が変わるため)。
+    let private placeAndRouteAutoPitch
+        (strategy: GatePlacement.PlacementStrategy)
+        (circuit: PreparedCircuit)
+        : Result<WlCompiled, CompileError> =
+        let startPitch = pitchFor circuit.Netlist.Gates.Length
+        let rec tryPitches (remaining: (int * int) list) =
+            match remaining with
+            | [] -> Error (RoutingCongestion (NetId 0))
+            | (px, py) :: rest ->
+                match placeAndRoute strategy px py circuit with
+                | Ok compiled -> Ok compiled
+                | Error (InvalidPlacementConfig _ as e) -> Error e
+                | Error e ->
+                    match rest with
+                    | [] -> Error e
+                    | _ ->
+                        eprintfn "[pitch] %dx%d 輻輳失敗 (%A) — 広いピッチで再試行" px py e
+                        tryPitches rest
+        let pitches =
+            pitchSequence
+            |> List.skipWhile (fun p -> p <> startPitch)
+        tryPitches pitches
+
+    /// 論理ネットリスト → WireLevel グリッド。クロック方式の変換 (2 相化) はここで行い、
+    /// 呼び出し側の論理ネットリスト (NetlistSim / Testbench / golden が使うもの) は変えない。
+    let compileNetlistWL (opts: WlCompileOptions) (nl: Netlist) : Result<WlCompiled, CompileError> =
+        ensureMappable nl
+        |> Result.bind (prepareCircuit opts.Clocking)
+        |> Result.bind (fun circuit ->
+            match opts.Pitch with
+            | FixedPitch (px, py) -> placeAndRoute opts.Placement px py circuit
+            | AutoPitch -> placeAndRouteAutoPitch opts.Placement circuit)
+
+    /// yosys JSON → WireLevel グリッド (オプション指定版)。
+    let compileWLWithOptions (opts: WlCompileOptions) (src: string) : Result<WlCompiled, CompileError> =
+        frontend src
+        |> Result.bind (compileNetlistWL opts)
+
+    /// ホストが駆動するクロックピン (ClockDrive 用)。単相で DFF のない回路は None。
+    let clockPinsOf (c: WlCompiled) : ClockDrive.ClockPins option =
+        match c.Clocking with
+        | SingleEdgeClock clock ->
+            clock
+            |> Option.bind (fun clk -> Map.tryFind clk c.Pins)
+            |> Option.map ClockDrive.SingleEdgePins
+        | TwoPhaseClock tp ->
+            match Map.tryFind tp.ClockA c.Pins, Map.tryFind tp.ClockB c.Pins with
+            | Some a, Some b -> Some (ClockDrive.TwoPhasePins (a, b))
+            | _ -> None
+
+    let private asTuple (c: WlCompiled) : LGrid * WlPlaced list * Map<NetId, Coord> =
+        c.Grid, c.Placed, c.Pins
+
+    /// yosys JSON → WireLevel グリッド (ピッチ・配置戦略指定版、単相)。
+    let compileWLWithPitchAndStrategy
+        (strategy: GatePlacement.PlacementStrategy)
+        (pitchX: int)
+        (pitchY: int)
+        (src: string)
+        : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
+        compileWLWithOptions
+            { defaultCompileOptions with Placement = strategy; Pitch = FixedPitch (pitchX, pitchY) } src
+        |> Result.map asTuple
+
+    /// yosys JSON → WireLevel グリッド (ピッチ指定版、行優先配置、単相)。
     /// 戻り値: (グリッド, 配置, ピン座標)。出力ネットの観測は駆動ゲートのセルで行う。
     let compileWLWithPitch (pitchX: int) (pitchY: int) (src: string)
         : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
-        frontend src
-        |> Result.bind (fun nl ->
-            match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
-            | Some g -> Error (UnmappableGate g.Kind)
-            | None ->
-                let placed, pins = placeWLWithPitch pitchX pitchY nl
-                routeWL placed pins
-                |> Result.map (fun occ -> emitWL placed pins occ, placed, pins))
+        compileWLWithPitchAndStrategy GatePlacement.RowMajor pitchX pitchY src
 
-    /// yosys JSON → WireLevel グリッド。ピッチは回路規模から自動決定し、
+    /// yosys JSON → WireLevel グリッド (配置戦略指定版、単相)。ピッチは回路規模から自動決定し、
     /// 輻輳失敗時はより広いピッチで自動再試行する (pitchSequence)。
+    let compileWLWithStrategy (strategy: GatePlacement.PlacementStrategy) (src: string)
+        : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
+        compileWLWithOptions { defaultCompileOptions with Placement = strategy } src
+        |> Result.map asTuple
+
+    /// yosys JSON → WireLevel グリッド (行優先配置、単相)。ピッチは自動決定・自動拡大。
     let compileWL (src: string)
         : Result<LGrid * WlPlaced list * Map<NetId, Coord>, CompileError> =
-        frontend src
-        |> Result.bind (fun nl ->
-            match nl.Gates |> List.tryFind (fun g -> not (mappable g.Kind)) with
-            | Some g -> Error (UnmappableGate g.Kind)
-            | None ->
-                let startPitch = pitchFor nl.Gates.Length
-                let rec tryPitches (remaining: (int * int) list) =
-                    match remaining with
-                    | [] -> Error (RoutingCongestion (NetId 0))
-                    | (px, py) :: rest ->
-                        let placed, pins = placeWLWithPitch px py nl
-                        match routeWL placed pins with
-                        | Ok occ -> Ok (emitWL placed pins occ, placed, pins)
-                        | Error e ->
-                            match rest with
-                            | [] -> Error e
-                            | _ ->
-                                eprintfn "[pitch] %dx%d 輻輳失敗 (%A) — 広いピッチで再試行" px py e
-                                tryPitches rest
-                let pitches =
-                    pitchSequence
-                    |> List.skipWhile (fun p -> p <> startPitch)
-                tryPitches pitches)
+        compileWLWithStrategy GatePlacement.RowMajor src
 
     /// デバッグ用: LGrid を ASCII ダンプする (構造のみ、レベルは大文字/記号で表現しない)。
     let dumpAscii (g: LGrid) : string =

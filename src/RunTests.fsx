@@ -33,7 +33,9 @@ let si = run "WL SM83 Instr" (WwHdl.WlSm83InstrTest.runAll ())
 let ra = run "Routed Artifact" (WwHdl.RoutedArtifactTest.runAll ())
 let ns = run "Netlist Sim"     (WwHdl.NetlistSimTest.runAll ())
 let tb = run "Testbench"       (WwHdl.TestbenchTest.runAll ())
+let pl = run "WL Placement"    (WwHdl.WlPlacementTest.runAll ())
+let tp = run "WL Two-Phase"    (WwHdl.WlTwoPhaseTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk @ mc @ sm @ si @ ra @ ns @ tb
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk @ mc @ sm @ si @ ra @ ns @ tb @ pl @ tp
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length
