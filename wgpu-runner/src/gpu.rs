@@ -11,6 +11,8 @@ const WGSL_SHADER: &str = include_str!("wirelevel.wgsl");
 const TILE_SIZE: u32 = 16;
 /// 1 回の読み戻しで扱える最大世代数 (changeLog と GenParams テーブルの長さ)
 const MAX_GENS_PER_BATCH: u32 = 1024;
+/// 1 回の submit に積む世代数。小さいほど GPU が早く走り出し、CPU の記録と重なる
+const SUBMIT_CHUNK_GENS: u32 = 16;
 /// GenParams テーブルの 1 エントリの間隔 (dynamic offset の既定アラインメント)
 const GEN_PARAMS_STRIDE: u64 = 256;
 /// Dims uniform のバイト数 (5 × u32 を 16 バイト境界に切り上げ)
@@ -355,44 +357,63 @@ impl GpuSim {
         &self.cell_bufs[self.front]
     }
 
-    /// n 世代ぶんのコマンドを積む。世代 i は changeLog[i] に変化タイル数を足す。
-    /// Tiled ではバッチ前の準備 (stamp_base・args の初期化) を queue.write_buffer で行うので、
-    /// 呼び出し側は encoder を次に submit すること。
-    fn encode_gens(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) {
-        debug_assert!((1..=MAX_GENS_PER_BATCH).contains(&n));
-        if let Stepper::Tiled(t) = &mut self.stepper {
-            if t.stamp_base > STAMP_RESET_THRESHOLD {
-                encoder.clear_buffer(&t.stamps, 0, None);
-                t.stamp_base = 0;
-            }
-            self.queue.write_buffer(&self.dims_buf, 16, bytemuck::cast_slice(&[t.stamp_base]));
-            if t.needs_full_step {
-                // step_full は argsNext に積み、argsFree は触らない。全リストを空にしてから始める
-                for a in &t.args {
-                    self.queue.write_buffer(a, 0, bytemuck::cast_slice(&[ARGS_CONTROL_WORKGROUPS, 1, 1]));
-                }
+    /// バッチ (changeLog の slot 0..n を使う連続した世代) の準備。Tiled では stamp_base と、
+    /// 全タイル計算から始めるなら args の初期化を queue.write_buffer で行う。
+    /// write_buffer は次の submit の前に実行されるので、呼び出し側は encoder を次に submit すること。
+    fn begin_batch(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let Stepper::Tiled(t) = &mut self.stepper else { return };
+        if t.stamp_base > STAMP_RESET_THRESHOLD {
+            encoder.clear_buffer(&t.stamps, 0, None);
+            t.stamp_base = 0;
+        }
+        self.queue.write_buffer(&self.dims_buf, 16, bytemuck::cast_slice(&[t.stamp_base]));
+        if t.needs_full_step {
+            // step_full は argsNext に積み、argsFree は触らない。全リストを空にしてから始める
+            for a in &t.args {
+                self.queue.write_buffer(a, 0, bytemuck::cast_slice(&[ARGS_CONTROL_WORKGROUPS, 1, 1]));
             }
         }
+    }
+
+    /// バッチを閉じる (n = バッチの世代数)。次のバッチのスタンプが今回のものより大きくなるようにする
+    fn end_batch(&mut self, n: u32) {
+        if let Stepper::Tiled(t) = &mut self.stepper {
+            t.stamp_base += n;
+        }
+    }
+
+    /// バッチ内の世代 slots のコマンドを 1 つの compute pass に積む。世代 slot は changeLog[slot] に
+    /// 変化タイル数を足す。
+    fn encode_gens(&mut self, encoder: &mut wgpu::CommandEncoder, slots: std::ops::Range<u32>) {
+        debug_assert!(slots.end <= MAX_GENS_PER_BATCH);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("step"),
             timestamp_writes: None,
         });
-        for slot in 0..n {
+        if let Stepper::Dense { step_dense } = &self.stepper {
+            pass.set_pipeline(step_dense);
+        }
+        // Tiled で今 pass に設定しているパイプライン (step_list なら true)
+        let mut list_pipeline_set = false;
+        for slot in slots {
             let offset = (slot as u64 * GEN_PARAMS_STRIDE) as u32;
             pass.set_bind_group(0, &self.cell_bind_groups[self.front], &[offset]);
             match &mut self.stepper {
-                Stepper::Dense { step_dense } => {
-                    pass.set_pipeline(step_dense);
+                Stepper::Dense { .. } => {
                     pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
                 }
                 Stepper::Tiled(t) => {
                     pass.set_bind_group(1, &t.list_bind_groups[t.rot], &[]);
                     if t.needs_full_step {
                         pass.set_pipeline(&t.step_full);
+                        list_pipeline_set = false;
                         pass.dispatch_workgroups(self.tiles_x, self.tiles_y, 1);
                         t.needs_full_step = false;
                     } else {
-                        pass.set_pipeline(&t.step_list);
+                        if !list_pipeline_set {
+                            pass.set_pipeline(&t.step_list);
+                            list_pipeline_set = true;
+                        }
                         pass.dispatch_workgroups_indirect(&t.args[t.rot], 0);
                     }
                     t.rot = (t.rot + 1) % LIST_ROTATION;
@@ -400,20 +421,43 @@ impl GpuSim {
             }
             self.front = 1 - self.front;
         }
-        if let Stepper::Tiled(t) = &mut self.stepper {
-            t.stamp_base += n;
+    }
+
+    /// n 世代 (1 バッチ) を submit_chunk 世代ずつ submit する。GPU が前の塊を実行している間に
+    /// CPU が次の塊を記録するので、記録と実行が重なる。
+    /// first は最初の encoder への追加 (changeLog のクリア等)、last は最後の encoder への追加 (読み戻しのコピー等)
+    fn submit_batch(&mut self, n: u32,
+                    first: impl FnOnce(&mut wgpu::CommandEncoder),
+                    last: impl FnOnce(&mut wgpu::CommandEncoder)) {
+        debug_assert!((1..=MAX_GENS_PER_BATCH).contains(&n));
+        let mut first = Some(first);
+        let mut last = Some(last);
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
+        if let Some(f) = first.take() { f(&mut encoder); }
+        self.begin_batch(&mut encoder);
+        let mut slot = 0;
+        loop {
+            let end = (slot + SUBMIT_CHUNK_GENS).min(n);
+            self.encode_gens(&mut encoder, slot..end);
+            slot = end;
+            if slot == n {
+                if let Some(f) = last.take() { f(&mut encoder); }
+                self.queue.submit([encoder.finish()]);
+                break;
+            }
+            self.queue.submit([encoder.finish()]);
+            encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
         }
+        self.end_batch(n);
     }
 
     /// steps 世代進める (変化ログは読まない)。
     pub fn run(&mut self, steps: u32) {
-        let per_submit = self.batch.min(MAX_GENS_PER_BATCH);
+        let per_batch = self.batch.min(MAX_GENS_PER_BATCH);
         let mut remaining = steps;
         while remaining > 0 {
-            let n = remaining.min(per_submit);
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
-            self.encode_gens(&mut encoder, n);
-            self.queue.submit([encoder.finish()]);
+            let n = remaining.min(per_batch);
+            self.submit_batch(n, |_| {}, |_| {});
             remaining -= n;
         }
     }
@@ -422,11 +466,11 @@ impl GpuSim {
     fn run_logged(&mut self, n: u32) -> Result<ChangeLog> {
         anyhow::ensure!((1..=MAX_GENS_PER_BATCH).contains(&n), "run_logged: n={n} out of 1..={MAX_GENS_PER_BATCH}");
         let log_bytes = 4 * n as u64;
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim_logged") });
-        encoder.clear_buffer(&self.change_log, 0, Some(log_bytes));
-        self.encode_gens(&mut encoder, n);
-        encoder.copy_buffer_to_buffer(&self.change_log, 0, &self.change_log_read, 0, log_bytes);
-        self.queue.submit([encoder.finish()]);
+        let change_log = self.change_log.clone();
+        let change_log_read = self.change_log_read.clone();
+        self.submit_batch(n,
+            |e| e.clear_buffer(&change_log, 0, Some(log_bytes)),
+            |e| e.copy_buffer_to_buffer(&change_log, 0, &change_log_read, 0, log_bytes));
         map_read(&self.device, &self.change_log_read, log_bytes, |bytes| bytemuck::cast_slice::<u8, u32>(bytes).to_vec())
     }
 
