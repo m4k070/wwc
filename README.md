@@ -4,7 +4,8 @@
 
 > **ステータス (2026-09-28): SM83 CPU フルセット (sm83_full、通常命令 (STOP を除く) + CB prefix 256 + 割込み、
 > 組合せ 10,859 + DFF 181) を WireLevel CA 上で配線完走。2 相クロックのピンを各 16 本に分け (issue #7 (b))、
-> クロックの最大到達を 1,478 / 1,494 → 284 / 282 世代、34 本の GPU 照合を 195 → 152 秒にした。
+> さらにピッチを 20x14 → 14x12 に詰めて (残課題 1 (d))、クロックの最大到達を 1,478 / 1,494 → 186 / 196 世代、
+> 34 本の GPU 照合を 195 → 113 秒にした。
 > RTL の正しさは blargg `cpu_instrs` 個別版 11/11 PASS、RTL ≡ CA は GPU 全周期照合 37/37 で確認済み。
 > テスト F# 421/421 / cargo test 49/49 / GPU golden 24/24 / memory-test.sh 5/5 通過。**
 
@@ -215,7 +216,7 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 |------|------|------|
 | sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
 | sm83_subset | 3,553 | ✅ 配線完走 (20x14、行優先、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
-| sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (20x14、タイミング駆動アニーリング配置 + 2 相クロック + クロックピン 16 本、16.3 分、rip-up 0、2026-09-28)。全命令セット (通常命令は STOP を除く + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
+| sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (14x12、タイミング駆動アニーリング配置 + 2 相クロック + クロックピン 16 本、10.0 分、rip-up 0、2026-09-28)。全命令セット (通常命令は STOP を除く + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
 
 ### コンパイル
 
@@ -230,7 +231,7 @@ nohup dotnet fsi src/ExportRouted.fsx sm83_full --pitch 20 14 --place anneal --c
 dotnet fsi src/LoadRouted.fsx sm83_subset
 ```
 
-- compileWL はピッチを回路規模から自動決定し、輻輳失敗時は自動拡大する (16x12 → 20x14)。`--pitch X Y` で固定も可能
+- compileWL はピッチを回路規模から自動決定し、輻輳失敗時は自動拡大する (12x10 → 16x12 → 20x14 → 24x16)。`--pitch X Y` で固定も可能。sm83_full はタイミング駆動配置で 14x12 が最小 (12x10 は輻輳失敗)
 - 配置は既定で行優先 (`--place rowmajor`)。`--place anneal` はアーク距離 (駆動元→受け手のマンハッタン距離の総和)
   を最小化するシミュレーテッドアニーリング配置で、sm83_full のような密な回路では配線完走率を大きく上げる
   (詳細は TODO.md 「経緯」表)
