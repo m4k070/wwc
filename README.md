@@ -2,10 +2,11 @@
 
 任意の HDL（Verilog 等）で記述した論理回路を、セルオートマトン上で動作するパターンへコンパイルする実験的プロジェクト。F# 製。
 
-> **ステータス (2026-09-27, PR #5): SM83 CPU フルセット (sm83_full、通常命令 (STOP を除く) + CB prefix 256 + 割込み、
-> 組合せ 10,859 + DFF 181) を WireLevel CA 上で配線完走。RTL の正しさは blargg `cpu_instrs` 個別版 11/11 PASS、
-> RTL ≡ CA は GPU 全周期照合 37/37 で確認済み。テスト F# 287/287 / cargo test 44/44 / GPU golden 24/24 /
-> memory-test.sh 5/5 通過。**
+> **ステータス (2026-09-28): SM83 CPU フルセット (sm83_full、通常命令 (STOP を除く) + CB prefix 256 + 割込み、
+> 組合せ 10,859 + DFF 181) を WireLevel CA 上で配線完走。2 相クロックのピンを各 16 本に分け (issue #7 (b))、
+> クロックの最大到達を 1,478 / 1,494 → 284 / 282 世代、34 本の GPU 照合を 195 → 152 秒にした。
+> RTL の正しさは blargg `cpu_instrs` 個別版 11/11 PASS、RTL ≡ CA は GPU 全周期照合 37/37 で確認済み。
+> テスト F# 421/421 / cargo test 49/49 / GPU golden 24/24 / memory-test.sh 5/5 通過。**
 
 ---
 
@@ -137,10 +138,10 @@ match compileWL defaultLib json with
 
 ```bash
 dotnet build src/WwHdl.fsproj                    # build（テスト前に必須）
-dotnet fsi src/RunTests.fsx                       # F# テスト (287/287)
+dotnet fsi src/RunTests.fsx                       # F# テスト (421/421)
 web/run-test.sh                                   # WebGPU golden tests (Playwright/SwiftShader)
 wgpu-runner/run-tests.sh                          # GPU golden tests (Rust + wgpu, RTX 3060) — 24/24
-cd wgpu-runner && cargo test                      # Rust 側ユニットテスト — 44/44
+cd wgpu-runner && cargo test                      # Rust 側ユニットテスト — 49/49
 wgpu-runner/memory-test.sh [program.json ...]     # メモリバス CPU の golden 照合 + 検証器の検証 — 5/5
 dotnet fsi src/DiffTestGbfs.fsx [--variants N]    # sm83_full ネットリストと ../gbfs の CPU の全命令差分テスト (要 gbfs.Lib Release ビルド)
 dotnet build src/WwHdl.fsproj -c Release && dotnet fsi src/CoSimGbfs.fsx --lockstep <rom.gb>
@@ -174,7 +175,7 @@ dotnet build src/WwHdl.fsproj -c Release && dotnet fsi src/CoSimGbfs.fsx --locks
 
 | パターン | 用途 | 例 |
 |---------|------|-----|
-| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 287/287）, `RunWl.fsx`, `RunBackfire.fsx` |
+| `src/Run*.fsx` | 実行・一括処理 | `RunTests.fsx`（全テスト 421/421）, `RunWl.fsx`, `RunBackfire.fsx` |
 | `src/Export*.fsx` | グリッド/バイナリ出力 | `ExportSm83Multi.fsx`, `ExportRLE.fsx` |
 | `src/Test*.fsx` / `Test*.fsx` | 個別機能の検証 | `TestMincpu.fsx`, `src/LoadRouted.fsx` |
 | `test_*.fsx` / `debug_*.fsx` | 一時的な実験・デバッグ | `test_congestion.fsx`, `debug_netid37.fsx` |
@@ -214,7 +215,7 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 |------|------|------|
 | sm83_min | 380 | 4 命令 byte-exact 検証済み (NOP/LD_A/LD_B/ADD) |
 | sm83_subset | 3,553 | ✅ 配線完走 (20x14、行優先、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
-| sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (20x14、アニーリング配置 + 2 相クロック、16.1 分、rip-up 0、2026-09-27)。全命令セット (通常命令は STOP を除く + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
+| sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (20x14、タイミング駆動アニーリング配置 + 2 相クロック + クロックピン 16 本、16.3 分、rip-up 0、2026-09-28)。全命令セット (通常命令は STOP を除く + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
 
 ### コンパイル
 
@@ -347,10 +348,10 @@ DFF は `settle` の 1 世代目で立ち上がりエッジを検知し、その
 | WlPlacementTest | ゲート配置のシミュレーテッドアニーリング最適化 (`GatePlacement.fs`) | ✅ |
 | WlTwoPhaseTest (WL-2PH) | 2 相ノンオーバーラップクロック (DFF 分割・skew 耐性・sm83_min 検証) | 38/38 ✅ |
 | GPU Golden (`wgpu-runner/run-tests.sh`) | byte-exact 一致 | 24/24 ✅ |
-| cargo test (`wgpu-runner`) | Rust 側ユニットテスト | 44/44 ✅ |
+| cargo test (`wgpu-runner`) | Rust 側ユニットテスト | 49/49 ✅ |
 | `wgpu-runner/memory-test.sh` | メモリバス golden 照合 + 検証器の自己検証 | 5/5 ✅ |
 
-**合計 (F#, `dotnet fsi src/RunTests.fsx`)**: **287/287** 通過 (2026-09-28 実測。内訳の正確な数はコマンド出力を参照)。
+**合計 (F#, `dotnet fsi src/RunTests.fsx`)**: **421/421** 通過 (2026-09-28 実測。内訳の正確な数はコマンド出力を参照)。
 上記の個別カウントを持つ行以外は複数テストを含むモジュールで、正確な内訳は `RunTests.fsx` の出力を参照のこと。
 
 ## ライセンス
