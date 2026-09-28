@@ -161,19 +161,21 @@ let analyzeAndPrint (opts: Options) (grid: LGrid) (meta: RoutedMeta) : int =
         1
     | TwoPhaseClocking (_, clkA, clkB) ->
         let dg = toDense grid
-        match indexOf dg clkA, indexOf dg clkB with
-        | None, _ | _, None ->
-            eprintfn "ERROR: clk_a (%d,%d) / clk_b (%d,%d) がグリッド外" clkA.X clkA.Y clkB.X clkB.Y
+        let fmtCoords (cs: Coord list) = cs |> List.map (fun c -> sprintf "(%d,%d)" c.X c.Y) |> String.concat " "
+        let ai = clkA |> List.choose (indexOf dg)
+        let bi = clkB |> List.choose (indexOf dg)
+        if ai.Length <> clkA.Length || bi.Length <> clkB.Length || ai.IsEmpty || bi.IsEmpty then
+            eprintfn "ERROR: clk_a %s / clk_b %s のいずれかがグリッド外" (fmtCoords clkA) (fmtCoords clkB)
             1
-        | Some ai, Some bi ->
+        else
             let sw = Diagnostics.Stopwatch.StartNew ()
             match analyzeTwoPhaseTiming dg meta ai bi with
             | Error e ->
                 eprintfn "ERROR: %s" (describeTimingError e)
                 1
             | Ok reports ->
-                printfn "%s: grid %dx%d, clk_a (%d,%d) / clk_b (%d,%d), 解析 %.1f 秒"
-                    meta.Circuit dg.Width dg.Height clkA.X clkA.Y clkB.X clkB.Y sw.Elapsed.TotalSeconds
+                printfn "%s: grid %dx%d, clk_a[%d] %s / clk_b[%d] %s, 解析 %.1f 秒"
+                    meta.Circuit dg.Width dg.Height clkA.Length (fmtCoords clkA) clkB.Length (fmtCoords clkB) sw.Elapsed.TotalSeconds
                 let names = outputNames meta
                 // ゲート単位分解 (printWindow 内) は buildTopoOrder / buildDffDataNodes を
                 // 使い回す。analyzeTwoPhaseTiming が既に成功しているので buildTopoOrder は

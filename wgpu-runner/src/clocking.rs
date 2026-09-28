@@ -102,8 +102,10 @@ pub const LABEL_PHASE_B: &str = "phaseB";
 pub enum ClockPins {
     /// 単相: inputs[clockPort] (1 ビット)
     SingleEdge { clk: Xy },
-    /// 2 相: マスター (clkA) / スレーブ (clkB)
-    TwoPhase { clk_a: Xy, clk_b: Xy },
+    /// 2 相: マスター (clkA) / スレーブ (clkB)。区画ごとに 1 本 (issue #7 (b)。通常は各 1 本)。
+    /// 同じ相のピンは常に同じ値を書く。全ピンへの write_pin を 1 回の settle の前にまとめて
+    /// 行う (write_all_* ヘルパー) ので、「同じ世代」で駆動したことになる
+    TwoPhase { clk_a: Vec<Xy>, clk_b: Vec<Xy> },
 }
 
 /// 単相の meta でクロックとして駆動する入力ポート名 (RTL の慣習。2 相では meta の clockPort が持つ)
@@ -119,7 +121,7 @@ impl ClockPins {
                     "clock input '{SINGLE_EDGE_CLOCK_PORT}' must be 1 bit (got {})", clk.len());
                 Ok(ClockPins::SingleEdge { clk: clk[0] })
             }
-            Clocking::TwoPhase { clk_a, clk_b, .. } => Ok(ClockPins::TwoPhase { clk_a: *clk_a, clk_b: *clk_b }),
+            Clocking::TwoPhase { clk_a, clk_b, .. } => Ok(ClockPins::TwoPhase { clk_a: clk_a.clone(), clk_b: clk_b.clone() }),
         }
     }
 
@@ -137,8 +139,8 @@ impl ClockPins {
         match self {
             ClockPins::SingleEdge { clk } => driver.write_pin(*clk, false),
             ClockPins::TwoPhase { clk_a, clk_b } => {
-                driver.write_pin(*clk_a, false);
-                driver.write_pin(*clk_b, false);
+                write_all(driver, clk_a, false);
+                write_all(driver, clk_b, false);
             }
         }
         timed(driver, label)
@@ -165,18 +167,26 @@ impl ClockPins {
             ClockPins::TwoPhase { clk_a, clk_b } => {
                 // 手順 5': マスターへの立ち上がりと、前周期の clkB=1 を下ろすのを同じ収束にまとめる。
                 // スレーブは立ち下がりを見ないので影響を受けず、マスターの D はスレーブ Q の
-                // 組合せ関数でこの収束の間は動かないので安全 (すでに clkB=0 なら単なる no-op 書込)
-                driver.write_pin(*clk_a, true);
-                driver.write_pin(*clk_b, false);
+                // 組合せ関数でこの収束の間は動かないので安全 (すでに clkB=0 なら単なる no-op 書込)。
+                // 区画ごとの全ピンを、settle の前にまとめて書く (= 同じ世代で同じ値になる)
+                write_all(driver, clk_a, true);
+                write_all(driver, clk_b, false);
                 let phase_a = timed(driver, LABEL_PHASE_A)?;
                 // 手順 6: clkA を下ろすのと clkB を上げるのを同じ収束の前に書く
                 // (マスターは立ち下がりを見ないので動かず、スレーブがマスター Q を取り込む)
-                driver.write_pin(*clk_a, false);
-                driver.write_pin(*clk_b, true);
+                write_all(driver, clk_a, false);
+                write_all(driver, clk_b, true);
                 let phase_b = timed(driver, LABEL_PHASE_B)?;
                 Ok(vec![phase_a, phase_b])
             }
         }
+    }
+}
+
+/// 区画ごとの全ピンに同じ値を書く (settle の前にまとめて呼べば「同じ世代」に反映される)。
+fn write_all<D: CaDriver>(driver: &mut D, pins: &[Xy], level: bool) {
+    for p in pins {
+        driver.write_pin(*p, level);
     }
 }
 
@@ -249,7 +259,7 @@ mod tests {
 
     #[test]
     fn two_phase_latch_settles_between_phases_and_swaps_clocks_together() {
-        let clock = ClockPins::TwoPhase { clk_a: CLK_A, clk_b: CLK_B };
+        let clock = ClockPins::TwoPhase { clk_a: vec![CLK_A], clk_b: vec![CLK_B] };
         let mut d = driver();
         clock.settle_idle(&mut d, LABEL_SETUP).unwrap();
         let latch = clock.latch(&mut d).unwrap();
@@ -268,7 +278,7 @@ mod tests {
     fn two_phase_latch_folds_previous_clk_b_fall_into_next_rise() {
         // 定常状態: 前周期の latch が clkA=0, clkB=1 で終わったところから、次の latch を直接呼ぶ
         // (settle_idle を挟まない)。phaseA の書込に clkB=false が含まれ、立ち下がりを畳み込む。
-        let clock = ClockPins::TwoPhase { clk_a: CLK_A, clk_b: CLK_B };
+        let clock = ClockPins::TwoPhase { clk_a: vec![CLK_A], clk_b: vec![CLK_B] };
         let mut d = driver();
         d.write_pin(CLK_B, true); // 前周期の終わり (clkA=0, clkB=1) を模す
         d.events.clear();
@@ -283,10 +293,33 @@ mod tests {
 
     #[test]
     fn two_phase_settle_after_data_does_not_touch_clocks() {
-        let clock = ClockPins::TwoPhase { clk_a: CLK_A, clk_b: CLK_B };
+        let clock = ClockPins::TwoPhase { clk_a: vec![CLK_A], clk_b: vec![CLK_B] };
         let mut d = driver();
         clock.settle_after_data(&mut d).unwrap();
         assert_eq!(d.events, vec![Settle]);
+    }
+
+    #[test]
+    fn two_phase_multi_pin_latch_writes_all_pins_of_a_phase_before_settling() {
+        // issue #7 (b): クロックピンを区画ごとに複数本に分けても、同じ相の全ピンが
+        // 1 回の settle の前にまとめて書かれる (= 同じ世代で同じ値になる)。
+        let clk_a = vec![Xy { x: 1, y: 0 }, Xy { x: 1, y: 5 }, Xy { x: 1, y: 9 }];
+        let clk_b = vec![Xy { x: 2, y: 0 }, Xy { x: 2, y: 5 }];
+        let clock = ClockPins::TwoPhase { clk_a: clk_a.clone(), clk_b: clk_b.clone() };
+        let mut d = RecordingDriver::new(3, vec![pin_cell(false); 3 * 10]);
+        let latch = clock.latch(&mut d).unwrap();
+        // phaseA: 全 clk_a を true, 全 clk_b を false に書いてから 1 回だけ settle
+        let mut expected = Vec::new();
+        expected.extend(clk_a.iter().map(|p| Write(*p, true)));
+        expected.extend(clk_b.iter().map(|p| Write(*p, false)));
+        expected.push(Settle);
+        // phaseB: 全 clk_a を false, 全 clk_b を true に書いてから 1 回だけ settle
+        expected.extend(clk_a.iter().map(|p| Write(*p, false)));
+        expected.extend(clk_b.iter().map(|p| Write(*p, true)));
+        expected.push(Settle);
+        assert_eq!(d.events, expected);
+        let labels: Vec<&str> = latch.iter().map(|p| p.label).collect();
+        assert_eq!(labels, [LABEL_PHASE_A, LABEL_PHASE_B]);
     }
 
     #[test]

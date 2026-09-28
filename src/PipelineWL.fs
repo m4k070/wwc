@@ -196,15 +196,173 @@ module PipelineWL =
         let kx = gapIndex cx grid.PitchX grid.Origin.X
         let ky = gapIndex cy grid.PitchY grid.Origin.Y
         let clampTo (hi: int) (k: int) = max 0 (min (hi - 1) k)
-        // 半径 SearchRadius 個分の隙間を候補にする (中心が塞がっていても近くに置ける)
-        let searchRadius = 3
-        [ for dx in -searchRadius .. searchRadius do
-            for dy in -searchRadius .. searchRadius do
-                yield { X = gapAt (clampTo grid.Columns (kx + dx)) grid.PitchX grid.Origin.X
-                        Y = gapAt (clampTo grid.Rows (ky + dy)) grid.PitchY grid.Origin.Y } ]
-        |> List.distinct
-        |> List.filter (fun c -> not (Set.contains c taken))
+        // 半径 radius 個分の隙間を候補にする (中心が塞がっていても近くに置ける)。クロックピン
+        // 分割 (issue #7 (b)) で 1 つの格子に大量のピンが競合すると、既定の半径では taken を
+        // 避けた候補が尽きることがある — 見つかるまで半径を広げる (グリッド全体を覆えば必ず見つかる。
+        // taken は他のピンの座標だけなので、格子の隙間の総数 Columns*Rows より少ない)
+        let candidatesAt (radius: int) =
+            [ for dx in -radius .. radius do
+                for dy in -radius .. radius do
+                    yield { X = gapAt (clampTo grid.Columns (kx + dx)) grid.PitchX grid.Origin.X
+                            Y = gapAt (clampTo grid.Rows (ky + dy)) grid.PitchY grid.Origin.Y } ]
+            |> List.distinct
+            |> List.filter (fun c -> not (Set.contains c taken))
+        let maxRadius = max grid.Columns grid.Rows
+        let rec search (radius: int) =
+            match candidatesAt radius with
+            | [] when radius < maxRadius -> search (radius * 2 + 1)
+            | [] -> candidatesAt maxRadius   // 最後の手段 (グリッド全域。taken で全滅なら空のまま例外にする)
+            | found -> found
+        search 3
         |> List.minBy (fun c -> maxDist c, abs (float c.X - cx) + abs (float c.Y - cy))
+
+    // --- クロックピン分割 (issue #7 (b)) ---------------------------------------
+    //
+    // 2 相の 1 クロックネットを k 個の区画に分け、区画ごとに独立したピン + 配線木を作る。
+    // 狙いは「各ピンから担当端子群への最大 L1 距離」の最大値 (= 配線後の最大到達時間の
+    // 下限) を下げること (k-center 問題)。論理ネットリスト・NetlistSim・golden には
+    // 触れない — ここで作る区画ネットは WL の配置配線専用の新しい NetId であり、
+    // ホストは全区画のピンを毎回「同じ値・同じ世代」で書く (ClockDrive.setPins)。
+
+    let private l1Dist (a: Coord) (b: Coord) = abs (a.X - b.X) + abs (a.Y - b.Y)
+
+    /// Gonzalez の貪欲法 (2-近似) で k 個の中心 (points の要素の添字) を選ぶ。
+    /// 先頭点をシードとし、以降「現在の中心群への最短距離が最大」の点を追加する。
+    /// 同点は points 内で先に現れるほう (添字が小さいほう) を選ぶので決定的。
+    let private gonzalezSeeds (k: int) (points: Coord[]) : int[] =
+        let seeds = ResizeArray<int> ()
+        seeds.Add 0
+        while seeds.Count < k do
+            let distToSeeds (i: int) = seeds |> Seq.map (fun s -> l1Dist points.[i] points.[s]) |> Seq.min
+            let next =
+                [ 0 .. points.Length - 1 ]
+                |> List.filter (fun i -> not (seeds.Contains i))
+                |> List.maxBy (fun i -> distToSeeds i, -i)
+            seeds.Add next
+        seeds.ToArray ()
+
+    /// 各点を最近傍の中心 (連続座標、L1 距離) へ割り当てる。同点は添字が小さい中心を選ぶ。
+    let private assignNearest (centers: (float * float)[]) (points: Coord[]) : int[] =
+        points |> Array.map (fun p ->
+            centers
+            |> Array.mapi (fun i (cx, cy) -> i, abs (float p.X - cx) + abs (float p.Y - cy))
+            |> Array.minBy (fun (i, d) -> d, i)
+            |> fst)
+
+    /// 空クラスタが出ないようにする: 空クラスタがあれば、点数が最も多いクラスタの
+    /// 重心から最も遠い点を 1 個譲る。points.Length >= k なら必ず解消できる
+    /// (鳩の巣原理: 空でないクラスタが 1 個でもあれば、そこに >=2 点あるクラスタが必ずある)。
+    let private fillEmptyClusters (k: int) (points: Coord[]) (labels: int[]) : int[] =
+        let labels = Array.copy labels
+        let sizeOf c = labels |> Array.filter ((=) c) |> Array.length
+        let mutable guard = 0
+        let mutable hasEmpty = [ 0 .. k - 1 ] |> List.exists (fun c -> sizeOf c = 0)
+        while hasEmpty && guard < k do
+            guard <- guard + 1
+            for c in 0 .. k - 1 do
+                if sizeOf c = 0 then
+                    match [ 0 .. k - 1 ] |> List.filter (fun d -> sizeOf d > 1) |> List.sortByDescending sizeOf with
+                    | donor :: _ ->
+                        let members = [ 0 .. points.Length - 1 ] |> List.filter (fun i -> labels.[i] = donor)
+                        let cx = members |> List.averageBy (fun i -> float points.[i].X)
+                        let cy = members |> List.averageBy (fun i -> float points.[i].Y)
+                        let victim =
+                            members |> List.maxBy (fun i -> abs (float points.[i].X - cx) + abs (float points.[i].Y - cy), -i)
+                        labels.[victim] <- c
+                    | [] -> ()
+            hasEmpty <- [ 0 .. k - 1 ] |> List.exists (fun c -> sizeOf c = 0)
+        labels
+
+    /// points を k 個の非空クラスタに分ける (決定的な k-center クラスタリング)。
+    /// Gonzalez 貪欲法で初期中心を選び、L1 ミニマックス中心 (minimaxCenter) への
+    /// 再割当てを最大 5 回繰り返す (Lloyd 風の改善。収束したら早期終了)。
+    /// k が points の数を超える場合は points.Length に丸める。
+    let clusterKCenter (k: int) (points: Coord[]) : int[] =
+        if points.Length = 0 then [||]
+        else
+            let k = max 1 (min k points.Length)
+            if k = 1 then Array.create points.Length 0
+            else
+                let seedIdx = gonzalezSeeds k points
+                let initCenters = seedIdx |> Array.map (fun i -> float points.[i].X, float points.[i].Y)
+                let labels0 = assignNearest initCenters points |> fillEmptyClusters k points
+                let rec refine (budget: int) (centers: (float * float)[]) (labels: int[]) =
+                    if budget <= 0 then labels
+                    else
+                        let newCenters =
+                            Array.init k (fun c ->
+                                match [ for i in 0 .. points.Length - 1 do if labels.[i] = c then yield points.[i] ] with
+                                | [] -> centers.[c]
+                                | members -> fst (minimaxCenter members))
+                        let newLabels = assignNearest newCenters points |> fillEmptyClusters k points
+                        if newLabels = labels then labels else refine (budget - 1) newCenters newLabels
+                refine 5 initCenters labels0
+
+    /// 1 本のクロックネットを k 個の区画ネットに分ける (WL 配置配線専用、純粋関数)。
+    /// 対象 DFF (Gate.Inputs の先頭が clock の DFF) を、その CLK 端子座標
+    /// (clockPinCoords と同じ、ゲート南隣) にもとづき clusterKCenter で分け、各 DFF の
+    /// Gate.Inputs の先頭を区画ネット (nextNetId から昇順に採番) へ置き換える。
+    /// 対象 DFF が 2 未満、または k<=1 なら何もしない (区画は [clock] のまま)。
+    let private splitOneClock
+        (k: int)
+        (clock: NetId)
+        (nextNetId: int)
+        (placed: WlPlaced list)
+        : WlPlaced list * NetId list =
+        let targets =
+            placed
+            |> List.indexed
+            |> List.filter (fun (_, p) -> p.Gate.Kind = Dff && List.tryHead p.Gate.Inputs = Some clock)
+        if k <= 1 || targets.Length < 2 then
+            placed, [ clock ]
+        else
+            let points = targets |> List.map (fun (_, p) -> toward p.Coord S) |> Array.ofList
+            let labels = clusterKCenter k points
+            let kActual = (labels |> Array.max) + 1
+            let subNets = [ for i in 0 .. kActual - 1 -> NetId (nextNetId + i) ]
+            let subNetOfGate =
+                targets |> List.mapi (fun idx (gateIdx, _) -> gateIdx, subNets.[labels.[idx]]) |> Map.ofList
+            let placed' =
+                placed |> List.mapi (fun i p ->
+                    match Map.tryFind i subNetOfGate with
+                    | Some subNet -> { p with Gate = { p.Gate with Inputs = subNet :: List.tail p.Gate.Inputs } }
+                    | None -> p)
+            placed', subNets
+
+    /// nl 中で使われている最大の NetId (新ネットの採番の基点。TwoPhaseClock.maxNetId と同じ考え方)。
+    let private maxNetIdOfNetlist (nl: Netlist) : int =
+        [ yield! nl.PrimaryInputs
+          yield! nl.PrimaryOutputs
+          for g in nl.Gates do
+              yield g.Output
+              yield! g.Inputs ]
+        |> List.map (fun (NetId n) -> n)
+        |> List.fold max 0
+
+    /// クロックネット (元の ClockA/ClockB など) を、必要なら k 区画に分割する。
+    /// 戻り値: 分割後の placed と、「元のクロックネット → 区画ネット列 (区画順)」。
+    /// k<=1 または単相なら分割せず、各クロックは自分自身だけの 1 要素リストになる
+    /// (既存の挙動と完全に一致する)。
+    let private splitClockNets
+        (clockPins: int)
+        (nl: Netlist)
+        (clocking: CircuitClocking)
+        (placed: WlPlaced list)
+        : WlPlaced list * Map<NetId, NetId list> =
+        let baseClockNets = clockNetsOf clocking
+        match clocking with
+        | TwoPhaseClock _ when clockPins > 1 && not (List.isEmpty baseClockNets) ->
+            let mutable next = maxNetIdOfNetlist nl + 1
+            let mutable acc = placed
+            let mutable groups = []
+            for clk in baseClockNets do
+                let placed', subNets = splitOneClock clockPins clk next acc
+                acc <- placed'
+                next <- next + subNets.Length
+                groups <- (clk, subNets) :: groups
+            acc, Map.ofList (List.rev groups)
+        | _ ->
+            placed, (baseClockNets |> List.map (fun c -> c, [ c ]) |> Map.ofList)
 
     /// クロックピンの座標。単相は各クロックのピンを、そのクロックが駆動する DFF 群の重心に置く:
     /// 左端からだと DFF までの距離差がそのままクロックスキューになるため (sm83_full の行優先配置で
@@ -216,6 +374,7 @@ module PipelineWL =
     let private clockPinCoords
         (grid: GatePlacement.SlotGrid)
         (placed: WlPlaced list)
+        (clockNets: NetId list)
         (clocking: CircuitClocking)
         : (NetId * Coord) list =
         let dffs = placed |> List.filter (fun p -> p.Gate.Kind = Dff)
@@ -226,7 +385,7 @@ module PipelineWL =
             | TwoPhaseClock _ -> dffs |> List.filter (fun p -> List.tryHead p.Gate.Inputs = Some clk)
         let snap (v: int) (pitch: int) (origin: int) =
             origin + ((v - origin) / pitch) * pitch + pitch / 2
-        clockNetsOf clocking
+        clockNets
         |> List.fold (fun (acc: (NetId * Coord) list) clk ->
             match drivenBy clk with
             | [] -> acc
@@ -274,32 +433,48 @@ module PipelineWL =
                     Map.add netId (minimaxGapPin grid terminals taken) acc)
                 basePins
 
-    /// 割り当て (ゲート → スロット) から配置とピン座標を作る。
+    /// 割り当て (ゲート → スロット) から配置とピン座標を作る。clockPins (k) は 2 相のときだけ
+    /// 意味を持つ (issue #7 (b))。1 なら分割せず、既存の挙動と完全に一致する。
+    /// 戻り値の第 3 要素は「元のクロックネット → 区画ピン座標列 (区画順)」(meta / ClockDrive 用)。
     let private placeFromAssignment
         (grid: GatePlacement.SlotGrid)
         (circuit: PreparedCircuit)
         (assignment: GatePlacement.Assignment)
-        : WlPlaced list * Map<NetId, Coord> =
+        (clockPins: int)
+        : WlPlaced list * Map<NetId, Coord> * Map<NetId, Coord list> =
         let nl = circuit.Netlist
-        let placed =
+        let placed0 =
             nl.Gates |> List.mapi (fun i g ->
                 { Gate = g
                   Coord = GatePlacement.slotCoord grid assignment.[i]
                   Dir = E })
+        let placed, splitOf = splitClockNets clockPins nl circuit.Clocking placed0
+        let baseClockNets = clockNetsOf circuit.Clocking
+        let expandedClockNets = splitOf |> Map.toList |> List.collect snd
         let withClockPins =
-            clockPinCoords grid placed circuit.Clocking
+            clockPinCoords grid placed expandedClockNets circuit.Clocking
             |> List.fold (fun acc (clk, c) -> Map.add clk c acc) (leftEdgePins grid.PitchY nl)
+        // 分割した元のクロックネット (もう配線されない) を pins から落とす。leftEdgePins が
+        // 種として置いた左端の座標がそのまま残ると、意味のない Pin セルがグリッドに残るため。
+        let withClockPins =
+            baseClockNets
+            |> List.fold (fun acc c -> if List.contains c expandedClockNets then acc else Map.remove c acc) withClockPins
         let pins =
             nonClockInputPinCoords grid placed circuit.Clocking nl withClockPins
-        placed, pins
+        let clockPinGroups =
+            splitOf |> Map.map (fun _ subNets -> subNets |> List.choose (fun n -> Map.tryFind n pins))
+        placed, pins, clockPinGroups
 
     /// 配置結果。Annealing は Annealed / TimingDriven 戦略のときだけ Some (総アーク距離の
     /// アニーリングの前後コスト)。TimingDriven は TimingDriven に焼き直しの記録が入る。
+    /// ClockPinGroups: 元のクロックネット (単相はクロック自身、2 相は ClockA/ClockB) →
+    /// 区画ピン座標列 (issue #7 (b)。k=1 なら要素 1 個)。
     type WlPlacement =
         { Placed: WlPlaced list
           Pins: Map<NetId, Coord>
           Annealing: GatePlacement.AnnealOutcome option
-          TimingDriven: PlacementTiming.TimingDrivenOutcome option }
+          TimingDriven: PlacementTiming.TimingDrivenOutcome option
+          ClockPinGroups: Map<NetId, Coord list> }
 
     /// 回路とピッチから配置のスロット格子を作る (placeCircuitWithStrategy と同じ格子)。
     let slotGridOf (pitchX: int) (pitchY: int) (circuit: PreparedCircuit) : GatePlacement.SlotGrid =
@@ -310,8 +485,9 @@ module PipelineWL =
         (grid: GatePlacement.SlotGrid)
         (circuit: PreparedCircuit)
         (assignment: GatePlacement.Assignment)
-        : WlPlaced list * Map<NetId, Coord> =
-        placeFromAssignment grid circuit assignment
+        (clockPins: int)
+        : WlPlaced list * Map<NetId, Coord> * Map<NetId, Coord list> =
+        placeFromAssignment grid circuit assignment clockPins
 
     /// 総アーク距離のアニーリングで使うアーク (外部入力ピンは左端列の固定端子、クロックは除外)。
     let annealArcsOf (pitchY: int) (circuit: PreparedCircuit) : GatePlacement.Arc[] =
@@ -324,8 +500,11 @@ module PipelineWL =
         GatePlacement.buildArcs nl fixedPins
 
     /// タイミング駆動の再アニーリング (2 相のみ)。ピンは各ラウンドの配置から
-    /// placeFromAssignment と同じ規則 (ミニマックス中心) で決め直す。
+    /// placeFromAssignment と同じ規則 (ミニマックス中心 + クロックピン分割) で決め直す。
+    /// クロック到達の近似は、DFF ごとに「その DFF が実際に配線される区画ネットのピン」
+    /// (placed の (rewired) クロック入力ネット) までの距離を使う (issue #7 (b)(9))。
     let timingDrivenFrom
+        (clockPins: int)
         (tdCfg: GatePlacement.TimingDrivenConfig)
         (annealCfg: GatePlacement.AnnealConfig)
         (grid: GatePlacement.SlotGrid)
@@ -336,7 +515,10 @@ module PipelineWL =
         | SingleEdgeClock _ ->
             Error (InvalidPlacementConfig "タイミング駆動配置は 2 相クロック (--clocking two-phase) のみ対応")
         | TwoPhaseClock tp ->
-            let resolvePins (a: GatePlacement.Assignment) = snd (placeFromAssignment grid circuit a)
+            let resolvePins (a: GatePlacement.Assignment) =
+                let placed, pins, _ = placeFromAssignment grid circuit a clockPins
+                let placedArr = List.toArray placed
+                pins, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs)
             PlacementTiming.buildNetwork tp
             |> Result.bind (fun net ->
                 PlacementTiming.timingDrivenAnneal
@@ -345,9 +527,11 @@ module PipelineWL =
 
     /// クロック方式変換済みの回路を配置する。RowMajor は placeWLWithPitch と同一の結果 (単相時)。
     /// Annealed は行優先を初期解にアーク距離を最小化する (クロックネット除外、
-    /// 外部入力ピンは左端列の固定端子としてコストに含める)。
+    /// 外部入力ピンは左端列の固定端子としてコストに含める)。clockPins (k): 2 相のクロックピン
+    /// 分割数 (issue #7 (b))。既定 1 = 従来どおり (単相では無視される)。
     let placeCircuitWithStrategy
         (strategy: GatePlacement.PlacementStrategy)
+        (clockPins: int)
         (pitchX: int)
         (pitchY: int)
         (circuit: PreparedCircuit)
@@ -360,35 +544,37 @@ module PipelineWL =
             |> Result.mapError (GatePlacement.describeConfigError >> InvalidPlacementConfig)
         match strategy with
         | GatePlacement.RowMajor ->
-            let placed, pins = placeFromAssignment grid circuit initial
-            Ok { Placed = placed; Pins = pins; Annealing = None; TimingDriven = None }
+            let placed, pins, groups = placeFromAssignment grid circuit initial clockPins
+            Ok { Placed = placed; Pins = pins; Annealing = None; TimingDriven = None; ClockPinGroups = groups }
         | GatePlacement.Annealed cfg ->
             annealed cfg
             |> Result.map (fun outcome ->
-                let placed, pins = placeFromAssignment grid circuit outcome.Best
-                { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = None })
+                let placed, pins, groups = placeFromAssignment grid circuit outcome.Best clockPins
+                { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = None; ClockPinGroups = groups })
         | GatePlacement.TimingDriven (cfg, tdCfg) ->
             annealed cfg
             |> Result.bind (fun outcome ->
-                timingDrivenFrom tdCfg cfg grid circuit outcome.Best
+                timingDrivenFrom clockPins tdCfg cfg grid circuit outcome.Best
                 |> Result.map (fun td ->
-                    let placed, pins = placeFromAssignment grid circuit td.Best
-                    { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = Some td }))
+                    let placed, pins, groups = placeFromAssignment grid circuit td.Best clockPins
+                    { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = Some td; ClockPinGroups = groups }))
 
-    /// 配置戦略を指定して配置する (単相)。
+    /// 配置戦略を指定して配置する (単相、クロックピン分割は常に 1)。
     let placeWLWithStrategy
         (strategy: GatePlacement.PlacementStrategy)
         (pitchX: int)
         (pitchY: int)
         (nl: Netlist)
         : Result<WlPlacement, CompileError> =
-        placeCircuitWithStrategy strategy pitchX pitchY { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
+        placeCircuitWithStrategy strategy 1 pitchX pitchY { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
 
     /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版、行優先、単相)。
     let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
         let grid = GatePlacement.squareSlotGrid nl.Gates.Length gateOrigin pitchX pitchY
-        placeFromAssignment grid { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
-            (GatePlacement.rowMajorAssignment nl.Gates.Length)
+        let placed, pins, _ =
+            placeFromAssignment grid { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
+                (GatePlacement.rowMajorAssignment nl.Gates.Length) 1
+        placed, pins
 
     /// 回路規模に応じたピッチで配置する。
     let placeWL (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
@@ -1285,46 +1471,54 @@ module PipelineWL =
         /// このピッチで 1 回だけ試す
         | FixedPitch of pitchX: int * pitchY: int
 
-    /// WireLevel コンパイルのオプション。
+    /// WireLevel コンパイルのオプション。ClockPins (k): 2 相のクロックピン分割数
+    /// (issue #7 (b))。既定 1 = 従来どおり (単相では無視される)。
     type WlCompileOptions =
         { Placement: GatePlacement.PlacementStrategy
           Pitch: PitchChoice
-          Clocking: Clocking.ClockingScheme }
+          Clocking: Clocking.ClockingScheme
+          ClockPins: int }
 
-    /// 既定: 行優先・自動ピッチ・単相 (従来の compileWL と同じ)。
+    /// 既定: 行優先・自動ピッチ・単相・クロックピン 1 本 (従来の compileWL と同じ)。
     let defaultCompileOptions : WlCompileOptions =
         { Placement = GatePlacement.RowMajor
           Pitch = AutoPitch
-          Clocking = Clocking.SingleEdge }
+          Clocking = Clocking.SingleEdge
+          ClockPins = 1 }
 
     /// コンパイル結果。Placed / Pins は配置配線した (クロック方式変換後の) ネットリストのもの。
     /// 出力ネットの観測は駆動ゲートのセルで行う (2 相でも元の Q ネットはスレーブが駆動する)。
+    /// ClockPinGroups: 元のクロックネット → 区画ピン座標列 (issue #7 (b)。k=1 なら要素 1 個)。
     type WlCompiled =
         { Grid: LGrid
           Placed: WlPlaced list
           Pins: Map<NetId, Coord>
-          Clocking: CircuitClocking }
+          Clocking: CircuitClocking
+          ClockPinGroups: Map<NetId, Coord list> }
 
     /// 配置 → 配線 → グリッド生成 (1 ピッチ分)。
     let private placeAndRoute
         (strategy: GatePlacement.PlacementStrategy)
+        (clockPins: int)
         (pitchX: int)
         (pitchY: int)
         (circuit: PreparedCircuit)
         : Result<WlCompiled, CompileError> =
-        placeCircuitWithStrategy strategy pitchX pitchY circuit
+        placeCircuitWithStrategy strategy clockPins pitchX pitchY circuit
         |> Result.bind (fun p ->
             routeWLWith (clockRoutingOf circuit.Clocking) p.Placed p.Pins
             |> Result.map (fun occ ->
                 { Grid = emitWL p.Placed p.Pins occ
                   Placed = p.Placed
                   Pins = p.Pins
-                  Clocking = circuit.Clocking }))
+                  Clocking = circuit.Clocking
+                  ClockPinGroups = p.ClockPinGroups }))
 
     /// ピッチを自動決定し、輻輳失敗時はより広いピッチで自動再試行する (pitchSequence)。
     /// 配置の最適化はピッチごとにやり直す (スロット座標が変わるため)。
     let private placeAndRouteAutoPitch
         (strategy: GatePlacement.PlacementStrategy)
+        (clockPins: int)
         (circuit: PreparedCircuit)
         : Result<WlCompiled, CompileError> =
         let startPitch = pitchFor circuit.Netlist.Gates.Length
@@ -1332,7 +1526,7 @@ module PipelineWL =
             match remaining with
             | [] -> Error (RoutingCongestion (NetId 0))
             | (px, py) :: rest ->
-                match placeAndRoute strategy px py circuit with
+                match placeAndRoute strategy clockPins px py circuit with
                 | Ok compiled -> Ok compiled
                 | Error (InvalidPlacementConfig _ as e) -> Error e
                 | Error e ->
@@ -1353,8 +1547,8 @@ module PipelineWL =
         |> Result.bind (prepareCircuit opts.Clocking)
         |> Result.bind (fun circuit ->
             match opts.Pitch with
-            | FixedPitch (px, py) -> placeAndRoute opts.Placement px py circuit
-            | AutoPitch -> placeAndRouteAutoPitch opts.Placement circuit)
+            | FixedPitch (px, py) -> placeAndRoute opts.Placement opts.ClockPins px py circuit
+            | AutoPitch -> placeAndRouteAutoPitch opts.Placement opts.ClockPins circuit)
 
     /// yosys JSON → WireLevel グリッド (オプション指定版)。
     let compileWLWithOptions (opts: WlCompileOptions) (src: string) : Result<WlCompiled, CompileError> =
@@ -1366,11 +1560,12 @@ module PipelineWL =
         match c.Clocking with
         | SingleEdgeClock clock ->
             clock
-            |> Option.bind (fun clk -> Map.tryFind clk c.Pins)
+            |> Option.bind (fun clk -> Map.tryFind clk c.ClockPinGroups)
+            |> Option.bind (function [ single ] -> Some single | _ -> None)
             |> Option.map ClockDrive.SingleEdgePins
         | TwoPhaseClock tp ->
-            match Map.tryFind tp.ClockA c.Pins, Map.tryFind tp.ClockB c.Pins with
-            | Some a, Some b -> Some (ClockDrive.TwoPhasePins (a, b))
+            match Map.tryFind tp.ClockA c.ClockPinGroups, Map.tryFind tp.ClockB c.ClockPinGroups with
+            | Some a, Some b when not (List.isEmpty a) && not (List.isEmpty b) -> Some (ClockDrive.TwoPhasePins (a, b))
             | _ -> None
 
     let private asTuple (c: WlCompiled) : LGrid * WlPlaced list * Map<NetId, Coord> =

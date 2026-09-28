@@ -19,6 +19,10 @@
 //                分ける 2 相ノンオーバーラップクロック。skew 均等化をせず、hold は相間の settle で守る。
 //                meta の clocking に clkA / clkB の座標が入り、元の clk は inputs に載らない
 //                (駆動手順は DESIGN-VERIFY.md §5.2)
+//     --clock-pins K
+//                クロックピンの区画分割数 (既定 1 = 従来どおり)。2 相のときだけ意味を持つ
+//                (issue #7 (b))。clk_a / clk_b それぞれを K 個の区画に分け、各区画の中心に
+//                ピンを置く。ホストは同じクロックの全ピンを同じ世代・同じ値で駆動する
 //
 // 長時間配線 (sm83_subset 約 100 分 / sm83_full 5〜8 時間) はバックグラウンドで:
 //   nohup dotnet fsi src/ExportRouted.fsx sm83_full > routed/sm83_full.log 2>&1 &
@@ -46,6 +50,8 @@ type Options =
       OutDir: string
       Place: PlaceChoice
       Clocking: Clocking.ClockingScheme
+      /// クロックピンの区画分割数 (既定 1、issue #7 (b))。
+      ClockPins: int
       /// --place の前後どちらに --moves 等を書いても効くよう、anneal 設定は常に保持する
       Anneal: GatePlacement.AnnealConfig
       TimingDriven: GatePlacement.TimingDrivenConfig }
@@ -84,6 +90,10 @@ let parseArgs (args: string list) : Result<Options, string> =
         | "--clocking" :: "single" :: tail -> go { opts with Clocking = Clocking.SingleEdge } tail
         | "--clocking" :: "two-phase" :: tail -> go { opts with Clocking = Clocking.TwoPhase } tail
         | "--clocking" :: v :: _ -> Error (sprintf "--clocking は single|two-phase: %s" v)
+        | "--clock-pins" :: n :: tail ->
+            match Int32.TryParse n with
+            | true, v when v >= 1 -> go { opts with ClockPins = v } tail
+            | _ -> Error (sprintf "--clock-pins には 1 以上の整数が必要: %s" n)
         | "--moves" :: n :: tail ->
             match Int32.TryParse n with
             | true, v when v >= 0 -> go { opts with Anneal = { opts.Anneal with Moves = v } } tail
@@ -96,7 +106,7 @@ let parseArgs (args: string list) : Result<Options, string> =
             match Double.TryParse (p, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
             | true, v when v >= 0.0 -> go { opts with Anneal = { opts.Anneal with BackwardPenalty = v } } tail
             | _ -> Error (sprintf "--backward には 0 以上の数が必要: %s" p)
-        | ("--place" | "--moves" | "--seed" | "--backward" | "--out" | "--clocking" | "--td-alpha" | "--td-beta" | "--td-rounds") as o :: [] ->
+        | ("--place" | "--moves" | "--seed" | "--backward" | "--out" | "--clocking" | "--clock-pins" | "--td-alpha" | "--td-beta" | "--td-rounds") as o :: [] ->
             Error (sprintf "%s の引数が足りない" o)
         | arg :: _ when arg.StartsWith "--" -> Error (sprintf "不明なオプション: %s" arg)
         | name :: tail when opts.Circuit = "" -> go { opts with Circuit = name } tail
@@ -104,6 +114,7 @@ let parseArgs (args: string list) : Result<Options, string> =
     let defaults =
         { Circuit = ""; Pitch = None; OutDir = Path.Combine (repoRoot, "routed"); Place = PlaceRowMajor
           Clocking = Clocking.SingleEdge
+          ClockPins = 1
           Anneal = GatePlacement.defaultAnnealConfig
           TimingDriven = GatePlacement.defaultTimingDrivenConfig }
     match go defaults args with
@@ -150,7 +161,8 @@ let printSummary (opts: Options) (meta: RoutedMeta) =
     match meta.Clocking with
     | SingleEdgeClocking -> printfn "[export] clocking: singleEdge"
     | TwoPhaseClocking (port, a, b) ->
-        printfn "[export] clocking: twoPhase (%s → clkA (%d,%d) / clkB (%d,%d))" port a.X a.Y b.X b.Y
+        let fmt (cs: Domain.Coord list) = cs |> List.map (fun c -> sprintf "(%d,%d)" c.X c.Y) |> String.concat " "
+        printfn "[export] clocking: twoPhase (%s → clkA[%d] %s / clkB[%d] %s)" port a.Length (fmt a) b.Length (fmt b)
     if not constBits.IsEmpty then
         printfn "[export] 定数ビット (%d): %s" constBits.Length (String.concat " " constBits)
     if not unobservable.IsEmpty then
@@ -191,8 +203,8 @@ let exportCircuit (opts: Options) : int =
                 match opts.Clocking with
                 | Clocking.SingleEdge -> "single"
                 | Clocking.TwoPhase -> "two-phase"
-            printfn "[export] %s: compileWL 開始 (pitch=%s, place=%s, clocking=%s, %s)"
-                opts.Circuit pitchLabel placeLabel clockingLabel (DateTimeOffset.Now.ToString "yyyy-MM-dd HH:mm:ss")
+            printfn "[export] %s: compileWL 開始 (pitch=%s, place=%s, clocking=%s, clock-pins=%d, %s)"
+                opts.Circuit pitchLabel placeLabel clockingLabel opts.ClockPins (DateTimeOffset.Now.ToString "yyyy-MM-dd HH:mm:ss")
             let sw = Stopwatch.StartNew ()
             let compileOptions =
                 { Placement = placementStrategy opts
@@ -200,7 +212,8 @@ let exportCircuit (opts: Options) : int =
                     match opts.Pitch with
                     | Some (px, py) -> FixedPitch (px, py)
                     | None -> AutoPitch
-                  Clocking = opts.Clocking }
+                  Clocking = opts.Clocking
+                  ClockPins = opts.ClockPins }
             let compiled = compileWLWithOptions compileOptions json
             match compiled with
             | Error e ->
@@ -233,7 +246,7 @@ let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] [--place rowmajor|anneal|anneal-timing] [--moves N] [--seed N] [--backward P] [--td-alpha A] [--td-beta B] [--td-rounds N] [--clocking single|two-phase]"
+        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] [--place rowmajor|anneal|anneal-timing] [--moves N] [--seed N] [--backward P] [--td-alpha A] [--td-beta B] [--td-rounds N] [--clocking single|two-phase] [--clock-pins K]"
         2
     | Ok opts -> exportCircuit opts
 

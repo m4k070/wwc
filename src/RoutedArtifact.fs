@@ -12,11 +12,14 @@ namespace WwHdl
 //   * .meta — ポート名 → ビット毎の座標 (LSB first、.bin と同じ正規化座標)、
 //             元 verilog JSON の SHA-256 (陳腐化検出)、生成時の git commit (監査用)
 //
-// クロック方式 (formatVersion 2 で追加、DESIGN-VERIFY.md §6.3):
+// クロック方式 (formatVersion 2 で追加、DESIGN-VERIFY.md §6.3。formatVersion 3 で
+// clkA/clkB を座標のリストへ拡張、issue #7 (b)):
 //   * "clocking": {"scheme": "singleEdge"} — 従来。inputs に clk がある
-//   * "clocking": {"scheme": "twoPhase", "clockPort": "clk", "clkA": {x,y}, "clkB": {x,y}}
-//     — 元の clk ポートは inputs に載せず、ホストは clkA / clkB を §5.2 の 2 相手順で駆動する
-//   * formatVersion 1 (clocking なし) は singleEdge として読む (既存成果物との互換)
+//   * "clocking": {"scheme": "twoPhase", "clockPort": "clk", "clkA": [{x,y}, …], "clkB": [{x,y}, …]}
+//     — 元の clk ポートは inputs に載せず、ホストは clkA / clkB の全ピンを同じ世代で
+//       §5.2 の 2 相手順に沿って駆動する (通常は各 1 本。issue #7 (b) の区画分割なら複数本)
+//   * formatVersion 1 (clocking なし) は singleEdge として読む (既存成果物との互換)。
+//     formatVersion 2 は clkA/clkB が座標 1 個 (リストでない) として読む
 //
 // yosys の bits 配列は数値ネットと定数文字列 ("0"/"1") が混在する。
 // Pipeline.parseYosysJson は定数を捨てるためビット位置がずれる → ここでは位置を保って保持する。
@@ -32,8 +35,14 @@ module RoutedArtifact =
 
     /// meta JSON の形式バージョン。互換性のない変更で上げる。
     /// 2: clocking (クロック方式) を追加
+    /// 3: twoPhase の clkA / clkB を座標 1 個から座標のリストにする (issue #7 (b)、
+    ///    クロックピンの複数分割)。書き出しは常に 3 (2 相でも k=1 ならリスト長 1)
     [<Literal>]
-    let CurrentFormatVersion = 2
+    let CurrentFormatVersion = 3
+
+    /// clkA / clkB が座標 1 個 (リストでない) だった形式。
+    [<Literal>]
+    let SingleClockPinFormatVersion = 2
 
     /// clocking を持たない旧形式。読むときは SingleEdgeClocking とみなす。
     [<Literal>]
@@ -69,7 +78,7 @@ module RoutedArtifact =
         | SingleEdgeClocking
         /// 2 相: clockPort (元のクロックポート名、inputs には無い) の代わりに
         /// clkA / clkB ピンを DESIGN-VERIFY.md §5.2 の手順で駆動する
-        | TwoPhaseClocking of clockPort: string * clkA: Coord * clkB: Coord
+        | TwoPhaseClocking of clockPort: string * clkA: Coord list * clkB: Coord list
 
     type RoutedMeta =
         { FormatVersion: int
@@ -228,6 +237,7 @@ module RoutedArtifact =
         (grid: LGrid)
         (placed: WlPlaced list)
         (pins: Map<NetId, Coord>)
+        (clockPinGroups: Map<NetId, Coord list>)
         (clocking: CircuitClocking)
         : Result<RoutedMeta, ArtifactError> =
         let origin, width, height = gridBounds grid
@@ -255,10 +265,11 @@ module RoutedArtifact =
                 | None, Some c -> CellProbe (normalize c)
                 | None, None -> Unobservable net
 
-        let clockPin (name: string) (net: NetId) : Result<Coord, ArtifactError> =
-            match Map.tryFind net pins with
-            | Some c -> Ok (normalize c)
-            | None -> Error (MissingClockPin (name, net))
+        // 区画ピン座標列 (issue #7 (b))。空リストは「配線されなかった」とみなしエラーにする。
+        let clockPinList (name: string) (net: NetId) : Result<Coord list, ArtifactError> =
+            match Map.tryFind net clockPinGroups with
+            | Some coords when not (List.isEmpty coords) -> Ok (coords |> List.map normalize)
+            | _ -> Error (MissingClockPin (name, net))
 
         // (clocking の meta 表現, inputs から外すポート名)
         let clockingMeta : Result<ClockingMeta * string option, ArtifactError> =
@@ -267,9 +278,9 @@ module RoutedArtifact =
             | TwoPhaseClock tp ->
                 findClockPort ports tp.OriginalClock
                 |> Result.bind (fun clockPort ->
-                    clockPin "clkA" tp.ClockA
+                    clockPinList "clkA" tp.ClockA
                     |> Result.bind (fun a ->
-                        clockPin "clkB" tp.ClockB
+                        clockPinList "clkB" tp.ClockB
                         |> Result.map (fun b -> TwoPhaseClocking (clockPort, a, b), Some clockPort)))
 
         let outputPorts = ports |> List.filter (fun p -> p.Direction = OutputPort)
@@ -306,7 +317,7 @@ module RoutedArtifact =
         (placed: WlPlaced list)
         (pins: Map<NetId, Coord>)
         : Result<RoutedMeta, ArtifactError> =
-        buildMetaWithClocking circuit sourceSha provenance ports grid placed pins (SingleEdgeClock None)
+        buildMetaWithClocking circuit sourceSha provenance ports grid placed pins Map.empty (SingleEdgeClock None)
 
     /// WlCompiled から meta を組み立てる (クロック方式は compiled.Clocking に従う)。
     let buildMetaOfCompiled
@@ -316,7 +327,8 @@ module RoutedArtifact =
         (ports: YosysPortBits list)
         (compiled: WlCompiled)
         : Result<RoutedMeta, ArtifactError> =
-        buildMetaWithClocking circuit sourceSha provenance ports compiled.Grid compiled.Placed compiled.Pins compiled.Clocking
+        buildMetaWithClocking circuit sourceSha provenance ports compiled.Grid compiled.Placed compiled.Pins
+            compiled.ClockPinGroups compiled.Clocking
 
     // --- meta JSON --------------------------------------------------------
 
@@ -377,10 +389,12 @@ module RoutedArtifact =
         | TwoPhaseClocking (clockPort, a, b) ->
             w.WriteString ("scheme", SchemeTwoPhase)
             w.WriteString ("clockPort", clockPort)
-            w.WritePropertyName "clkA"
-            writeCoord w a
-            w.WritePropertyName "clkB"
-            writeCoord w b
+            w.WriteStartArray "clkA"
+            for c in a do writeCoord w c
+            w.WriteEndArray ()
+            w.WriteStartArray "clkB"
+            for c in b do writeCoord w c
+            w.WriteEndArray ()
         w.WriteEndObject ()
         w.WriteEndObject ()
 
@@ -405,6 +419,11 @@ module RoutedArtifact =
         |> Seq.map (fun p -> p.Name, (p.Value.EnumerateArray () |> Seq.map readItem |> List.ofSeq))
         |> Map.ofSeq
 
+    /// v2 以前は clkA/clkB が座標 1 個、v3 以降は座標のリスト。
+    let private readCoordOrList (version: int) (el: JsonElement) : Coord list =
+        if version <= SingleClockPinFormatVersion then [ readCoord el ]
+        else el.EnumerateArray () |> Seq.map readCoord |> List.ofSeq
+
     /// clocking を読む。旧形式 (formatVersion 1) は clocking を持たず単相。
     let private readClocking (version: int) (root: JsonElement) : Result<ClockingMeta, ArtifactError> =
         if version = LegacyFormatVersion then Ok SingleEdgeClocking
@@ -414,18 +433,18 @@ module RoutedArtifact =
             | SchemeSingleEdge -> Ok SingleEdgeClocking
             | SchemeTwoPhase ->
                 Ok (TwoPhaseClocking (clocking.GetProperty("clockPort").GetString (),
-                                      readCoord (clocking.GetProperty "clkA"),
-                                      readCoord (clocking.GetProperty "clkB")))
+                                      readCoordOrList version (clocking.GetProperty "clkA"),
+                                      readCoordOrList version (clocking.GetProperty "clkB")))
             | other -> Error (UnknownClockingScheme other)
 
     /// meta JSON を読む。source はエラーメッセージ用のラベル (通常はファイルパス)。
-    /// formatVersion 1 (clocking なし) と 2 を読める。
+    /// formatVersion 1 (clocking なし) / 2 (clkA・clkB が座標 1 個) / 3 (座標のリスト) を読める。
     let metaOfJson (source: string) (json: string) : Result<RoutedMeta, ArtifactError> =
         try
             use doc = JsonDocument.Parse json
             let root = doc.RootElement
             let version = root.GetProperty("formatVersion").GetInt32 ()
-            if version <> CurrentFormatVersion && version <> LegacyFormatVersion then
+            if version <> CurrentFormatVersion && version <> SingleClockPinFormatVersion && version <> LegacyFormatVersion then
                 Error (FormatVersionMismatch (CurrentFormatVersion, version))
             else
                 readClocking version root
@@ -475,7 +494,8 @@ module RoutedArtifact =
             match meta.Clocking with
             | SingleEdgeClocking -> Seq.empty
             | TwoPhaseClocking (_, a, b) ->
-                [ "clkA", a; "clkB", b ]
+                [ for c in a -> "clkA", c
+                  for c in b -> "clkB", c ]
                 |> Seq.map (fun (name, c) ->
                     match getL grid c with
                     | Pin _ -> None

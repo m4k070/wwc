@@ -24,6 +24,7 @@
     <Compile Include="E2eTests.fs" />
     <Compile Include="TestbenchTests.fs" />
     <Compile Include="TwoPhaseTests.fs" />
+    <Compile Include="ClockPinSplitTests.fs" />
     <Compile Include="TimingAnalysisTests.fs" />
     <Compile Include="PlacementTimingTests.fs" />
   </ItemGroup>

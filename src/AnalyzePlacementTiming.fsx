@@ -124,11 +124,18 @@ type Evaluation =
       MasterSlaveMax: int
       Windows: WindowTiming list }
 
+/// クロックピンは常に 1 本 (分割なし、issue #7 (b) は AnalyzePlacementTiming.fsx では未対応。
+/// ExportRouted.fsx --clock-pins K で作った配線結果は --routed の突き合わせ対象にしない)。
+let private resolvePinsOf (grid: GatePlacement.SlotGrid) (circuit: PipelineWL.PreparedCircuit) (x: GatePlacement.Assignment) =
+    let placedX, pinsX, _ = PipelineWL.placeCircuitFromAssignment grid circuit x 1
+    let placedArr = List.toArray placedX
+    pinsX, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs)
+
 let evaluatePlacement (grid: GatePlacement.SlotGrid) (circuit: PipelineWL.PreparedCircuit) (net: TimingNetwork) (a: GatePlacement.Assignment)
     : Result<Evaluation, string> =
-    let placed, pins = PipelineWL.placeCircuitFromAssignment grid circuit a
+    let placed, pins, _ = PipelineWL.placeCircuitFromAssignment grid circuit a 1
     let coordOf (g: int) = GatePlacement.slotCoord grid a.[g]
-    evaluate defaultTimingModel grid net (fun x -> snd (PipelineWL.placeCircuitFromAssignment grid circuit x)) a
+    evaluate defaultTimingModel grid net (resolvePinsOf grid circuit) a
     |> Result.mapError describePlacementTimingError
     |> Result.map (fun (windows, _, distance) ->
         let ms = masterSlaveDistances net coordOf
@@ -163,8 +170,10 @@ let compareWithRouted
     | Ok (lgrid, meta) ->
         match meta.Clocking with
         | RoutedArtifact.SingleEdgeClocking -> Error "配線結果が 2 相でない"
-        | RoutedArtifact.TwoPhaseClocking (_, clkA, clkB) ->
-            let _, pins = PipelineWL.placeCircuitFromAssignment grid prepared a
+        | RoutedArtifact.TwoPhaseClocking (_, a, b) when a.Length <> 1 || b.Length <> 1 ->
+            Error (sprintf "配線結果のクロックピンが複数本 (clk_a %d 本 / clk_b %d 本) — --routed の突き合わせは k=1 のみ対応 (issue #7 (b))" a.Length b.Length)
+        | RoutedArtifact.TwoPhaseClocking (_, [ clkA ], [ clkB ]) ->
+            let _, pins, _ = PipelineWL.placeCircuitFromAssignment grid prepared a 1
             let placedClkA = Map.find net.ClockA pins
             // meta の座標は正規化座標 (exportGrid が原点を詰める)。クロックピンでずれを求める
             let dx, dy = clkA.X - placedClkA.X, clkA.Y - placedClkA.Y
@@ -176,7 +185,7 @@ let compareWithRouted
             match HoldAnalysis.indexOf dg clkA, HoldAnalysis.indexOf dg clkB with
             | None, _ | _, None -> Error "クロックピンがグリッド外"
             | Some ai, Some bi ->
-                match TimingAnalysis.analyzeTwoPhaseTiming dg meta ai bi with
+                match TimingAnalysis.analyzeTwoPhaseTiming dg meta [ ai ] [ bi ] with
                 | Error e -> Error (TimingAnalysis.describeTimingError e)
                 | Ok reports ->
                     printfn ""

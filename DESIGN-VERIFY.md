@@ -276,17 +276,20 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
 
 ### 6.3 routed meta (`routed/<circuit>.meta.json`、`src/RoutedArtifact.fs` が生成)
 
-`formatVersion` 2 (2026-09-27)。1 との違いは `clocking` の追加だけ。**`formatVersion` 1 (clocking なし) は
-`"singleEdge"` として読む** (既存の `routed/sm83_subset.meta.json` 等)。それ以外のバージョンはエラー。
-座標はすべて .bin の (0,0) 基点 (正規化済み)。以下の値は説明用の例。
+`formatVersion` 3 (2026-09-28、issue #7 (b): クロックピンの複数分割)。2 (2026-09-27) との違いは
+twoPhase の `clkA` / `clkB` が座標 1 個 (オブジェクト) から座標のリスト (配列) になったことだけ
+(区画ごとに 1 本。既定は k=1 で要素 1 個の配列)。**`formatVersion` 1 (clocking なし) は
+`"singleEdge"` として読み、`formatVersion` 2 (`clkA`/`clkB` が座標 1 個) は要素 1 個のリストとして読む**
+(既存の `routed/sm83_subset.meta.json` 等)。それ以外のバージョンはエラー。
+座標はすべて .bin の (0,0) 基点 (正規化済み)。以下の値は説明用の例 (clk_a / clk_b を 2 分割、k=2)。
 
 ```json
 {
-  "formatVersion": 2,
+  "formatVersion": 3,
   "circuit": "counter4",
   "sourceSha256": "…",
   "gitCommit": "…",
-  "createdAtUtc": "2026-09-27T01:34:15.68+00:00",
+  "createdAtUtc": "2026-09-28T01:34:15.68+00:00",
   "width": 102,
   "height": 68,
   "origin": { "x": 10, "y": 2 },
@@ -297,8 +300,8 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
   "clocking": {
     "scheme": "twoPhase",
     "clockPort": "clk",
-    "clkA": { "x": 62, "y": 40 },
-    "clkB": { "x": 86, "y": 40 }
+    "clkA": [ { "x": 62, "y": 20 }, { "x": 62, "y": 60 } ],
+    "clkB": [ { "x": 86, "y": 20 }, { "x": 86, "y": 60 } ]
   }
 }
 ```
@@ -309,16 +312,23 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
 - `gateCount` / `dffCount`: 配置したゲート数・DFF 数。**2 相では DFF が倍 (マスター + スレーブ) になり、gateCount もその分増える**
 - `clocking`: クロック方式
   - `{"scheme": "singleEdge"}` — 従来。`inputs.clk` を §5.2 の手順で駆動する
-  - `{"scheme": "twoPhase", "clockPort": "clk", "clkA": {x,y}, "clkB": {x,y}}` — `clkA` / `clkB` はピンセル (Pin) の座標。
-    §5.2.1 の手順で駆動する。`clockPort` は元のクロックポート名 (プログラムや golden がクロックを名前で
-    参照しているときの対応付け用)
+  - `{"scheme": "twoPhase", "clockPort": "clk", "clkA": [{x,y}, …], "clkB": [{x,y}, …]}` — `clkA` / `clkB` は
+    ピンセル (Pin) の座標の配列 (区画ごとに 1 本、issue #7 (b))。§5.2.1 の手順で駆動するが、各相について
+    **配列内の全ピンを同じ世代・同じ値で書く** (書込を settle の直前にまとめて行えば同時になる)。
+    `clockPort` は元のクロックポート名 (プログラムや golden がクロックを名前で参照しているときの対応付け用)。
+    区画分割は DFF のクロック端子群を k-center クラスタリング (Gonzalez 貪欲法 + L1 ミニマックス中心への
+    再割当て) で k 個に分け、各区画を独立したネットとして最短経路木で配線する。論理ネットリスト・
+    NetlistSim・golden は変わらない (WL 配置配線専用の変換)
 - runner は起動時に `clocking.scheme` を見て駆動手順を選ぶ。未知の `scheme` はエラーにする
-- wgpu-runner (`wgpu-runner/src/routed_meta.rs`、2026-09-27 対応) は formatVersion 1 (clocking 無し → singleEdge) と
-  2 (clocking 必須) を受け付ける。次は起動時にエラー: 1 と 2 以外、v1 に clocking がある、v2 に clocking が無い、
-  未知の scheme / 余分なキー、twoPhase で `clkA` / `clkB` / `clockPort` が無い、`inputs` に clockPort が残っている、
-  clkA = clkB、clkA / clkB が入力ピンと重なる、clkA / clkB が grid 上で Pin セルでない
+- wgpu-runner (`wgpu-runner/src/routed_meta.rs`、2026-09-28 対応) は formatVersion 1 (clocking 無し →
+  singleEdge)、2 (`clkA`/`clkB` が座標 1 個)、3 (`clkA`/`clkB` が座標のリスト) を受け付ける。
+  次は起動時にエラー: 1〜3 以外、v1 に clocking がある、v2/v3 に clocking が無い、v2 で `clkA`/`clkB` が
+  配列、v3 で `clkA`/`clkB` が単一オブジェクトまたは空配列、未知の scheme / 余分なキー、
+  twoPhase で `clkA` / `clkB` / `clockPort` が無い、`inputs` に clockPort が残っている、
+  クロックピンどうしが重なる、クロックピンが入力ピンと重なる、クロックピンが grid 上で Pin セルでない
 - 2 相の meta を受け取るのは `--memory` だけ。単発の .bin 実行 (`run-tests.sh`) は meta を読まない。
   `--program` (pins/regs 形式の meta) に routed meta を渡すと、`--memory` を使うよう促すエラーにする
+- `ExportRouted.fsx --clock-pins K` (既定 1) で区画数 k を指定する。単相 (`--clocking single`) では無視される
 
 ## 7. 実装計画
 

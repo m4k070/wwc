@@ -2,13 +2,18 @@
 //
 // formatVersion:
 //   1 — clocking なし。単相 (singleEdge) として読む (既存の routed/sm83_subset.meta.json 等)
-//   2 — clocking を必ず持つ:
+//   2 — clocking を必ず持つ。twoPhase の clkA/clkB は座標 1 個 (オブジェクト):
 //         {"scheme": "singleEdge"}
 //         {"scheme": "twoPhase", "clockPort": "clk", "clkA": {x,y}, "clkB": {x,y}}
+//   3 — 2 と同じだが、twoPhase の clkA/clkB は座標のリスト (issue #7 (b)、クロックピンの
+//       複数分割)。通常は各 1 本 (要素 1 個の配列)。ホストは同じクロックの全ピンを
+//       同じ世代・同じ値で書く (write_pin を settle の前にまとめて呼ぶだけでよい)
+//         {"scheme": "twoPhase", "clockPort": "clk", "clkA": [{x,y}, …], "clkB": [{x,y}, …]}
 //   それ以外はエラー。
 //
 // JSON の形 (RawRoutedMeta) と、検査済みの形 (RoutedMeta) を分ける。バージョンと clocking の
-// 組み合わせの不整合 (v1 に clocking がある、v2 に無い、twoPhase なのに inputs に clockPort が残っている等) は
+// 組み合わせの不整合 (v1 に clocking がある、v2/v3 に無い、twoPhase なのに inputs に clockPort が
+// 残っている、v2 で clkA/clkB が配列、v3 で clkA/clkB が単一オブジェクト等) は
 // RoutedMeta::from_json で弾くので、以降のコードは Clocking を見るだけで駆動手順を選べる。
 use std::collections::BTreeMap;
 use anyhow::{Context, Result};
@@ -34,8 +39,10 @@ pub enum OutputProbe {
 
 /// clocking を持たない旧形式 (RoutedArtifact.fs の LegacyFormatVersion)。単相として読む。
 pub const META_FORMAT_VERSION_LEGACY: u32 = 1;
-/// clocking を持つ現行形式 (RoutedArtifact.fs の CurrentFormatVersion)。
-pub const META_FORMAT_VERSION_CURRENT: u32 = 2;
+/// clocking を持つが twoPhase の clkA/clkB が座標 1 個 (RoutedArtifact.fs の SingleClockPinFormatVersion)。
+pub const META_FORMAT_VERSION_SINGLE_CLOCK_PIN: u32 = 2;
+/// clkA/clkB が座標のリストになった現行形式 (RoutedArtifact.fs の CurrentFormatVersion)。
+pub const META_FORMAT_VERSION_CURRENT: u32 = 3;
 
 /// クロック方式 (RoutedArtifact.fs の ClockingMeta)。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,8 +50,34 @@ pub enum Clocking {
     /// 従来の単相。inputs の clockPort (慣習的に "clk") を §5.2 の手順で駆動する
     SingleEdge,
     /// 2 相ノンオーバーラップ。元のクロックポート (clock_port) は grid 上に無く、
-    /// clk_a (マスター) / clk_b (スレーブ) のピンを §5.2.1 の手順で駆動する
-    TwoPhase { clock_port: String, clk_a: Xy, clk_b: Xy },
+    /// clk_a (マスター) / clk_b (スレーブ) のピン列 (区画ごとに 1 本、issue #7 (b)。
+    /// 通常は各 1 本) を §5.2.1 の手順で駆動する。同じ相の全ピンを同じ世代・同じ値で書く
+    TwoPhase { clock_port: String, clk_a: Vec<Xy>, clk_b: Vec<Xy> },
+}
+
+/// clkA/clkB の JSON 表現: v2 は座標 1 個 (オブジェクト)、v3 は座標のリスト (配列)。
+/// バージョンに関わらずどちらの形も受理してから、resolve_clocking でバージョンと
+/// 突き合わせて厳密にチェックする (v2 なのに配列、v3 なのにオブジェクト、は共にエラーにする)。
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum RawXyOrList {
+    Single(Xy),
+    List(Vec<Xy>),
+}
+
+impl RawXyOrList {
+    fn as_single(&self) -> Option<Xy> {
+        match self {
+            RawXyOrList::Single(xy) => Some(*xy),
+            RawXyOrList::List(_) => None,
+        }
+    }
+    fn as_list(&self) -> Option<&[Xy]> {
+        match self {
+            RawXyOrList::List(xs) => Some(xs),
+            RawXyOrList::Single(_) => None,
+        }
+    }
 }
 
 /// meta JSON の clocking の表現そのまま。未知の scheme は serde がエラーにする。
@@ -55,7 +88,7 @@ enum RawClocking {
     #[serde(rename = "singleEdge")]
     SingleEdge {},
     #[serde(rename = "twoPhase", rename_all = "camelCase")]
-    TwoPhase { clock_port: String, clk_a: Xy, clk_b: Xy },
+    TwoPhase { clock_port: String, clk_a: RawXyOrList, clk_b: RawXyOrList },
 }
 
 #[derive(Deserialize)]
@@ -99,7 +132,7 @@ impl RoutedMeta {
         let raw: RawRoutedMeta = serde_json::from_str(json).context("parsing routed meta JSON")?;
         let clocking = resolve_clocking(raw.format_version, raw.clocking)?;
         if let Clocking::TwoPhase { clock_port, clk_a, clk_b } = &clocking {
-            validate_two_phase_ports(&raw.inputs, clock_port, *clk_a, *clk_b)?;
+            validate_two_phase_ports(&raw.inputs, clock_port, clk_a, clk_b)?;
         }
         Ok(RoutedMeta {
             format_version: raw.format_version,
@@ -115,15 +148,16 @@ impl RoutedMeta {
         })
     }
 
-    /// 駆動しなければならないピンすべて (inputs + 2 相のクロックピン)。grid との照合に使う。
+    /// 駆動しなければならないピンすべて (inputs + 2 相のクロックピン、区画ごとに 1 本)。
+    /// grid との照合に使う。
     pub fn driven_pins(&self) -> Vec<(String, Xy)> {
         let mut pins: Vec<(String, Xy)> = self.inputs.iter()
             .flat_map(|(name, coords)| coords.iter().enumerate()
                 .map(move |(i, c)| (format!("input {name}[{i}]"), *c)))
             .collect();
         if let Clocking::TwoPhase { clk_a, clk_b, .. } = &self.clocking {
-            pins.push(("clocking.clkA".to_string(), *clk_a));
-            pins.push(("clocking.clkB".to_string(), *clk_b));
+            for (i, c) in clk_a.iter().enumerate() { pins.push((format!("clocking.clkA[{i}]"), *c)); }
+            for (i, c) in clk_b.iter().enumerate() { pins.push((format!("clocking.clkB[{i}]"), *c)); }
         }
         pins
     }
@@ -135,27 +169,49 @@ fn resolve_clocking(version: u32, raw: Option<RawClocking>) -> Result<Clocking> 
         (META_FORMAT_VERSION_LEGACY, None) => Ok(Clocking::SingleEdge),
         (META_FORMAT_VERSION_LEGACY, Some(c)) => anyhow::bail!(
             "meta formatVersion {META_FORMAT_VERSION_LEGACY} must not have clocking (got {c:?}) — \
-             clocking was added in formatVersion {META_FORMAT_VERSION_CURRENT}"),
-        (META_FORMAT_VERSION_CURRENT, None) => anyhow::bail!(
-            "meta formatVersion {META_FORMAT_VERSION_CURRENT} requires clocking"),
-        (META_FORMAT_VERSION_CURRENT, Some(RawClocking::SingleEdge {})) => Ok(Clocking::SingleEdge),
-        (META_FORMAT_VERSION_CURRENT, Some(RawClocking::TwoPhase { clock_port, clk_a, clk_b })) =>
-            Ok(Clocking::TwoPhase { clock_port, clk_a, clk_b }),
+             clocking was added in formatVersion {META_FORMAT_VERSION_SINGLE_CLOCK_PIN}"),
+        (META_FORMAT_VERSION_SINGLE_CLOCK_PIN, None) | (META_FORMAT_VERSION_CURRENT, None) =>
+            anyhow::bail!("meta formatVersion {version} requires clocking"),
+        (META_FORMAT_VERSION_SINGLE_CLOCK_PIN, Some(RawClocking::SingleEdge {}))
+        | (META_FORMAT_VERSION_CURRENT, Some(RawClocking::SingleEdge {})) => Ok(Clocking::SingleEdge),
+        (META_FORMAT_VERSION_SINGLE_CLOCK_PIN, Some(RawClocking::TwoPhase { clock_port, clk_a, clk_b })) => {
+            let a = clk_a.as_single().with_context(|| format!(
+                "meta formatVersion {META_FORMAT_VERSION_SINGLE_CLOCK_PIN} requires clkA to be a single coordinate (not a list)"))?;
+            let b = clk_b.as_single().with_context(|| format!(
+                "meta formatVersion {META_FORMAT_VERSION_SINGLE_CLOCK_PIN} requires clkB to be a single coordinate (not a list)"))?;
+            Ok(Clocking::TwoPhase { clock_port, clk_a: vec![a], clk_b: vec![b] })
+        }
+        (META_FORMAT_VERSION_CURRENT, Some(RawClocking::TwoPhase { clock_port, clk_a, clk_b })) => {
+            let a = clk_a.as_list().with_context(|| format!(
+                "meta formatVersion {META_FORMAT_VERSION_CURRENT} requires clkA to be a list of coordinates"))?;
+            let b = clk_b.as_list().with_context(|| format!(
+                "meta formatVersion {META_FORMAT_VERSION_CURRENT} requires clkB to be a list of coordinates"))?;
+            anyhow::ensure!(!a.is_empty(), "twoPhase clkA is an empty list");
+            anyhow::ensure!(!b.is_empty(), "twoPhase clkB is an empty list");
+            Ok(Clocking::TwoPhase { clock_port, clk_a: a.to_vec(), clk_b: b.to_vec() })
+        }
         (other, _) => anyhow::bail!(
-            "meta formatVersion {other} is not supported (expected {META_FORMAT_VERSION_LEGACY} or {META_FORMAT_VERSION_CURRENT})"),
+            "meta formatVersion {other} is not supported (expected {META_FORMAT_VERSION_LEGACY}, \
+             {META_FORMAT_VERSION_SINGLE_CLOCK_PIN} or {META_FORMAT_VERSION_CURRENT})"),
     }
 }
 
-/// 2 相の前提: 元のクロックポートは inputs に無く、clkA / clkB は互いに、また他の入力ピンとも別のセル。
-fn validate_two_phase_ports(inputs: &BTreeMap<String, Vec<Xy>>, clock_port: &str, clk_a: Xy, clk_b: Xy) -> Result<()> {
+/// 2 相の前提: 元のクロックポートは inputs に無く、clkA / clkB のどのピンも互いに、
+/// また他の入力ピンとも別のセル (区画ごとに 1 本、issue #7 (b))。
+fn validate_two_phase_ports(inputs: &BTreeMap<String, Vec<Xy>>, clock_port: &str, clk_a: &[Xy], clk_b: &[Xy]) -> Result<()> {
     anyhow::ensure!(!clock_port.is_empty(), "twoPhase clocking has an empty clockPort");
     anyhow::ensure!(!inputs.contains_key(clock_port),
         "twoPhase meta still lists clock port '{clock_port}' in inputs — the original clock is not on the grid in two-phase");
-    anyhow::ensure!(clk_a != clk_b,
-        "twoPhase clkA and clkB are the same cell ({},{})", clk_a.x, clk_a.y);
+    let all_clock_pins: Vec<Xy> = clk_a.iter().chain(clk_b.iter()).copied().collect();
+    for i in 0..all_clock_pins.len() {
+        for j in i + 1..all_clock_pins.len() {
+            anyhow::ensure!(all_clock_pins[i] != all_clock_pins[j],
+                "two-phase clock pins overlap at ({},{})", all_clock_pins[i].x, all_clock_pins[i].y);
+        }
+    }
     for (name, coords) in inputs {
         for (i, c) in coords.iter().enumerate() {
-            anyhow::ensure!(*c != clk_a && *c != clk_b,
+            anyhow::ensure!(!all_clock_pins.contains(c),
                 "input {name}[{i}] at ({},{}) overlaps a two-phase clock pin", c.x, c.y);
         }
     }
@@ -175,7 +231,13 @@ mod tests {
         format!(r#"{{"formatVersion":{version},{PORTS},"inputs":{{{inputs}}}{clocking}}}"#)
     }
 
-    const TWO_PHASE: &str = r#"{"scheme":"twoPhase","clockPort":"clk","clkA":{"x":1,"y":0},"clkB":{"x":2,"y":0}}"#;
+    /// v2 (単一ピン): clkA/clkB は座標 1 個。
+    const TWO_PHASE_V2: &str = r#"{"scheme":"twoPhase","clockPort":"clk","clkA":{"x":1,"y":0},"clkB":{"x":2,"y":0}}"#;
+    /// v3 (単一ピン、要素 1 個の配列): 既定の k=1 相当。
+    const TWO_PHASE_V3_K1: &str = r#"{"scheme":"twoPhase","clockPort":"clk","clkA":[{"x":1,"y":0}],"clkB":[{"x":2,"y":0}]}"#;
+    /// v3 (複数ピン、k=2 相当): クロックピンの区画分割 (issue #7 (b))。
+    const TWO_PHASE_V3_K2: &str =
+        r#"{"scheme":"twoPhase","clockPort":"clk","clkA":[{"x":1,"y":0},{"x":1,"y":5}],"clkB":[{"x":2,"y":0},{"x":2,"y":5}]}"#;
 
     #[test]
     fn v1_without_clocking_is_single_edge() {
@@ -192,13 +254,39 @@ mod tests {
     }
 
     #[test]
-    fn v2_two_phase_carries_clock_pins() {
-        let meta = RoutedMeta::from_json(&meta_json(2, r#""rst":[{"x":0,"y":0}]"#, Some(TWO_PHASE))).unwrap();
+    fn v3_single_edge_is_single_edge() {
+        let json = meta_json(3, r#""clk":[{"x":0,"y":0}]"#, Some(r#"{"scheme":"singleEdge"}"#));
+        assert_eq!(RoutedMeta::from_json(&json).unwrap().clocking, Clocking::SingleEdge);
+    }
+
+    #[test]
+    fn v2_two_phase_carries_a_single_clock_pin_per_phase() {
+        let meta = RoutedMeta::from_json(&meta_json(2, r#""rst":[{"x":0,"y":0}]"#, Some(TWO_PHASE_V2))).unwrap();
         assert_eq!(meta.clocking, Clocking::TwoPhase {
-            clock_port: "clk".into(), clk_a: Xy { x: 1, y: 0 }, clk_b: Xy { x: 2, y: 0 },
+            clock_port: "clk".into(), clk_a: vec![Xy { x: 1, y: 0 }], clk_b: vec![Xy { x: 2, y: 0 }],
         });
         let pins: Vec<String> = meta.driven_pins().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(pins, ["input rst[0]", "clocking.clkA", "clocking.clkB"]);
+        assert_eq!(pins, ["input rst[0]", "clocking.clkA[0]", "clocking.clkB[0]"]);
+    }
+
+    #[test]
+    fn v3_two_phase_k1_matches_v2() {
+        let meta = RoutedMeta::from_json(&meta_json(3, r#""rst":[{"x":0,"y":0}]"#, Some(TWO_PHASE_V3_K1))).unwrap();
+        assert_eq!(meta.clocking, Clocking::TwoPhase {
+            clock_port: "clk".into(), clk_a: vec![Xy { x: 1, y: 0 }], clk_b: vec![Xy { x: 2, y: 0 }],
+        });
+    }
+
+    #[test]
+    fn v3_two_phase_carries_multiple_clock_pins_per_phase() {
+        let meta = RoutedMeta::from_json(&meta_json(3, r#""rst":[{"x":0,"y":0}]"#, Some(TWO_PHASE_V3_K2))).unwrap();
+        assert_eq!(meta.clocking, Clocking::TwoPhase {
+            clock_port: "clk".into(),
+            clk_a: vec![Xy { x: 1, y: 0 }, Xy { x: 1, y: 5 }],
+            clk_b: vec![Xy { x: 2, y: 0 }, Xy { x: 2, y: 5 }],
+        });
+        let pins: Vec<String> = meta.driven_pins().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(pins, ["input rst[0]", "clocking.clkA[0]", "clocking.clkA[1]", "clocking.clkB[0]", "clocking.clkB[1]"]);
     }
 
     fn rejects(json: &str, needle: &str) {
@@ -208,14 +296,26 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_versions() {
-        rejects(&meta_json(3, r#""clk":[{"x":0,"y":0}]"#, Some(r#"{"scheme":"singleEdge"}"#)), "formatVersion 3");
+        rejects(&meta_json(4, r#""clk":[{"x":0,"y":0}]"#, Some(r#"{"scheme":"singleEdge"}"#)), "formatVersion 4");
         rejects(&meta_json(0, r#""clk":[{"x":0,"y":0}]"#, None), "formatVersion 0");
     }
 
     #[test]
     fn rejects_version_clocking_mismatch() {
         rejects(&meta_json(2, r#""clk":[{"x":0,"y":0}]"#, None), "requires clocking");
-        rejects(&meta_json(1, r#""rst":[{"x":0,"y":0}]"#, Some(TWO_PHASE)), "must not have clocking");
+        rejects(&meta_json(3, r#""clk":[{"x":0,"y":0}]"#, None), "requires clocking");
+        rejects(&meta_json(1, r#""rst":[{"x":0,"y":0}]"#, Some(TWO_PHASE_V2)), "must not have clocking");
+    }
+
+    #[test]
+    fn rejects_shape_version_mismatch() {
+        // v2 なのに clkA/clkB が配列 (v3 の形)
+        rejects(&meta_json(2, "", Some(TWO_PHASE_V3_K1)), "requires clkA to be a single coordinate");
+        // v3 なのに clkA/clkB が単一オブジェクト (v2 の形)
+        rejects(&meta_json(3, "", Some(TWO_PHASE_V2)), "requires clkA to be a list");
+        // v3 の空リスト
+        let empty = r#"{"scheme":"twoPhase","clockPort":"clk","clkA":[],"clkB":[{"x":2,"y":0}]}"#;
+        rejects(&meta_json(3, "", Some(empty)), "empty list");
     }
 
     #[test]
@@ -228,9 +328,12 @@ mod tests {
 
     #[test]
     fn rejects_inconsistent_two_phase_ports() {
-        rejects(&meta_json(2, r#""clk":[{"x":0,"y":0}]"#, Some(TWO_PHASE)), "still lists clock port 'clk'");
-        rejects(&meta_json(2, r#""rst":[{"x":1,"y":0}]"#, Some(TWO_PHASE)), "overlaps");
+        rejects(&meta_json(2, r#""clk":[{"x":0,"y":0}]"#, Some(TWO_PHASE_V2)), "still lists clock port 'clk'");
+        rejects(&meta_json(2, r#""rst":[{"x":1,"y":0}]"#, Some(TWO_PHASE_V2)), "overlaps");
         let same = r#"{"scheme":"twoPhase","clockPort":"clk","clkA":{"x":1,"y":0},"clkB":{"x":1,"y":0}}"#;
-        rejects(&meta_json(2, "", Some(same)), "same cell");
+        rejects(&meta_json(2, "", Some(same)), "overlap");
+        // v3: clkA の 2 本のピンが重なる
+        let overlap_within_a = r#"{"scheme":"twoPhase","clockPort":"clk","clkA":[{"x":1,"y":0},{"x":1,"y":0}],"clkB":[{"x":2,"y":0}]}"#;
+        rejects(&meta_json(3, "", Some(overlap_within_a)), "overlap");
     }
 }
