@@ -470,14 +470,15 @@ module TimingAnalysis =
 
     // --- 5. 2 相クロック回路全体の解析 -------------------------------------------------
 
-    /// sm83_full 相当 (2 相クロック) の 3 窓すべてを解析する。
-    let analyzeTwoPhaseTiming (dg: DenseGrid) (meta: RoutedMeta) (clkAIdx: int) (clkBIdx: int)
+    /// sm83_full 相当 (2 相クロック) の 3 窓すべてを解析する。clkAIdxs/clkBIdxs は
+    /// 区画ごとのクロックピン (issue #7 (b)。既定は各 1 本)。
+    let analyzeTwoPhaseTiming (dg: DenseGrid) (meta: RoutedMeta) (clkAIdxs: int list) (clkBIdxs: int list)
         : Result<WindowReport list, TimingError> =
         buildTopoOrder dg
         |> Result.map (fun topo ->
-            let clockA = analyzeClock dg clkAIdx
-            let clockB = analyzeClock dg clkBIdx
-            let phaseReport = analyzeTwoPhase dg clkAIdx clkBIdx
+            let clockA = analyzeClockMulti dg clkAIdxs
+            let clockB = analyzeClockMulti dg clkBIdxs
+            let phaseReport = analyzeTwoPhaseMulti dg clkAIdxs clkBIdxs
             let dffDataNodes = buildDffDataNodes dg
             let probes = combinationalOutputProbes dg meta
             let dffsOfPhase (phase: ClockPhase) =
@@ -510,9 +511,9 @@ module TimingAnalysis =
 
     /// 全マスター DFF について、スレーブへの配置距離を求める。マスター→スレーブが
     /// 1 対 1 の直結 (不変条件) でない組 (スレーブが 0 個/複数個見つかった) は除く。
-    let masterSlaveDistances (dg: DenseGrid) (clkAIdx: int) (clkBIdx: int) : MasterSlaveDistance list =
-        let clockA = analyzeClock dg clkAIdx
-        let clockB = analyzeClock dg clkBIdx
+    let masterSlaveDistances (dg: DenseGrid) (clkAIdxs: int list) (clkBIdxs: int list) : MasterSlaveDistance list =
+        let clockA = analyzeClockMulti dg clkAIdxs
+        let clockB = analyzeClockMulti dg clkBIdxs
         let dffs = findDffs dg
         let phaseCandidates (dff: int) =
             [ if Map.containsKey dff clockA.Arrival then yield PhaseA

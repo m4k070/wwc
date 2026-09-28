@@ -179,14 +179,14 @@ module WlTwoPhaseTest =
         match clockPinsOf c with
         | Some (ClockDrive.TwoPhasePins (a, b)) ->
             let dg = toDense c.Grid
-            match indexOf dg a, indexOf dg b with
-            | Some ai, Some bi ->
-                let r = analyzeTwoPhase dg ai bi
+            let aIdxs, bIdxs = a |> List.choose (indexOf dg), b |> List.choose (indexOf dg)
+            if aIdxs.Length = a.Length && bIdxs.Length = b.Length && not aIdxs.IsEmpty && not bIdxs.IsEmpty then
+                let r = analyzeTwoPhaseMulti dg aIdxs bIdxs
                 if not (twoPhaseInvariantHolds r) then
                     printfn "  WL_2PH_INVARIANT: unclocked=%d doubly=%d samePhase=%d gated=%d"
                         r.Unclocked.Length r.DoublyClocked.Length r.SamePhasePaths.Length r.GatedClocks.Length
                 twoPhaseInvariantHolds r && r.AToB > 0
-            | _ -> false
+            else false
         | _ -> false
 
     let private logicTests () : (string * bool) list =
@@ -242,7 +242,7 @@ module WlTwoPhaseTest =
         prepareCircuit scheme shiftRegister
         |> Result.mapError (sprintf "%A")
         |> Result.bind (fun circuit ->
-            placeCircuitWithStrategy GatePlacement.RowMajor shiftPitchX shiftPitchY circuit
+            placeCircuitWithStrategy GatePlacement.RowMajor 1 shiftPitchX shiftPitchY circuit
             |> Result.mapError (sprintf "%A")
             |> Result.bind (fun p ->
                 // 左端列: i 番目の外部入力は (0, 2 + i*pitchY)。クロックもここに置く (重心に置かない)
@@ -251,10 +251,12 @@ module WlTwoPhaseTest =
                     |> List.mapi (fun i net -> net, { X = 0; Y = 2 + i * shiftPitchY })
                     |> Map.ofList
                 let pins = p.Pins |> Map.map (fun net c -> Map.tryFind net leftEdge |> Option.defaultValue c)
+                let clockPinGroups = p.ClockPinGroups |> Map.map (fun clk _ -> [ Map.find clk pins ])
                 routeWLWith ShortestOnly p.Placed pins
                 |> Result.mapError (sprintf "%A")
                 |> Result.map (fun occ ->
-                    { Grid = emitWL p.Placed pins occ; Placed = p.Placed; Pins = pins; Clocking = circuit.Clocking })))
+                    { Grid = emitWL p.Placed pins occ; Placed = p.Placed; Pins = pins
+                      Clocking = circuit.Clocking; ClockPinGroups = clockPinGroups })))
 
     /// パターンをシフトインし、各周期の q が期待どおりか (全周期一致なら true)。
     let private shiftsCorrectly (c: WlCompiled) : Result<bool, string> =
@@ -335,8 +337,9 @@ module WlTwoPhaseTest =
         match clockPinsOf c with
         | Some (ClockDrive.TwoPhasePins (a, b)) ->
             let dg = toDense c.Grid
-            [ for (label, pin) in [ "clk_a", a; "clk_b", b ] do
-                match indexOf dg pin |> Option.bind (fun i -> clockLatency dg i (analyzeClock dg i)) with
+            [ for (label, pinList) in [ "clk_a", a; "clk_b", b ] do
+                let idxs = pinList |> List.choose (indexOf dg)
+                match (if idxs.Length = pinList.Length && not idxs.IsEmpty then clockLatencyMulti dg idxs (analyzeClockMulti dg idxs) else None) with
                 | None -> yield sprintf "WL-2PH: sm83_min %s reaches DFFs" label, false
                 | Some l ->
                     printfn "  WL_2PH_LATENCY: %s max %d / bound %d (ratio %.3f) / ideal-pin bound %d"
@@ -500,7 +503,7 @@ module WlTwoPhaseTest =
                 // 旧形式 (formatVersion 1、clocking なし) は単相として読む
                 let legacyJson =
                     (metaToJson { meta with Clocking = SingleEdgeClocking })
-                        .Replace("\"formatVersion\": 2", "\"formatVersion\": 1")
+                        .Replace(sprintf "\"formatVersion\": %d" CurrentFormatVersion, "\"formatVersion\": 1")
                 let legacy =
                     match metaOfJson "legacy" legacyJson with
                     | Ok m -> m.Clocking = SingleEdgeClocking && m.FormatVersion = LegacyFormatVersion

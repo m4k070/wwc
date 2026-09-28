@@ -104,7 +104,8 @@ let printReport (dg: DenseGrid) (names: Map<Coord, string list>) (topCount: int)
 type Options =
     { Source: SourceChoice
       TopCount: int
-      ClockPort: string }
+      ClockPort: string
+      ClockPins: int }
 
 and SourceChoice =
     | Routed of circuit: string * dir: string
@@ -121,6 +122,10 @@ let parseArgs (args: string list) : Result<Options, string> =
             | true, v when v > 0 -> go { opts with TopCount = v } tail
             | _ -> Error (sprintf "--top には正の整数が必要: %s" n)
         | "--clk" :: port :: tail -> go { opts with ClockPort = port } tail
+        | "--clock-pins" :: n :: tail ->
+            match Int32.TryParse n with
+            | true, v when v >= 1 -> go { opts with ClockPins = v } tail
+            | _ -> Error (sprintf "--clock-pins には 1 以上の整数が必要: %s" n)
         | "--dir" :: dir :: tail ->
             match opts.Source with
             | Routed (c, _) -> go { opts with Source = Routed (c, Path.GetFullPath dir) } tail
@@ -145,7 +150,7 @@ let parseArgs (args: string list) : Result<Options, string> =
         | other :: _ -> Error (sprintf "不明な引数: %s" other)
     match args with
     | [] -> Error "引数がない"
-    | _ -> go { Source = SelfTest; TopCount = DefaultTopCount; ClockPort = "clk" } args
+    | _ -> go { Source = SelfTest; TopCount = DefaultTopCount; ClockPort = "clk"; ClockPins = 1 } args
 
 /// クロック到達時刻の要約 (min / max / skew)。
 let describeArrivals (label: string) (c: ClockAnalysis) : string =
@@ -156,13 +161,14 @@ let describeArrivals (label: string) (c: ClockAnalysis) : string =
         let hi = List.max times
         sprintf "%s: DFF %d 個、到達 min %d / max %d / skew %d 世代 (参考)" label times.Length lo hi (hi - lo)
 
-/// 最大到達時間と下限 (ピン → 最遠のクロック端子のマンハッタン距離) の比較。
-let describeLatency (label: string) (dg: DenseGrid) (pinIdx: int) (c: ClockAnalysis) : string =
-    match clockLatency dg pinIdx c with
+/// 最大到達時間と下限 (各端子について最も近いピンまでのマンハッタン距離の最大) の比較。
+/// pinIdxs は区画ごとのクロックピン (issue #7 (b)。既定は 1 本)。
+let describeLatency (label: string) (dg: DenseGrid) (pinIdxs: int list) (c: ClockAnalysis) : string =
+    match clockLatencyMulti dg pinIdxs c with
     | None -> sprintf "%s: 到達なし" label
     | Some l ->
-        sprintf "%s: 最大到達 %d / 下限 %d (比 %.3f) / 最大の遠回り %d / ピン位置も最適なら下限 %d 世代"
-            label l.MaxArrival l.LowerBound (latencyRatio l) l.MaxDetour l.IdealPinBound
+        sprintf "%s (ピン %d 本): 最大到達 %d / 下限 %d (比 %.3f) / 最大の遠回り %d / ピン位置も最適なら下限 %d 世代"
+            label pinIdxs.Length l.MaxArrival l.LowerBound (latencyRatio l) l.MaxDetour l.IdealPinBound
 
 let printTwoPhaseReport (dg: DenseGrid) (names: Map<Coord, string list>) (topCount: int) (r: TwoPhaseReport) : unit =
     let count phase = r.PhaseOf |> Map.filter (fun _ p -> p = phase) |> Map.count
@@ -188,21 +194,25 @@ let printTwoPhaseReport (dg: DenseGrid) (names: Map<Coord, string list>) (topCou
             p.Phase p.MinData (describeDff dg names p.Launch) (describeDff dg names p.Capture)
     printfn "2 相の不変条件: %s" (if twoPhaseInvariantHolds r then "成立" else "不成立")
 
-let analyzeTwoPhaseAndPrint (opts: Options) (grid: LGrid) (meta: RoutedMeta) (clkA: Coord) (clkB: Coord) : int =
+let private fmtCoords (cs: Coord list) = cs |> List.map (fun c -> sprintf "(%d,%d)" c.X c.Y) |> String.concat " "
+
+/// clkA/clkB は区画ごとのクロックピン座標 (issue #7 (b)。既定は各 1 本)。
+let analyzeTwoPhaseAndPrint (opts: Options) (grid: LGrid) (meta: RoutedMeta) (clkA: Coord list) (clkB: Coord list) : int =
     let dg = toDense grid
-    match indexOf dg clkA, indexOf dg clkB with
-    | Some a, Some b ->
+    let aIdxs = clkA |> List.choose (indexOf dg)
+    let bIdxs = clkB |> List.choose (indexOf dg)
+    if aIdxs.Length = clkA.Length && bIdxs.Length = clkB.Length && not aIdxs.IsEmpty && not bIdxs.IsEmpty then
         let sw = Diagnostics.Stopwatch.StartNew ()
-        let report = analyzeTwoPhase dg a b
-        printfn "%s: grid %dx%d, 2 相クロック clk_a (%d,%d) / clk_b (%d,%d), 解析 %.1f 秒"
-            meta.Circuit dg.Width dg.Height clkA.X clkA.Y clkB.X clkB.Y sw.Elapsed.TotalSeconds
+        let report = analyzeTwoPhaseMulti dg aIdxs bIdxs
+        printfn "%s: grid %dx%d, 2 相クロック clk_a[%d] %s / clk_b[%d] %s, 解析 %.1f 秒"
+            meta.Circuit dg.Width dg.Height clkA.Length (fmtCoords clkA) clkB.Length (fmtCoords clkB) sw.Elapsed.TotalSeconds
         printTwoPhaseReport dg (outputNames meta) opts.TopCount report
-        printfn "クロック木の最大到達時間 (下限 = ピンから最も遠いクロック端子までのマンハッタン距離):"
-        printfn "  %s" (describeLatency "clk_a" dg a report.ClockA)
-        printfn "  %s" (describeLatency "clk_b" dg b report.ClockB)
+        printfn "クロック木の最大到達時間 (下限 = 各端子から最も近いピンまでのマンハッタン距離の最大。ピンごとの下限との比較):"
+        printfn "  %s" (describeLatency "clk_a" dg aIdxs report.ClockA)
+        printfn "  %s" (describeLatency "clk_b" dg bIdxs report.ClockB)
         if twoPhaseInvariantHolds report then 0 else 3
-    | _ ->
-        eprintfn "ERROR: 2 相クロックピン clk_a (%d,%d) / clk_b (%d,%d) がグリッド外" clkA.X clkA.Y clkB.X clkB.Y
+    else
+        eprintfn "ERROR: 2 相クロックピン clk_a %s / clk_b %s のいずれかがグリッド外" (fmtCoords clkA) (fmtCoords clkB)
         1
 
 /// grid と meta を解析して表示し、終了コードを返す。
@@ -232,7 +242,7 @@ let analyzeAndPrint (opts: Options) (grid: LGrid) (meta: RoutedMeta) : int =
                 printfn "WARN: クロック到達が WireLevel.clockArrivals と %d 個不一致:" mismatches.Length
                 for m in List.truncate DefaultTopCount mismatches do printfn "  %s" m
             printReport dg (outputNames meta) opts.TopCount report
-            printfn "%s" (describeLatency "クロック木の最大到達時間 (clk)" dg clkIdx report.Clock)
+            printfn "%s" (describeLatency "クロック木の最大到達時間 (clk)" dg [ clkIdx ] report.Clock)
             let hasViolation = report.Pairs |> List.exists (fun p -> p.Slack < 0)
             if hasViolation then 3 else 0
 
@@ -251,7 +261,7 @@ let runCompile (opts: Options) (circuit: string) (placement: GatePlacement.Place
     else
         let json = File.ReadAllText path
         let provenance = { GitCommit = "(analyze)"; CreatedAtUtc = DateTimeOffset.UtcNow }
-        let compileOptions = { PipelineWL.defaultCompileOptions with Placement = placement; Clocking = clocking }
+        let compileOptions = { PipelineWL.defaultCompileOptions with Placement = placement; Clocking = clocking; ClockPins = opts.ClockPins }
         let compiled =
             PipelineWL.compileWLWithOptions compileOptions json
             |> Result.mapError (sprintf "compileWL 失敗: %A")

@@ -189,10 +189,12 @@ module ClockDrive =
     open Domain
     open WireLevel
 
-    /// grid 上のクロックピン。
+    /// grid 上のクロックピン。TwoPhasePins は各相ごとに 1〜k 本 (issue #7 (b)、区画ごとに 1 本)。
+    /// ホストは同じ相のピンを全部「同じ世代で」書く (setPins が順に setPin するだけで、
+    /// 実際にセルへ反映されるのは次の settle からなので同時書込みになる)。
     type ClockPins =
         | SingleEdgePins of clk: Coord
-        | TwoPhasePins of clkA: Coord * clkB: Coord
+        | TwoPhasePins of clkA: Coord list * clkB: Coord list
 
     /// 収束しなかった相。結果は信用できないので明示的に失敗させる。
     type DriveError =
@@ -209,6 +211,11 @@ module ClockDrive =
         let settled, t = settler limit g
         if t >= limit then Error (Unsettled (phase, limit)) else Ok settled
 
+    /// 複数のピンへ同じ値を書く (setPin を順に適用するだけ。実際に CA へ反映されるのは
+    /// 次の settle からなので、settle 前にまとめて書けば「同じ世代で」書いたことになる)。
+    let setPins (coords: Coord list) (v: bool) (g: LGrid) : LGrid =
+        coords |> List.fold (fun g c -> setPin c v g) g
+
     /// クロックには一切触れず、直前に書いた入力 (data_in 相当) だけを収束させる
     /// (Rust clocking.rs の settle_after_data と同じ契約)。2 相の定常状態ではクロックは
     /// 前周期の終わり (clkA=0, clkB=1) のまま — 次の clockEdge がその立ち下がりも兼ねる。
@@ -222,7 +229,7 @@ module ClockDrive =
         let lowered =
             match pins with
             | SingleEdgePins clk -> setPin clk false g
-            | TwoPhasePins (clkA, clkB) -> g |> setPin clkA false |> setPin clkB false
+            | TwoPhasePins (clkA, clkB) -> g |> setPins clkA false |> setPins clkB false
         settlePhase settler limit "clk=0 (setup)" lowered
 
     /// クロックの有効エッジを与えて収束させる。
@@ -236,9 +243,9 @@ module ClockDrive =
         match pins with
         | SingleEdgePins clk -> settlePhase settler limit "clk=1" (setPin clk true g)
         | TwoPhasePins (clkA, clkB) ->
-            g |> setPin clkA true |> setPin clkB false
+            g |> setPins clkA true |> setPins clkB false
             |> settlePhase settler limit "clk_a=1, clk_b=0"
-            |> Result.bind (fun g -> g |> setPin clkA false |> setPin clkB true |> settlePhase settler limit "clk_a=0, clk_b=1")
+            |> Result.bind (fun g -> g |> setPins clkA false |> setPins clkB true |> settlePhase settler limit "clk_a=0, clk_b=1")
 
     /// 1 周期。前提: 直前の呼出しが settleLow か cycle であること。
     ///   SingleEdge (変更なし): settleLow → clockEdge → settleLow (クロックを 0 に戻して返す)

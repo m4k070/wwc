@@ -863,7 +863,10 @@ mod tests {
         }
 
         const SINGLE: ClockPins = ClockPins::SingleEdge { clk: CLK };
-        const TWO_PHASE: ClockPins = ClockPins::TwoPhase { clk_a: CLK_A, clk_b: CLK_B };
+        // Vec を使うので const にできない (issue #7 (b): clk_a/clk_b はクロックピン分割でリストになった)
+        fn two_phase() -> ClockPins {
+            ClockPins::TwoPhase { clk_a: vec![CLK_A], clk_b: vec![CLK_B] }
+        }
 
         /// data_in = 0b10 の書込
         fn data_in_writes() -> Vec<Event> {
@@ -894,7 +897,7 @@ mod tests {
             // リセット直後の 1 周期目 (first=true): 従来どおり idle settle → data_in → latch
             let mut d = driver();
             let mut mem = Memory::new(vec![], MemoryConfig::default());
-            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(None), &mut mem, W, &prev_cells(), true).unwrap();
+            let r = run_bus_cycle(&mut d, &two_phase(), &bus(None), &mut mem, W, &prev_cells(), true).unwrap();
             let mut expected = vec![Write(CLK_A, false), Write(CLK_B, false), Settle]; // 1'
             expected.extend(data_in_writes());                                        // 3
             expected.extend([
@@ -919,7 +922,7 @@ mod tests {
             let mut mem = Memory::new(vec![], MemoryConfig::default());
             let mut prev = prev_cells();
             prev[CLK_B.x as usize] = pin_cell(true); // 前周期の終わり (clkA=0, clkB=1) を模す
-            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(None), &mut mem, W, &prev, false).unwrap();
+            let r = run_bus_cycle(&mut d, &two_phase(), &bus(None), &mut mem, W, &prev, false).unwrap();
             let mut expected = data_in_writes(); // idle settle なし。いきなり data_in の書込から始まる
             expected.extend([
                 Settle,                                             // 4 (クロックには触れない)
@@ -940,7 +943,7 @@ mod tests {
             let mut mem = Memory::new(vec![], MemoryConfig::default());
             mem.write(crate::memory::INTERRUPT_ENABLE_ADDR, 0x1F);
             mem.write(crate::memory::INTERRUPT_FLAG_ADDR, 0x03);
-            let r = run_bus_cycle(&mut d, &TWO_PHASE, &bus(Some(0x01)), &mut mem, W, &prev_cells(), false).unwrap();
+            let r = run_bus_cycle(&mut d, &two_phase(), &bus(Some(0x01)), &mut mem, W, &prev_cells(), false).unwrap();
             assert_eq!(r.irq, 0x02);
             // data_in → irq → 収束 (クロックには触れない) の順
             let irq_writes: Vec<Event> = IRQ.iter().enumerate().map(|(i, c)| Write(*c, (0x02 >> i) & 1 == 1)).collect();
@@ -954,7 +957,7 @@ mod tests {
         fn reset_cycle_is_idle_then_latch_only_on_first_pulse() {
             // 1 パルス目 (first=true): 従来どおり idle settle → latch
             let mut d = driver();
-            let phases = run_reset_cycle(&mut d, &TWO_PHASE, &bus(None), true).unwrap();
+            let phases = run_reset_cycle(&mut d, &two_phase(), &bus(None), true).unwrap();
             assert_eq!(d.events, vec![
                 Write(RST, true),
                 Write(CLK_A, false), Write(CLK_B, false), Settle,
@@ -965,7 +968,7 @@ mod tests {
 
             // 2 パルス目以降 (first=false): idle settle を挟まず、latch が clkB の立ち下がりも兼ねる
             let mut d = driver();
-            let phases = run_reset_cycle(&mut d, &TWO_PHASE, &bus(None), false).unwrap();
+            let phases = run_reset_cycle(&mut d, &two_phase(), &bus(None), false).unwrap();
             assert_eq!(d.events, vec![
                 Write(RST, true),
                 Write(CLK_A, true), Write(CLK_B, false), Settle,
@@ -987,7 +990,7 @@ mod tests {
             let two = RoutedMeta::from_json(r#"{"formatVersion":2,"circuit":"c","width":6,"height":1,
                 "inputs":{},"outputs":{},
                 "clocking":{"scheme":"twoPhase","clockPort":"clk","clkA":{"x":4,"y":0},"clkB":{"x":5,"y":0}}}"#).unwrap();
-            assert_eq!(ClockPins::from_meta(&two).unwrap(), TWO_PHASE);
+            assert_eq!(ClockPins::from_meta(&two).unwrap(), two_phase());
             let no_clk = RoutedMeta::from_json(r#"{"formatVersion":2,"circuit":"c","width":4,"height":1,
                 "inputs":{},"outputs":{},"clocking":{"scheme":"singleEdge"}}"#).unwrap();
             assert!(ClockPins::from_meta(&no_clk).unwrap_err().to_string().contains("'clk'"));

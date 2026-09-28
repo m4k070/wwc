@@ -49,6 +49,16 @@ module TimingAnalysisTest =
 
     let private settleG (g: LGrid) : LGrid * int = settleIncremental SettleLimit g
 
+    /// 複数ピンに同じ値を書く (issue #7 (b): クロックピン分割)。
+    let private setPins (coords: Coord list) (v: bool) (g: LGrid) : LGrid =
+        coords |> List.fold (fun g c -> setPin c v g) g
+
+    /// clkA/clkB (座標のリスト) をグリッド上のセル添字のリストに解決する。
+    /// 1 個でも grid 外なら None (全部解決できて初めて Some)。
+    let private resolveClockIdxs (dg: DenseGrid) (coords: Coord list) : int list option =
+        let idxs = coords |> List.choose (indexOf dg)
+        if idxs.Length = coords.Length && not idxs.IsEmpty then Some idxs else None
+
     /// data 入力に書き込むストレスパターン (全 0 / 全 1 / 市松 / 端のビットなど)。
     /// 静的解析は論理的マスキングを無視する安全側の見積りなので、これで実測の
     /// 最悪ケースに厳密に一致しなくてもよい (下回っていれば十分)。
@@ -82,7 +92,7 @@ module TimingAnalysisTest =
                 match meta.Clocking with
                 | SingleEdgeClocking -> [ sprintf "TIMING: %s %s compiled two-phase" circuit placeLabel, false ]
                 | TwoPhaseClocking (_, clkA, clkB) ->
-                    match indexOf dg clkA, indexOf dg clkB with
+                    match resolveClockIdxs dg clkA, resolveClockIdxs dg clkB with
                     | None, _ | _, None -> [ sprintf "TIMING: %s %s clkA/clkB pins in grid" circuit placeLabel, false ]
                     | Some ai, Some bi ->
                         match buildTopoOrder dg with
@@ -95,12 +105,12 @@ module TimingAnalysisTest =
                             | Ok reports ->
                                 let predicted = reports |> List.map (fun r -> r.Window, r.PredictedMax) |> Map.ofList
                                 let dataCoords = dataPort |> Option.bind (fun p -> Map.tryFind p meta.Inputs)
-                                let g0, _ = settleG (grid |> setPin clkA false |> setPin clkB false)
+                                let g0, _ = settleG (grid |> setPins clkA false |> setPins clkB false)
                                 let cycle (g: LGrid, _) (v: int) =
                                     let gd = match dataCoords with Some cs -> writeBus cs v g | None -> g
                                     let afterData, dGens = settleG gd
-                                    let afterA, aGens = settleG (afterData |> setPin clkA true |> setPin clkB false)
-                                    let afterB, bGens = settleG (afterA |> setPin clkA false |> setPin clkB true)
+                                    let afterA, aGens = settleG (afterData |> setPins clkA true |> setPins clkB false)
+                                    let afterB, bGens = settleG (afterA |> setPins clkA false |> setPins clkB true)
                                     afterB, (dGens, aGens, bGens)
                                 let results = stressPatterns |> List.scan cycle (g0, (0, 0, 0)) |> List.tail |> List.map snd
                                 let actualMax (select: int * int * int -> int) = results |> List.map select |> List.max
@@ -138,7 +148,7 @@ module TimingAnalysisTest =
                 match meta.Clocking with
                 | SingleEdgeClocking -> [ sprintf "TIMING-BREAKDOWN: %s %s compiled two-phase" circuit placeLabel, false ]
                 | TwoPhaseClocking (_, clkA, clkB) ->
-                    match indexOf dg clkA, indexOf dg clkB with
+                    match resolveClockIdxs dg clkA, resolveClockIdxs dg clkB with
                     | None, _ | _, None -> [ sprintf "TIMING-BREAKDOWN: %s %s clkA/clkB pins in grid" circuit placeLabel, false ]
                     | Some ai, Some bi ->
                         match buildTopoOrder dg with
@@ -190,7 +200,7 @@ module TimingAnalysisTest =
                 match meta.Clocking with
                 | SingleEdgeClocking -> [ sprintf "TIMING-MS: %s %s compiled two-phase" circuit placeLabel, false ]
                 | TwoPhaseClocking (_, clkA, clkB) ->
-                    match indexOf dg clkA, indexOf dg clkB with
+                    match resolveClockIdxs dg clkA, resolveClockIdxs dg clkB with
                     | None, _ | _, None -> [ sprintf "TIMING-MS: %s %s clkA/clkB pins in grid" circuit placeLabel, false ]
                     | Some ai, Some bi ->
                         let dffCount = (findDffs dg).Length

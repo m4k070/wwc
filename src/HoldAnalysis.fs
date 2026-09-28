@@ -153,14 +153,18 @@ module HoldAnalysis =
           /// クロック網が DFF の D 入力に入っている箇所
           DataLoads: int list }
 
-    /// クロックピンから、Wire / Cross だけを通って前進する幅優先探索。
-    /// 1 段 = CellDelay 世代なので、BFS の距離がそのまま到達世代になる。
-    let analyzeClock (dg: DenseGrid) (clkPinIdx: int) : ClockAnalysis =
+    /// クロックピン群 (issue #7 (b): 区画ごとに 1 本、既定は 1 本) から、Wire / Cross
+    /// だけを通って前進する多始点幅優先探索。1 段 = CellDelay 世代なので、BFS の距離が
+    /// そのまま到達世代になる。区画ネットは互いに配線上つながっていない (独立した木) ので、
+    /// 各 DFF に届くのは自分の区画のピンだけ — 複数始点にしても意味的な曖昧さは生じない。
+    let analyzeClockMulti (dg: DenseGrid) (clkPinIdxs: int list) : ClockAnalysis =
         let dist = Dictionary<int, int>()
         let queue = Queue<int>()
-        let pinNode = clkPinIdx * ChannelsPerCell
-        dist.[pinNode] <- 0
-        queue.Enqueue pinNode
+        for clkPinIdx in clkPinIdxs do
+            let pinNode = clkPinIdx * ChannelsPerCell
+            if not (dist.ContainsKey pinNode) then
+                dist.[pinNode] <- 0
+                queue.Enqueue pinNode
         let mutable arrival = Map.empty
         let nandLoads = ResizeArray<int>()
         let dataLoads = ResizeArray<int>()
@@ -181,6 +185,10 @@ module HoldAnalysis =
         { Arrival = arrival
           NandLoads = List.ofSeq nandLoads |> List.distinct
           DataLoads = List.ofSeq dataLoads |> List.distinct }
+
+    /// 単一ピン版 (従来の呼び出し互換)。
+    let analyzeClock (dg: DenseGrid) (clkPinIdx: int) : ClockAnalysis =
+        analyzeClockMulti dg [ clkPinIdx ]
 
     // --- 1b. クロック木の最大到達時間と下限 -------------------------------------------
 
@@ -211,10 +219,12 @@ module HoldAnalysis =
             |> List.filter (fun n -> dg.Cells.[n] <> LEmpty)
         | _ -> []
 
-    /// clkPinIdx から届いた DFF について最大到達時間と下限を求める。到達が 1 つもなければ None。
-    let clockLatency (dg: DenseGrid) (clkPinIdx: int) (c: ClockAnalysis) : ClockLatency option =
-        let pin = coordOf dg clkPinIdx
-        let manhattan (a: Coord) = abs (a.X - pin.X) + abs (a.Y - pin.Y)
+    /// clkPinIdxs (区画ごとに 1 本) から届いた DFF について最大到達時間と下限を求める。
+    /// 下限は各端子について「最も近いピンまでの距離」(区画分割で達成しうる理論的な下限)。
+    /// 到達が 1 つもなければ None。
+    let clockLatencyMulti (dg: DenseGrid) (clkPinIdxs: int list) (c: ClockAnalysis) : ClockLatency option =
+        let pins = clkPinIdxs |> List.map (coordOf dg)
+        let manhattan (a: Coord) = pins |> List.map (fun p -> abs (a.X - p.X) + abs (a.Y - p.Y)) |> List.min
         // 到達はクロック側の隣のどれかから届くので、候補のうちピンに近いほうの距離が下限
         let reached =
             [ for KeyValue (dff, arrival) in c.Arrival do
@@ -234,6 +244,10 @@ module HoldAnalysis =
                    LowerBound = terminals |> List.map manhattan |> List.max
                    IdealPinBound = (max spanU spanV + 1) / 2
                    MaxDetour = reached |> List.map (fun (t, a) -> a - manhattan t) |> List.max }
+
+    /// 単一ピン版 (従来の呼び出し互換)。
+    let clockLatency (dg: DenseGrid) (clkPinIdx: int) (c: ClockAnalysis) : ClockLatency option =
+        clockLatencyMulti dg [ clkPinIdx ] c
 
     // --- 2. DFF 間の最短データ遅延 ---------------------------------------------------
 
@@ -378,10 +392,11 @@ module HoldAnalysis =
           /// データ経路が DFF のクロック入力に入る (発射 DFF, 被駆動 DFF)
           GatedClocks: (int * int) list }
 
-    /// 2 相クロックのグリッドを解析する。clkAIdx / clkBIdx はクロックピンのセル番号。
-    let analyzeTwoPhase (dg: DenseGrid) (clkAIdx: int) (clkBIdx: int) : TwoPhaseReport =
-        let clockA = analyzeClock dg clkAIdx
-        let clockB = analyzeClock dg clkBIdx
+    /// 2 相クロックのグリッドを解析する。clkAIdxs / clkBIdxs はクロックピンのセル番号
+    /// (区画ごとに 1 本、issue #7 (b))。
+    let analyzeTwoPhaseMulti (dg: DenseGrid) (clkAIdxs: int list) (clkBIdxs: int list) : TwoPhaseReport =
+        let clockA = analyzeClockMulti dg clkAIdxs
+        let clockB = analyzeClockMulti dg clkBIdxs
         let dffs = findDffs dg
         let phaseCandidates (dff: int) =
             [ if Map.containsKey dff clockA.Arrival then yield PhaseA
@@ -415,6 +430,10 @@ module HoldAnalysis =
           AToB = phasePairs |> List.filter (fun (_, _, pl, pc, _) -> pl = PhaseA && pc = PhaseB) |> List.length
           BToA = phasePairs |> List.filter (fun (_, _, pl, pc, _) -> pl = PhaseB && pc = PhaseA) |> List.length
           GatedClocks = [ for (launch, reach) in reaches do for c in reach.ToClock do yield launch, c ] }
+
+    /// 単一ピン版 (従来の呼び出し互換)。
+    let analyzeTwoPhase (dg: DenseGrid) (clkAIdx: int) (clkBIdx: int) : TwoPhaseReport =
+        analyzeTwoPhaseMulti dg [ clkAIdx ] [ clkBIdx ]
 
     /// 2 相の不変条件が成り立つか: 全 DFF がちょうど 1 相、同相経路 0 本、
     /// クロック網がデータに混ざらない (NAND 入力・D 入力・ゲーテッドクロックがない)。

@@ -343,16 +343,22 @@ module PlacementTiming =
           ArcPathLength = arcPathLength
           EndpointArrival = endpoints }
 
-    /// 配置 (ゲート → 座標) とピン座標 (クロックピンを含む) から 3 窓を解析する。
+    /// 配置 (ゲート → 座標) とピン座標 (クロックピンを含む)、クロックピン分割
+    /// (issue #7 (b): clockNetOfGate g = ゲート g (Master/Slave のみ) が実際に配線される
+    /// 区画ネット。分割していなければ常に net.ClockA / net.ClockB) から 3 窓を解析する。
+    /// クロック到達は「その DFF が担当するピン」までのマンハッタン距離で近似する。
     let analyze
             (model: TimingModel)
             (net: TimingNetwork)
             (coordOf: int -> Coord)
             (pins: Map<NetId, Coord>)
+            (clockNetOfGate: int -> NetId)
         : Result<WindowTiming list, PlacementTimingError> =
         let requiredPins =
-            [ yield net.ClockA
-              yield net.ClockB
+            [ for g in 0 .. net.Roles.Length - 1 do
+                  match net.Roles.[g] with
+                  | Master | Slave -> yield clockNetOfGate g
+                  | Logic -> ()
               for a in net.Arcs do
                   match a.Source with
                   | FromInputPin n -> yield n
@@ -363,13 +369,11 @@ module PlacementTiming =
             let coords = Array.init net.Roles.Length coordOf
             let coordAt (g: int) = coords.[g]
             let delays = Array.init net.Arcs.Length (arcDelay net coordAt pins)
-            let clockA, clockB = Map.find net.ClockA pins, Map.find net.ClockB pins
             let clockArrival =
                 net.Roles
                 |> Array.mapi (fun g role ->
                     match role with
-                    | Master -> manhattan clockA coords.[g]
-                    | Slave -> manhattan clockB coords.[g]
+                    | Master | Slave -> manhattan (Map.find (clockNetOfGate g) pins) coords.[g]
                     | Logic -> 0)
             Ok (allWindows |> List.map (analyzeWindow model net delays clockArrival))
 
@@ -447,16 +451,17 @@ module PlacementTiming =
             Error (InvalidTimingConfig (sprintf "CriticalityMemory は [0, 1): %g" cfg.CriticalityMemory))
         else Ok ()
 
-    /// 1 つの配置を評価する (解析 + 総アーク距離)。
+    /// 1 つの配置を評価する (解析 + 総アーク距離)。resolvePins はピン座標に加えて、
+    /// ゲート (Master/Slave) → 実際に配線される区画クロックネットも返す (issue #7 (b))。
     let evaluate
             (model: TimingModel)
             (grid: SlotGrid)
             (net: TimingNetwork)
-            (resolvePins: Assignment -> Map<NetId, Coord>)
+            (resolvePins: Assignment -> Map<NetId, Coord> * (int -> NetId))
             (assignment: Assignment)
         : Result<WindowTiming list * Arc[] * int64, PlacementTimingError> =
-        let pins = resolvePins assignment
-        analyze model net (fun g -> slotCoord grid assignment.[g]) pins
+        let pins, clockNetOfGate = resolvePins assignment
+        analyze model net (fun g -> slotCoord grid assignment.[g]) pins clockNetOfGate
         |> Result.bind (fun windows ->
             toPlacementArcs net pins
             |> Result.map (fun arcs ->
@@ -474,7 +479,7 @@ module PlacementTiming =
             (cfg: TimingDrivenConfig)
             (grid: SlotGrid)
             (net: TimingNetwork)
-            (resolvePins: Assignment -> Map<NetId, Coord>)
+            (resolvePins: Assignment -> Map<NetId, Coord> * (int -> NetId))
             (initial: Assignment)
         : Result<TimingDrivenOutcome, PlacementTimingError> =
         let roundAnneal (round: int) : AnnealConfig =
