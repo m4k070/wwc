@@ -11,6 +11,8 @@
 //     --init-cache  初期解の割り当てをこのファイルに保存 / あれば読む (掃引の繰り返しを速くする)
 //     --routed      routed/<circuit>.{bin,meta.json} の配線後の予測 (AnalyzeTiming と同じ解析) と、
 //                   初期解 (= その配線に使った配置のはず) の配置段階の予測を DFF ごとに突き合わせる
+//     --routed-timing  --routed の突き合わせ相手を、初期解ではなく既定のタイミング駆動配置
+//                   (defaultTimingDrivenConfig、--place anneal-timing と同じ解) にする
 //     --sweep       初期解からのタイミング駆動の再アニーリングを、設定ごとに試して表にする
 //                   (T1 は defaultTimingDrivenConfig.FinalTemperature)
 //
@@ -33,6 +35,7 @@ type Options =
       Anneal: GatePlacement.AnnealConfig
       InitCache: string option
       RoutedDir: string option
+      RoutedIsTimingDriven: bool
       Sweep: GatePlacement.TimingDrivenConfig list }
 
 let parseFloat (s: string) : float option =
@@ -70,6 +73,7 @@ let parseArgs (args: string list) : Result<Options, string> =
             | _ -> Error (sprintf "--seed には 0 以上の整数が必要: %s" n)
         | "--init-cache" :: f :: tail -> go { opts with InitCache = Some (Path.GetFullPath f) } tail
         | "--routed" :: d :: tail -> go { opts with RoutedDir = Some (Path.GetFullPath d) } tail
+        | "--routed-timing" :: tail -> go { opts with RoutedIsTimingDriven = true } tail
         | "--sweep" :: spec :: tail ->
             let entries =
                 spec.Split (';', StringSplitOptions.RemoveEmptyEntries)
@@ -85,7 +89,7 @@ let parseArgs (args: string list) : Result<Options, string> =
         | extra :: _ -> Error (sprintf "余分な引数: %s" extra)
     let defaults =
         { Circuit = ""; Pitch = (20, 14); Anneal = GatePlacement.defaultAnnealConfig
-          InitCache = None; RoutedDir = None; Sweep = [] }
+          InitCache = None; RoutedDir = None; RoutedIsTimingDriven = false; Sweep = [] }
     match go defaults args with
     | Ok opts when opts.Circuit = "" -> Error "回路名が必要 (例: sm83_full)"
     | result -> result
@@ -303,7 +307,15 @@ let run (opts: Options) : int =
     let routedResult =
         match opts.RoutedDir with
         | None -> Ok ()
-        | Some dir -> compareWithRouted dir opts.Circuit grid prepared net initial baseline
+        | Some dir when not opts.RoutedIsTimingDriven -> compareWithRouted dir opts.Circuit grid prepared net initial baseline
+        | Some dir ->
+            PipelineWL.timingDrivenFrom GatePlacement.defaultTimingDrivenConfig opts.Anneal grid prepared initial
+            |> Result.mapError (sprintf "%A")
+            |> Result.bind (fun td ->
+                evaluatePlacement grid prepared net td.Best
+                |> Result.bind (fun e ->
+                    printfn "  (突き合わせ相手: 既定のタイミング駆動配置 round %d、1 周期の予測 %d)" td.BestRound e.Summary.Cycle
+                    compareWithRouted dir opts.Circuit grid prepared net td.Best e))
     match routedResult with
     | Error e ->
         eprintfn "ERROR (配線後との比較): %s" e
@@ -342,7 +354,7 @@ let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/AnalyzePlacementTiming.fsx <circuit> [--pitch X Y] [--moves N] [--seed N] [--init-cache FILE] [--routed DIR] [--sweep \"α,β,rounds,moves,T0,msWeight,memory;...\"]"
+        eprintfn "使い方: dotnet fsi src/AnalyzePlacementTiming.fsx <circuit> [--pitch X Y] [--moves N] [--seed N] [--init-cache FILE] [--routed DIR] [--routed-timing] [--sweep \"α,β,rounds,moves,T0,msWeight,memory;...\"]"
         2
     | Ok opts -> run opts
 
