@@ -140,10 +140,13 @@ module TimingAnalysis =
           Distance: int
           Breakdown: Breakdown
           /// この値の起点ノード (Pin または DFF-Q のセル番号 × ChannelsPerCell)。Reached=false なら無意味
-          Origin: int }
+          Origin: int
+          /// この値を運んできた直前のノード (経路復元用)。起点自身は自分自身を指す
+          /// (「Pred = 自身」を「起点に着いた」の終了条件にする。Reached=false なら無意味)
+          Pred: int }
 
     let private unreached : ArrivalInfo =
-        { Reached = false; Distance = 0; Breakdown = zeroBreakdown; Origin = -1 }
+        { Reached = false; Distance = 0; Breakdown = zeroBreakdown; Origin = -1; Pred = -1 }
 
     /// 起点ノード集合から、事前計算したトポロジカル順で最長経路 DP を行う (multi-source longest path)。
     /// 起点でないノードの到達可否は「到達した先行ノードが 1 つでもあるか」で決まる。
@@ -152,7 +155,7 @@ module TimingAnalysis =
         let nodeCount = dg.Cells.Length * ChannelsPerCell
         let info = Array.create nodeCount unreached
         for s in sources do
-            info.[s] <- { Reached = true; Distance = 0; Breakdown = zeroBreakdown; Origin = s }
+            info.[s] <- { Reached = true; Distance = 0; Breakdown = zeroBreakdown; Origin = s; Pred = s }
         for u in topo do
             let ui = info.[u]
             if ui.Reached then
@@ -165,7 +168,8 @@ module TimingAnalysis =
                                 { Reached = true
                                   Distance = candidate
                                   Breakdown = addArc (arcKindOfNode dg v) ui.Breakdown
-                                  Origin = ui.Origin }
+                                  Origin = ui.Origin
+                                  Pred = u }
                     | DffData _ | DffClock _ -> ()
         info
 
@@ -237,7 +241,10 @@ module TimingAnalysis =
           /// クロック網自体の収束にかかる下限 (ClockFloor の説明を参照)。DataInWindow は 0
           ClockFloor: int
           /// クロック到達も含めたこの窓の予測最大世代数 (= max ClockFloor (Paths の PredictedGen))
-          PredictedMax: int }
+          PredictedMax: int
+          /// この窓の起点ノード集合 (longestPathsFrom への入力)。pathBreakdownsForWindow が
+          /// DP をもう一度 (1 回だけ) 走らせてゲート単位の内訳を作るときに使う
+          Sources: int list }
 
     /// クロック網の最大到達世代 (Map が空なら 0)。
     let private maxClockArrival (c: ClockAnalysis) : int =
@@ -325,7 +332,141 @@ module TimingAnalysis =
         { Window = window
           Paths = paths
           ClockFloor = clockFloor
-          PredictedMax = max clockFloor pathsMax }
+          PredictedMax = max clockFloor pathsMax
+          Sources = sources }
+
+    // --- 4b. 経路のゲート単位分解 (配置 vs 配線の切り分け) --------------------------
+    //
+    // 経路長 (セル数) の大半は配線・交差セルで、NAND は数% しかない (issue #7 (c) の
+    // 実測。sm83_full の data_in で NAND 0.3〜0.4%)。これが「ゲートが平面上で散らばって
+    // いる」(配置の問題) のか「A* が混雑を避けて回り道している」(配線の問題) のかを
+    // 切り分けるため、経路を NAND / DFF / ピンの並び (ゲート列) に落とし、隣り合う
+    // ゲート間を次の 3 値に分解する:
+    //   配置距離 = 2 ゲートのセル間のマンハッタン距離 (配置がどうであれ必要な下限)
+    //   実配線長 = その間の実際のホップ数 (HoldAnalysis.ClockLatency の MaxArrival と同じ
+    //              規約: 1 ホップ = 隣接セルへの 1 手)
+    //   回り道   = 実配線長 − 配置距離
+    // グリッド上は 1 手で 1 セルしか進めないので、どんな経路のホップ数もその両端の
+    // マンハッタン距離を下回れない → 回り道は論理的に常に ≥ 0 になる
+    // (TimingAnalysisTest で検証)。
+
+    let private manhattan (a: Coord) (b: Coord) : int = abs (a.X - b.X) + abs (a.Y - b.Y)
+
+    let private isNandNode (dg: DenseGrid) (node: int) : bool =
+        match dg.Cells.[node / ChannelsPerCell] with
+        | LNand _ -> true
+        | _ -> false
+
+    /// PathEndTarget から、longestPathsFrom の info 配列を引くノード ID を復元する
+    /// (analyzeWindow の pathAt と同じ規則の裏返し)。窓に依らない純粋な変換。
+    let nodeOfTarget (dg: DenseGrid) (dffDataNodes: Map<int, int>) (target: PathEndTarget) : int option =
+        match target with
+        | DffD dff -> Map.tryFind dff dffDataNodes
+        | ProbePoint (c, _) -> mainNodeAt dg c
+
+    /// 経路上のゲート区切り点 (NAND / DFF / ピン) の座標と、起点からの累積ホップ数
+    /// (起点は 0)。DFF ターゲットは info 配列に乗らない (DffData は末端 Sink な組合せ
+    /// グラフ外なので) — 直前の組合せノードの累積ホップ数 + 1 (DFF 自身へ渡る、
+    /// 追跡していない最後の 1 ホップ) を使う。
+    type Waypoint = { Coord: Coord; Hops: int }
+
+    /// 隣り合うゲート 1 区間の内訳。
+    type Segment =
+        { From: Coord
+          To: Coord
+          /// 実配線長 (ホップ数)
+          WireHops: int
+          /// 配置距離 (マンハッタン距離。配置で決まる下限)
+          PlacementDistance: int
+          /// 回り道 = WireHops − PlacementDistance (常に ≥ 0)
+          Detour: int }
+
+    type PathBreakdown =
+        { Waypoints: Waypoint list
+          Segments: Segment list
+          TotalWireHops: int
+          TotalPlacementDistance: int
+          TotalDetour: int
+          /// 始点・終点間の直接マンハッタン距離。Segments の PlacementDistance 合計とは別物
+          /// (経路が折れ曲がっていれば後者のほうが大きい) — どう配置しても避けられない
+          /// 下限の目安として使う
+          EndToEndManhattan: int }
+
+    /// info の Pred を辿って、起点から node までのノード列 (昇順) を復元する。
+    /// buildTopoOrder が閉路なしを保証しているので必ず有限段で起点に達する。
+    let private reconstructChain (info: ArrivalInfo[]) (node: int) : int list =
+        let rec go (n: int) (acc: int list) =
+            if info.[n].Origin = n then n :: acc
+            else go info.[n].Pred (n :: acc)
+        go node []
+
+    /// info・target・(そこへ到達した) node から経路のゲート単位分解を作る。
+    /// node は nodeOfTarget が返したもの (info.[node].Reached であること)。
+    let pathBreakdown (dg: DenseGrid) (info: ArrivalInfo[]) (target: PathEndTarget) (node: int) : PathBreakdown option =
+        let ai = info.[node]
+        if not ai.Reached then None
+        else
+            match reconstructChain info node with
+            | [] -> None
+            | source :: rest ->
+                let sourceCoord = coordOf dg (source / ChannelsPerCell)
+                // 中間の区切り点は NAND だけ (Wire/Cross は「回り道」の材料であって区切り点にしない)
+                let midWaypoints =
+                    rest
+                    |> List.choose (fun n ->
+                        if isNandNode dg n then
+                            Some { Coord = coordOf dg (n / ChannelsPerCell); Hops = info.[n].Distance }
+                        else None)
+                let lastHops = ai.Distance
+                let finalWaypoint =
+                    match target with
+                    | DffD dff -> { Coord = coordOf dg dff; Hops = lastHops + 1 }
+                    | ProbePoint (c, _) -> { Coord = c; Hops = lastHops }
+                // node 自身が NAND で ProbePoint がその座標を指す場合、midWaypoints の末尾と
+                // finalWaypoint が同じ点になる — 二重に数えない
+                let midWithoutDup =
+                    match List.tryLast midWaypoints with
+                    | Some last when last.Coord = finalWaypoint.Coord && last.Hops = finalWaypoint.Hops ->
+                        midWaypoints |> List.rev |> List.tail |> List.rev
+                    | _ -> midWaypoints
+                let waypoints = { Coord = sourceCoord; Hops = 0 } :: midWithoutDup @ [ finalWaypoint ]
+                let segments =
+                    waypoints
+                    |> List.pairwise
+                    |> List.map (fun (a, b) ->
+                        let wireHops = b.Hops - a.Hops
+                        let placementDistance = manhattan a.Coord b.Coord
+                        { From = a.Coord
+                          To = b.Coord
+                          WireHops = wireHops
+                          PlacementDistance = placementDistance
+                          Detour = wireHops - placementDistance })
+                let totalWireHops = segments |> List.sumBy (fun s -> s.WireHops)
+                let totalPlacementDistance = segments |> List.sumBy (fun s -> s.PlacementDistance)
+                Some { Waypoints = waypoints
+                       Segments = segments
+                       TotalWireHops = totalWireHops
+                       TotalPlacementDistance = totalPlacementDistance
+                       TotalDetour = totalWireHops - totalPlacementDistance
+                       EndToEndManhattan = manhattan sourceCoord finalWaypoint.Coord }
+
+    /// window の longestPathsFrom をもう一度 (1 回だけ) 走らせて、指定した経路群の
+    /// ゲート単位分解をまとめて作る。全経路ぶん info を保持し続けるとメモリを食う
+    /// (グリッドサイズ × チャンネル数の配列) ので、表示対象 (上位 N 本など) を
+    /// 絞ってから呼ぶこと。
+    let pathBreakdownsForWindow
+            (dg: DenseGrid)
+            (topo: int[])
+            (dffDataNodes: Map<int, int>)
+            (r: WindowReport)
+            (paths: CriticalPath list)
+        : (CriticalPath * PathBreakdown option) list =
+        let info = longestPathsFrom dg topo r.Sources
+        paths
+        |> List.map (fun p ->
+            match nodeOfTarget dg dffDataNodes p.Target with
+            | None -> p, None
+            | Some node -> p, pathBreakdown dg info p.Target node)
 
     // --- 5. 2 相クロック回路全体の解析 -------------------------------------------------
 
@@ -350,3 +491,41 @@ module TimingAnalysis =
             [ analyzeWindow dg topo clockA clockB dffDataNodes probes DataInWindow dataInSources
               analyzeWindow dg topo clockA clockB dffDataNodes probes PhaseAWindow (dffsOfPhase PhaseA)
               analyzeWindow dg topo clockA clockB dffDataNodes probes PhaseBWindow (dffsOfPhase PhaseB) ])
+
+    // --- 6. マスター→スレーブ間の配置距離分布 (issue #7 (c) の外れ値調査) -------------
+    //
+    // Clocking.toTwoPhase は元の DFF 1 個をマスター (clk_a) + スレーブ (clk_b) に分け、
+    // マスターの Q (新しいネット) はそのスレーブの D 以外には使われない (1 対 1 の直結)。
+    // よってマスターから HoldAnalysis.reachFromDff で辿れる DFF データ終端は必ずスレーブ
+    // ちょうど 1 個のはず。この配置距離 (マンハッタン距離) の分布は、annealing が
+    // master→slave アークをどれだけ短く保てているかを表す。PhaseAWindow の外れ値
+    // (マスター→スレーブの直結配線が突出して長い組) を見つけるのに使う。
+
+    /// マスター → その唯一のスレーブへの配置距離。
+    type MasterSlaveDistance =
+        { Master: Coord
+          Slave: Coord
+          /// 配置距離 (マンハッタン距離)
+          PlacementDistance: int }
+
+    /// 全マスター DFF について、スレーブへの配置距離を求める。マスター→スレーブが
+    /// 1 対 1 の直結 (不変条件) でない組 (スレーブが 0 個/複数個見つかった) は除く。
+    let masterSlaveDistances (dg: DenseGrid) (clkAIdx: int) (clkBIdx: int) : MasterSlaveDistance list =
+        let clockA = analyzeClock dg clkAIdx
+        let clockB = analyzeClock dg clkBIdx
+        let dffs = findDffs dg
+        let phaseCandidates (dff: int) =
+            [ if Map.containsKey dff clockA.Arrival then yield PhaseA
+              if Map.containsKey dff clockB.Arrival then yield PhaseB ]
+        let masters = dffs |> List.filter (fun d -> phaseCandidates d = [ PhaseA ])
+        let nodeCount = dg.Cells.Length * ChannelsPerCell
+        let dist = Array.zeroCreate<int> nodeCount
+        let stamp = Array.zeroCreate<int> nodeCount
+        masters
+        |> List.mapi (fun i master -> master, reachFromDff dg dist stamp (i + 1) master)
+        |> List.choose (fun (master, reach) ->
+            match reach.ToData |> Map.toList with
+            | [ (slave, _minData) ] ->
+                let m, s = coordOf dg master, coordOf dg slave
+                Some { Master = m; Slave = s; PlacementDistance = manhattan m s }
+            | _ -> None)

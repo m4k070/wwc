@@ -59,7 +59,26 @@ let describeNandRatio (b: Breakdown) : string =
     if b.Total = 0 then "n/a"
     else sprintf "wire=%d cross=%d nand=%d (NAND 割合 %.1f%%)" b.Wire b.Cross b.Nand (100.0 * float b.Nand / float b.Total)
 
-let printWindow (dg: DenseGrid) (names: Map<Coord, string list>) (topCount: int) (r: WindowReport) : unit =
+/// 1 区間 (隣り合うゲート間) の内訳を 1 行で。
+let describeSegment (names: Map<Coord, string list>) (s: Segment) : string =
+    sprintf "%-24s -> %-24s  配置距離 %6d  実配線 %6d  回り道 %6d"
+        (describeCoord names s.From) (describeCoord names s.To) s.PlacementDistance s.WireHops s.Detour
+
+/// 1 経路のゲート単位分解 (配置距離・実配線長・回り道の内訳と区間の並び)。
+let printPathBreakdown (names: Map<Coord, string list>) (b: PathBreakdown) : unit =
+    printfn "      配置距離計 %6d  実配線計 %6d  回り道計 %6d  (始点-終点マンハッタン %6d、区間 %d 本)"
+        b.TotalPlacementDistance b.TotalWireHops b.TotalDetour b.EndToEndManhattan b.Segments.Length
+    for s in b.Segments do
+        printfn "        %s" (describeSegment names s)
+
+let printWindow
+        (dg: DenseGrid)
+        (topo: int[])
+        (dffDataNodes: Map<int, int>)
+        (names: Map<Coord, string list>)
+        (topCount: int)
+        (r: WindowReport)
+    : unit =
     printfn "== %s: 予測最大 %d 世代 (経路 %d 本) ==" (windowLabel r.Window) r.PredictedMax r.Paths.Length
     if List.isEmpty r.Paths then
         printfn "  (この窓で到達する DFF/出力プローブがない)"
@@ -74,6 +93,28 @@ let printWindow (dg: DenseGrid) (names: Map<Coord, string list>) (topCount: int)
             printfn "  %8d %8d %6d %6d %6d %6d  %-24s -> %s"
                 p.PredictedGen p.OriginClockArrival p.PathLength p.Breakdown.Wire p.Breakdown.Cross p.Breakdown.Nand
                 (describeCoord names p.Source) (describeTarget dg names p.Target)
+        // ゲート単位分解 (配置距離 vs 回り道)。上位 N 本の longestPathsFrom をもう一度
+        // 走らせて (analyzeWindow と同じ DP を 1 回だけ再実行) 経路を復元する。issue #7 (c)。
+        let breakdowns = pathBreakdownsForWindow dg topo dffDataNodes r top
+        printfn "  -- ゲート単位分解 (配置距離 = 隣り合うゲート間のマンハッタン距離の下限、回り道 = 実配線長 - 配置距離) --"
+        for (p, bOpt) in breakdowns do
+            printfn "    %-24s -> %s" (describeCoord names p.Source) (describeTarget dg names p.Target)
+            match bOpt with
+            | None -> printfn "      (分解できない: ターゲットノードが見つからない)"
+            | Some b -> printPathBreakdown names b
+        let allSegments = breakdowns |> List.choose snd |> List.collect (fun b -> b.Segments)
+        let placementTotal = allSegments |> List.sumBy (fun s -> s.PlacementDistance)
+        let detourTotal = allSegments |> List.sumBy (fun s -> s.Detour)
+        let wireTotal = allSegments |> List.sumBy (fun s -> s.WireHops)
+        if wireTotal > 0 then
+            printfn "  上位 %d 本合計 (区間 %d 本): 配置距離 %d (%.1f%%) / 回り道 %d (%.1f%%) / 実配線 %d"
+                top.Length allSegments.Length placementTotal (100.0 * float placementTotal / float wireTotal)
+                detourTotal (100.0 * float detourTotal / float wireTotal) wireTotal
+        let worstDetours = allSegments |> List.sortByDescending (fun s -> s.Detour) |> List.truncate 10
+        if not (List.isEmpty worstDetours) then
+            printfn "  -- 回り道が大きい区間 上位 %d --" worstDetours.Length
+            for s in worstDetours do
+                printfn "    %s" (describeSegment names s)
 
 // --- 実行モード ------------------------------------------------------------------
 
@@ -134,9 +175,30 @@ let analyzeAndPrint (opts: Options) (grid: LGrid) (meta: RoutedMeta) : int =
                 printfn "%s: grid %dx%d, clk_a (%d,%d) / clk_b (%d,%d), 解析 %.1f 秒"
                     meta.Circuit dg.Width dg.Height clkA.X clkA.Y clkB.X clkB.Y sw.Elapsed.TotalSeconds
                 let names = outputNames meta
-                for r in reports do
-                    printWindow dg names opts.TopCount r
-                0
+                // ゲート単位分解 (printWindow 内) は buildTopoOrder / buildDffDataNodes を
+                // 使い回す。analyzeTwoPhaseTiming が既に成功しているので buildTopoOrder は
+                // 必ず Ok になる (組合せグラフは窓に依らず共有)
+                match buildTopoOrder dg with
+                | Error e ->
+                    eprintfn "ERROR: %s (ゲート単位分解の再計算で閉路検出。窓ごとの結果は上に出力済み)" (describeTimingError e)
+                    1
+                | Ok topo ->
+                    let dffDataNodes = buildDffDataNodes dg
+                    for r in reports do
+                        printWindow dg topo dffDataNodes names opts.TopCount r
+                    printfn ""
+                    let masterSlave = masterSlaveDistances dg ai bi
+                    let dists = masterSlave |> List.map (fun d -> d.PlacementDistance) |> Array.ofList
+                    printfn "== マスター→スレーブ配置距離 (2 相化で分割した DFF 対、issue #7 (c) の外れ値調査) =="
+                    printfn "  組数 %d (findDffs 由来の DFF 総数の半分程度のはず): %s" masterSlave.Length (describeDistribution dists)
+                    let over1000 = dists |> Array.filter (fun d -> d > 1000) |> Array.length
+                    printfn "  距離 > 1000 の組: %d" over1000
+                    let worst = masterSlave |> List.sortByDescending (fun d -> d.PlacementDistance) |> List.truncate 5
+                    printfn "  -- 配置距離が大きい組 上位 %d --" worst.Length
+                    for d in worst do
+                        printfn "    %-16s -> %-16s  配置距離 %d"
+                            (describeCoord names d.Master) (describeCoord names d.Slave) d.PlacementDistance
+                    0
 
 let runRouted (opts: Options) (circuit: string) (dir: string) : int =
     match load dir circuit with

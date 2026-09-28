@@ -111,8 +111,97 @@ module TimingAnalysisTest =
                                     yield sprintf "TIMING: %s %s %s predicted (%d) not wildly over actual (%d)" circuit placeLabel (windowLabel w) p a,
                                           notWildlyOverestimated p a ]
 
+    /// pathBreakdownsForWindow の分解が「配置距離 + 回り道 = 実配線長」(各区間・経路合計とも)
+    /// を満たし、回り道が負にならないこと (issue #7 (c) のゲート単位分解機能の検証)。
+    /// グリッド上は 1 手で 1 セルしか進めないので、どんな経路のホップ数もその両端の
+    /// マンハッタン距離を下回れない — 回り道は理論上常に ≥ 0 のはず。
+    let private checkBreakdownInvariants (circuit: string) (placeLabel: string) (placement: GatePlacement.PlacementStrategy) : (string * bool) list =
+        let path = verilogPath circuit
+        if not (File.Exists path) then [ sprintf "TIMING-BREAKDOWN: %s.json present" circuit, false ] else
+        let json = File.ReadAllText path
+        let opts = { defaultCompileOptions with Placement = placement; Clocking = TwoPhase }
+        match compileWLWithOptions opts json, parseYosysPorts json with
+        | Error e, _ -> [ sprintf "TIMING-BREAKDOWN: %s %s compiles two-phase (%A)" circuit placeLabel e, false ]
+        | _, Error e -> [ sprintf "TIMING-BREAKDOWN: %s ports (%s)" circuit (describeError e), false ]
+        | Ok c, Ok ports ->
+            match buildMetaOfCompiled circuit (sourceSha256 (File.ReadAllBytes path)) provenance ports c with
+            | Error e -> [ sprintf "TIMING-BREAKDOWN: %s buildMeta (%s)" circuit (describeError e), false ]
+            | Ok meta ->
+                let grid = importGrid (exportGrid c.Grid)
+                let dg = toDense grid
+                match meta.Clocking with
+                | SingleEdgeClocking -> [ sprintf "TIMING-BREAKDOWN: %s %s compiled two-phase" circuit placeLabel, false ]
+                | TwoPhaseClocking (_, clkA, clkB) ->
+                    match indexOf dg clkA, indexOf dg clkB with
+                    | None, _ | _, None -> [ sprintf "TIMING-BREAKDOWN: %s %s clkA/clkB pins in grid" circuit placeLabel, false ]
+                    | Some ai, Some bi ->
+                        match buildTopoOrder dg with
+                        | Error e -> [ sprintf "TIMING-BREAKDOWN: %s %s acyclic (%s)" circuit placeLabel (describeTimingError e), false ]
+                        | Ok topo ->
+                            match analyzeTwoPhaseTiming dg meta ai bi with
+                            | Error e ->
+                                [ sprintf "TIMING-BREAKDOWN: %s %s analyzeTwoPhaseTiming (%s)" circuit placeLabel (describeTimingError e), false ]
+                            | Ok reports ->
+                                let dffDataNodes = buildDffDataNodes dg
+                                let results =
+                                    [ for r in reports do
+                                        if not (List.isEmpty r.Paths) then
+                                            let label = sprintf "%s %s %s" circuit placeLabel (windowLabel r.Window)
+                                            // 全経路 (小回路なので上位 N に絞らず全数チェックする)
+                                            let breakdowns = pathBreakdownsForWindow dg topo dffDataNodes r r.Paths
+                                            let found = breakdowns |> List.choose snd
+                                            yield sprintf "TIMING-BREAKDOWN: %s all %d paths resolve to a breakdown" label r.Paths.Length,
+                                                  found.Length = r.Paths.Length
+                                            let allSegs = found |> List.collect (fun b -> b.Segments)
+                                            yield sprintf "TIMING-BREAKDOWN: %s no negative detour (%d segments)" label allSegs.Length,
+                                                  allSegs |> List.forall (fun s -> s.Detour >= 0)
+                                            yield sprintf "TIMING-BREAKDOWN: %s placement + detour = wire per segment" label,
+                                                  allSegs |> List.forall (fun s -> s.PlacementDistance + s.Detour = s.WireHops)
+                                            yield sprintf "TIMING-BREAKDOWN: %s placement + detour = wire per path total" label,
+                                                  found |> List.forall (fun b -> b.TotalPlacementDistance + b.TotalDetour = b.TotalWireHops)
+                                            yield sprintf "TIMING-BREAKDOWN: %s end-to-end manhattan <= placement total (triangle inequality)" label,
+                                                  found |> List.forall (fun b -> b.EndToEndManhattan <= b.TotalPlacementDistance) ]
+                                if List.isEmpty results then
+                                    [ sprintf "TIMING-BREAKDOWN: %s %s has at least one path to check" circuit placeLabel, false ]
+                                else results
+
+    /// masterSlaveDistances が全マスターについて非負の配置距離を返し、findDffs の
+    /// DFF 総数のちょうど半分の組を見つけること (1 個の元 DFF = マスター 1 + スレーブ 1)。
+    let private checkMasterSlaveDistances (circuit: string) (placeLabel: string) (placement: GatePlacement.PlacementStrategy) : (string * bool) list =
+        let path = verilogPath circuit
+        if not (File.Exists path) then [ sprintf "TIMING-MS: %s.json present" circuit, false ] else
+        let json = File.ReadAllText path
+        let opts = { defaultCompileOptions with Placement = placement; Clocking = TwoPhase }
+        match compileWLWithOptions opts json, parseYosysPorts json with
+        | Error e, _ -> [ sprintf "TIMING-MS: %s %s compiles two-phase (%A)" circuit placeLabel e, false ]
+        | _, Error e -> [ sprintf "TIMING-MS: %s ports (%s)" circuit (describeError e), false ]
+        | Ok c, Ok ports ->
+            match buildMetaOfCompiled circuit (sourceSha256 (File.ReadAllBytes path)) provenance ports c with
+            | Error e -> [ sprintf "TIMING-MS: %s buildMeta (%s)" circuit (describeError e), false ]
+            | Ok meta ->
+                let grid = importGrid (exportGrid c.Grid)
+                let dg = toDense grid
+                match meta.Clocking with
+                | SingleEdgeClocking -> [ sprintf "TIMING-MS: %s %s compiled two-phase" circuit placeLabel, false ]
+                | TwoPhaseClocking (_, clkA, clkB) ->
+                    match indexOf dg clkA, indexOf dg clkB with
+                    | None, _ | _, None -> [ sprintf "TIMING-MS: %s %s clkA/clkB pins in grid" circuit placeLabel, false ]
+                    | Some ai, Some bi ->
+                        let dffCount = (findDffs dg).Length
+                        let pairs = masterSlaveDistances dg ai bi
+                        [ sprintf "TIMING-MS: %s %s master count = dffCount / 2 (%d = %d / 2)" circuit placeLabel pairs.Length dffCount,
+                          pairs.Length = dffCount / 2
+                          sprintf "TIMING-MS: %s %s all placement distances >= 0" circuit placeLabel,
+                          pairs |> List.forall (fun d -> d.PlacementDistance >= 0) ]
+
     let runAll () : (string * bool) list =
         [ yield! checkCircuit "counter4" "rowmajor" GatePlacement.RowMajor None
           yield! checkCircuit "counter4" "anneal" annealed None
           yield! checkCircuit "reg8" "rowmajor" GatePlacement.RowMajor (Some "d")
-          yield! checkCircuit "reg8" "anneal" annealed (Some "d") ]
+          yield! checkCircuit "reg8" "anneal" annealed (Some "d")
+          yield! checkBreakdownInvariants "counter4" "rowmajor" GatePlacement.RowMajor
+          yield! checkBreakdownInvariants "counter4" "anneal" annealed
+          yield! checkBreakdownInvariants "reg8" "rowmajor" GatePlacement.RowMajor
+          yield! checkBreakdownInvariants "reg8" "anneal" annealed
+          yield! checkMasterSlaveDistances "counter4" "anneal" annealed
+          yield! checkMasterSlaveDistances "reg8" "anneal" annealed ]
