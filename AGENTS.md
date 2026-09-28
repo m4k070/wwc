@@ -18,8 +18,8 @@ No separate lint or typecheck step — the F# compiler covers both. No formatter
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` (or any `src/*.fsx` script) —
 they reference the compiled DLL (`src/bin/Debug/net8.0/WwHdl.dll`).
 
-**Current test results** (2026-09-28 に実測): F# `RunTests.fsx` **287/287** /
-`cargo test` (wgpu-runner) **44/44** / `wgpu-runner/run-tests.sh` (GPU golden) **24/24** /
+**Current test results** (2026-09-28 に実測): F# `RunTests.fsx` **421/421** /
+`cargo test` (wgpu-runner) **49/49** / `wgpu-runner/run-tests.sh` (GPU golden) **24/24** /
 `wgpu-runner/memory-test.sh` (引数なし) **5/5**。
 Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計測。
 
@@ -30,11 +30,12 @@ Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計
 ```bash
 # 配線して routed/<circuit>.{bin,meta.json} に保存（保存後に自動で再読込して整合性確認）
 dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] \
-    [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P] \
-    [--clocking single|two-phase]
+    [--place rowmajor|anneal|anneal-timing] [--moves N] [--seed N] [--backward P] \
+    [--clocking single|two-phase] [--clock-pins K]
 
-# sm83_full の配線実績コマンド（20x14 ピッチ・アニーリング配置・2 相クロックで約 16 分、rip-up 0）
-dotnet fsi src/ExportRouted.fsx sm83_full --pitch 20 14 --place anneal --clocking two-phase
+# sm83_full の配線実績コマンド（20x14 ピッチ・タイミング駆動アニーリング配置・2 相クロック・
+# クロックピン 16 本で約 16 分、rip-up 0）
+dotnet fsi src/ExportRouted.fsx sm83_full --pitch 20 14 --place anneal-timing --clocking two-phase --clock-pins 16
 
 # 保存済み配線結果の整合性・鮮度確認 (寸法/ピン座標/verilog JSON の SHA-256)
 dotnet fsi src/LoadRouted.fsx <circuit> [--dir DIR]
@@ -141,7 +142,10 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
   (2 周期目以降は短縮手順) で駆動する。同じ相の DFF 間に組合せ経路が無い限り hold 違反が構造的に起きない。
   手順の正確な根拠は DESIGN-VERIFY.md §5.2.1、不変条件の検査は `AnalyzeHold.fsx` (`--clocking two-phase` /
   meta の `clocking` から自動判定)。論理 Netlist / NetlistSim / golden は単相のまま変わらない。
-  sm83_full はこの方式で 16.1 分・rip-up 0 で配線完走した (2026-09-27)。
+  sm83_full はこの方式で 16.1 分・rip-up 0 で配線完走した (2026-09-27)。クロックピンは `--clock-pins K` で
+  K 個の区画に分けられる (既定 1)。区画ごとに独立したピン・配線木を持ち、ホストは同じ相の全ピンを
+  同じ世代に書く。到達時間が区画ごとにずれても、同相の DFF 間に組合せ経路が無いので hold 違反は起きない。
+  sm83_full は K=16 で配線し直してあり (16.3 分、rip-up 0)、クロック最大到達は 1,478 / 1,494 → 284 / 282 世代。
 
 ## External dependency
 
@@ -149,14 +153,16 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
 - **gbfs** (`../gbfs`、別リポジトリの F# 製 Game Boy エミュレータ) — `DiffTestGbfs.fsx` / `CoSimGbfs.fsx`
   が参照モデルとして使う。事前に `gbfs.Lib` を Release ビルドしておく必要がある。
 
-## sm83_full の現状 (2026-09-27, PR #5)
+## sm83_full の現状 (2026-09-28)
 
 sm83_full (通常命令 (STOP を除く) + CB prefix 256 + 割込み + HALT バグ、組合せ 10,859 + DFF 181) は
-**20x14 ピッチ・アニーリング配置・2 相クロックで配線完走** (16.1 分、rip-up 0、`routed/sm83_full.{bin,meta.json}`)。
+**20x14 ピッチ・タイミング駆動アニーリング配置・2 相クロック・クロックピン 16 本で配線完走**
+(16.3 分、rip-up 0、grid 2110x1480、`routed/sm83_full.{bin,meta.json}`、meta formatVersion 3)。
+クロック木の最大到達は clk_a 284 / clk_b 282 世代 (ピン 1 本のときは 1,478 / 1,494)。
 RTL の正しさは blargg `cpu_instrs` 個別版 **11/11 PASS** (`CoSimGbfs.fsx --lockstep`) で、
-RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式) で確認済み。
-残課題 (優先順) は TODO.md 「残課題」節を参照 (CA 高速化、`compileWL` の既定値見直し、サイクル精度、
-mooneye acceptance 系、STOP 未実装、NetlistSim 高速化など)。
+RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式、34 本で 152 秒) で確認済み。
+残課題 (優先順) は TODO.md 「残課題」節を参照 (`data_in` 窓の組合せ収束、`compileWL` の既定値見直し、
+サイクル精度、mooneye acceptance 系、STOP 未実装、NetlistSim 高速化など)。
 
 ## 2026-06-10: LargeCircuit BFS timeout resolved
 
