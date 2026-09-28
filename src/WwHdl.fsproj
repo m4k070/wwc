@@ -17,10 +17,12 @@
     <Compile Include="PipelineWL.fs" />
     <Compile Include="RoutedArtifact.fs" />
     <Compile Include="HoldAnalysis.fs" />
+    <Compile Include="TimingAnalysis.fs" />
     <Compile Include="NetlistSim.fs" />
     <Compile Include="Testbench.fs" />
     <Compile Include="E2eTests.fs" />
     <Compile Include="TestbenchTests.fs" />
     <Compile Include="TwoPhaseTests.fs" />
+    <Compile Include="TimingAnalysisTests.fs" />
   </ItemGroup>
 </Project>
