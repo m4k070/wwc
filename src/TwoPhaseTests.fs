@@ -43,6 +43,12 @@ module WlTwoPhaseTest =
 
     let private annealed = GatePlacement.Annealed { GatePlacement.defaultAnnealConfig with Moves = annealMoves }
 
+    /// タイミング駆動の再アニーリング (issue #7 (c))。小回路なので手数・ラウンドは少なくてよい。
+    let private annealedTiming =
+        GatePlacement.TimingDriven
+            ({ GatePlacement.defaultAnnealConfig with Moves = annealMoves },
+             { GatePlacement.defaultTimingDrivenConfig with Rounds = 3; MovesPerRound = annealMoves })
+
     // --- toTwoPhase 単体 ---------------------------------------------------
 
     // clk=2, d=3, rst=4。g0: NAND(d, q1) → 10、g1: DFF [clk; 10] → q1=11、
@@ -185,7 +191,7 @@ module WlTwoPhaseTest =
 
     let private logicTests () : (string * bool) list =
         [ for circuit in [ "counter4"; "reg8" ] do
-            for placeLabel, placement in [ "rowmajor", GatePlacement.RowMajor; "anneal", annealed ] do
+            for placeLabel, placement in [ "rowmajor", GatePlacement.RowMajor; "anneal", annealed; "anneal-timing", annealedTiming ] do
                 let path = verilogPath circuit
                 if not (File.Exists path) then
                     yield sprintf "WL-2PH: %s.json present" circuit, false

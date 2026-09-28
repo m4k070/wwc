@@ -293,11 +293,55 @@ module PipelineWL =
             nonClockInputPinCoords grid placed circuit.Clocking nl withClockPins
         placed, pins
 
-    /// 配置結果。Annealing は Annealed 戦略のときだけ Some (最適化の前後コスト)。
+    /// 配置結果。Annealing は Annealed / TimingDriven 戦略のときだけ Some (総アーク距離の
+    /// アニーリングの前後コスト)。TimingDriven は TimingDriven に焼き直しの記録が入る。
     type WlPlacement =
         { Placed: WlPlaced list
           Pins: Map<NetId, Coord>
-          Annealing: GatePlacement.AnnealOutcome option }
+          Annealing: GatePlacement.AnnealOutcome option
+          TimingDriven: PlacementTiming.TimingDrivenOutcome option }
+
+    /// 回路とピッチから配置のスロット格子を作る (placeCircuitWithStrategy と同じ格子)。
+    let slotGridOf (pitchX: int) (pitchY: int) (circuit: PreparedCircuit) : GatePlacement.SlotGrid =
+        GatePlacement.squareSlotGrid circuit.Netlist.Gates.Length gateOrigin pitchX pitchY
+
+    /// 割り当てから配置とピン座標を作る (配置段階の解析スクリプト・テスト用に公開)。
+    let placeCircuitFromAssignment
+        (grid: GatePlacement.SlotGrid)
+        (circuit: PreparedCircuit)
+        (assignment: GatePlacement.Assignment)
+        : WlPlaced list * Map<NetId, Coord> =
+        placeFromAssignment grid circuit assignment
+
+    /// 総アーク距離のアニーリングで使うアーク (外部入力ピンは左端列の固定端子、クロックは除外)。
+    let annealArcsOf (pitchY: int) (circuit: PreparedCircuit) : GatePlacement.Arc[] =
+        let nl = circuit.Netlist
+        // クロックは固定端子にしない (ピンは配置後に DFF 群の重心へ動かすため)。
+        // 固定端子に無いネットのアークは buildArcs が捨てる
+        let fixedPins =
+            clockNetsOf circuit.Clocking
+            |> List.fold (fun acc clk -> Map.remove clk acc) (leftEdgePins pitchY nl)
+        GatePlacement.buildArcs nl fixedPins
+
+    /// タイミング駆動の再アニーリング (2 相のみ)。ピンは各ラウンドの配置から
+    /// placeFromAssignment と同じ規則 (ミニマックス中心) で決め直す。
+    let timingDrivenFrom
+        (tdCfg: GatePlacement.TimingDrivenConfig)
+        (annealCfg: GatePlacement.AnnealConfig)
+        (grid: GatePlacement.SlotGrid)
+        (circuit: PreparedCircuit)
+        (initial: GatePlacement.Assignment)
+        : Result<PlacementTiming.TimingDrivenOutcome, CompileError> =
+        match circuit.Clocking with
+        | SingleEdgeClock _ ->
+            Error (InvalidPlacementConfig "タイミング駆動配置は 2 相クロック (--clocking two-phase) のみ対応")
+        | TwoPhaseClock tp ->
+            let resolvePins (a: GatePlacement.Assignment) = snd (placeFromAssignment grid circuit a)
+            PlacementTiming.buildNetwork tp
+            |> Result.bind (fun net ->
+                PlacementTiming.timingDrivenAnneal
+                    PlacementTiming.defaultTimingModel annealCfg tdCfg grid net resolvePins initial)
+            |> Result.mapError (PlacementTiming.describePlacementTimingError >> InvalidPlacementConfig)
 
     /// クロック方式変換済みの回路を配置する。RowMajor は placeWLWithPitch と同一の結果 (単相時)。
     /// Annealed は行優先を初期解にアーク距離を最小化する (クロックネット除外、
@@ -309,24 +353,27 @@ module PipelineWL =
         (circuit: PreparedCircuit)
         : Result<WlPlacement, CompileError> =
         let nl = circuit.Netlist
-        let grid = GatePlacement.squareSlotGrid nl.Gates.Length gateOrigin pitchX pitchY
+        let grid = slotGridOf pitchX pitchY circuit
         let initial = GatePlacement.rowMajorAssignment nl.Gates.Length
+        let annealed (cfg: GatePlacement.AnnealConfig) =
+            GatePlacement.anneal cfg grid nl.Gates.Length (annealArcsOf pitchY circuit) initial
+            |> Result.mapError (GatePlacement.describeConfigError >> InvalidPlacementConfig)
         match strategy with
         | GatePlacement.RowMajor ->
             let placed, pins = placeFromAssignment grid circuit initial
-            Ok { Placed = placed; Pins = pins; Annealing = None }
+            Ok { Placed = placed; Pins = pins; Annealing = None; TimingDriven = None }
         | GatePlacement.Annealed cfg ->
-            // クロックは固定端子にしない (ピンは配置後に DFF 群の重心へ動かすため)。
-            // 固定端子に無いネットのアークは buildArcs が捨てる
-            let fixedPins =
-                clockNetsOf circuit.Clocking
-                |> List.fold (fun acc clk -> Map.remove clk acc) (leftEdgePins pitchY nl)
-            let arcs = GatePlacement.buildArcs nl fixedPins
-            GatePlacement.anneal cfg grid nl.Gates.Length arcs initial
-            |> Result.mapError (GatePlacement.describeConfigError >> InvalidPlacementConfig)
+            annealed cfg
             |> Result.map (fun outcome ->
                 let placed, pins = placeFromAssignment grid circuit outcome.Best
-                { Placed = placed; Pins = pins; Annealing = Some outcome })
+                { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = None })
+        | GatePlacement.TimingDriven (cfg, tdCfg) ->
+            annealed cfg
+            |> Result.bind (fun outcome ->
+                timingDrivenFrom tdCfg cfg grid circuit outcome.Best
+                |> Result.map (fun td ->
+                    let placed, pins = placeFromAssignment grid circuit td.Best
+                    { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = Some td }))
 
     /// 配置戦略を指定して配置する (単相)。
     let placeWLWithStrategy

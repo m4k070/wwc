@@ -36,7 +36,8 @@ let tb = run "Testbench"       (WwHdl.TestbenchTest.runAll ())
 let pl = run "WL Placement"    (WwHdl.WlPlacementTest.runAll ())
 let tp = run "WL Two-Phase"    (WwHdl.WlTwoPhaseTest.runAll ())
 let ti = run "Timing Analysis" (WwHdl.TimingAnalysisTest.runAll ())
+let pt = run "Placement Timing" (WwHdl.PlacementTimingTest.runAll ())
 
-let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk @ mc @ sm @ si @ ra @ ns @ tb @ pl @ tp @ ti
+let all = m1 @ m2 @ m3 @ m4 @ m5 @ ms @ ng @ ha @ ha2 @ fa @ nc @ lc @ fb @ wl @ wp @ wc @ wr @ wg @ wa @ w4 @ sk @ mc @ sm @ si @ ra @ ns @ tb @ pl @ tp @ ti @ pt
 let fails = all |> List.filter (snd >> not)
 printfn "\nTotal: %d/%d passed" (all.Length - fails.Length) all.Length

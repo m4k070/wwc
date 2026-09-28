@@ -41,6 +41,12 @@ module TimingAnalysisTest =
 
     let private annealed = GatePlacement.Annealed { GatePlacement.defaultAnnealConfig with Moves = AnnealMoves }
 
+    /// タイミング駆動の再アニーリング (issue #7 (c))。静的予測 ≥ 実測がこの配置でも成り立つこと。
+    let private annealedTiming =
+        GatePlacement.TimingDriven
+            ({ GatePlacement.defaultAnnealConfig with Moves = AnnealMoves },
+             { GatePlacement.defaultTimingDrivenConfig with Rounds = 3; MovesPerRound = AnnealMoves })
+
     let private settleG (g: LGrid) : LGrid * int = settleIncremental SettleLimit g
 
     /// data 入力に書き込むストレスパターン (全 0 / 全 1 / 市松 / 端のビットなど)。
@@ -199,6 +205,7 @@ module TimingAnalysisTest =
           yield! checkCircuit "counter4" "anneal" annealed None
           yield! checkCircuit "reg8" "rowmajor" GatePlacement.RowMajor (Some "d")
           yield! checkCircuit "reg8" "anneal" annealed (Some "d")
+          yield! checkCircuit "counter4" "anneal-timing" annealedTiming None
           yield! checkBreakdownInvariants "counter4" "rowmajor" GatePlacement.RowMajor
           yield! checkBreakdownInvariants "counter4" "anneal" annealed
           yield! checkBreakdownInvariants "reg8" "rowmajor" GatePlacement.RowMajor

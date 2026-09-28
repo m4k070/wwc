@@ -3,14 +3,18 @@
 //
 // 使い方:
 //   dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR]
-//                                   [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P]
+//                                   [--place rowmajor|anneal|anneal-timing] [--moves N] [--seed N] [--backward P]
+//                                   [--td-alpha A] [--td-beta B] [--td-rounds N]
 //                                   [--clocking single|two-phase]
 //     <circuit>  verilog/<circuit>.json を読む (例: sm83_subset)
 //     --pitch    ピッチ固定 (省略時は compileWL の自動決定 + 輻輳時の自動拡大)
 //     --out      出力先 (既定: routed/)
-//     --place    配置戦略 (既定 rowmajor)。anneal = アーク距離のアニーリング最適化
+//     --place    配置戦略 (既定 rowmajor)。anneal = アーク距離のアニーリング最適化。
+//                anneal-timing = anneal の結果からタイミング駆動の再アニーリング (2 相のみ、issue #7 (c))
 //     --moves / --seed / --backward
 //                anneal のパラメータ (既定は GatePlacement.defaultAnnealConfig)
+//     --td-alpha / --td-beta / --td-rounds
+//                anneal-timing のパラメータ (既定は GatePlacement.defaultTimingDrivenConfig)
 //     --clocking クロック方式 (既定 single)。two-phase = 各 DFF をマスター (clk_a) / スレーブ (clk_b) に
 //                分ける 2 相ノンオーバーラップクロック。skew 均等化をせず、hold は相間の settle で守る。
 //                meta の clocking に clkA / clkB の座標が入り、元の clk は inputs に載らない
@@ -34,6 +38,7 @@ let repoRoot = Path.GetFullPath (Path.Combine (__SOURCE_DIRECTORY__, ".."))
 type PlaceChoice =
     | PlaceRowMajor
     | PlaceAnneal
+    | PlaceAnnealTiming
 
 type Options =
     { Circuit: string
@@ -42,12 +47,14 @@ type Options =
       Place: PlaceChoice
       Clocking: Clocking.ClockingScheme
       /// --place の前後どちらに --moves 等を書いても効くよう、anneal 設定は常に保持する
-      Anneal: GatePlacement.AnnealConfig }
+      Anneal: GatePlacement.AnnealConfig
+      TimingDriven: GatePlacement.TimingDrivenConfig }
 
 let placementStrategy (opts: Options) : GatePlacement.PlacementStrategy =
     match opts.Place with
     | PlaceRowMajor -> GatePlacement.RowMajor
     | PlaceAnneal -> GatePlacement.Annealed opts.Anneal
+    | PlaceAnnealTiming -> GatePlacement.TimingDriven (opts.Anneal, opts.TimingDriven)
 
 let parseArgs (args: string list) : Result<Options, string> =
     let rec go (opts: Options) (rest: string list) =
@@ -60,7 +67,20 @@ let parseArgs (args: string list) : Result<Options, string> =
         | "--out" :: dir :: tail -> go { opts with OutDir = Path.GetFullPath dir } tail
         | "--place" :: "rowmajor" :: tail -> go { opts with Place = PlaceRowMajor } tail
         | "--place" :: "anneal" :: tail -> go { opts with Place = PlaceAnneal } tail
-        | "--place" :: v :: _ -> Error (sprintf "--place は rowmajor|anneal: %s" v)
+        | "--place" :: "anneal-timing" :: tail -> go { opts with Place = PlaceAnnealTiming } tail
+        | "--place" :: v :: _ -> Error (sprintf "--place は rowmajor|anneal|anneal-timing: %s" v)
+        | "--td-alpha" :: v :: tail ->
+            match Double.TryParse (v, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+            | true, a when a >= 0.0 -> go { opts with TimingDriven = { opts.TimingDriven with Alpha = a } } tail
+            | _ -> Error (sprintf "--td-alpha には 0 以上の数が必要: %s" v)
+        | "--td-beta" :: v :: tail ->
+            match Double.TryParse (v, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+            | true, b when b > 0.0 -> go { opts with TimingDriven = { opts.TimingDriven with Beta = b } } tail
+            | _ -> Error (sprintf "--td-beta には正の数が必要: %s" v)
+        | "--td-rounds" :: v :: tail ->
+            match Int32.TryParse v with
+            | true, r when r >= 0 -> go { opts with TimingDriven = { opts.TimingDriven with Rounds = r } } tail
+            | _ -> Error (sprintf "--td-rounds には 0 以上の整数が必要: %s" v)
         | "--clocking" :: "single" :: tail -> go { opts with Clocking = Clocking.SingleEdge } tail
         | "--clocking" :: "two-phase" :: tail -> go { opts with Clocking = Clocking.TwoPhase } tail
         | "--clocking" :: v :: _ -> Error (sprintf "--clocking は single|two-phase: %s" v)
@@ -76,7 +96,7 @@ let parseArgs (args: string list) : Result<Options, string> =
             match Double.TryParse (p, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
             | true, v when v >= 0.0 -> go { opts with Anneal = { opts.Anneal with BackwardPenalty = v } } tail
             | _ -> Error (sprintf "--backward には 0 以上の数が必要: %s" p)
-        | ("--place" | "--moves" | "--seed" | "--backward" | "--out" | "--clocking") as o :: [] ->
+        | ("--place" | "--moves" | "--seed" | "--backward" | "--out" | "--clocking" | "--td-alpha" | "--td-beta" | "--td-rounds") as o :: [] ->
             Error (sprintf "%s の引数が足りない" o)
         | arg :: _ when arg.StartsWith "--" -> Error (sprintf "不明なオプション: %s" arg)
         | name :: tail when opts.Circuit = "" -> go { opts with Circuit = name } tail
@@ -84,7 +104,8 @@ let parseArgs (args: string list) : Result<Options, string> =
     let defaults =
         { Circuit = ""; Pitch = None; OutDir = Path.Combine (repoRoot, "routed"); Place = PlaceRowMajor
           Clocking = Clocking.SingleEdge
-          Anneal = GatePlacement.defaultAnnealConfig }
+          Anneal = GatePlacement.defaultAnnealConfig
+          TimingDriven = GatePlacement.defaultTimingDrivenConfig }
     match go defaults args with
     | Ok opts when opts.Circuit = "" -> Error "回路名が必要 (例: sm83_subset)"
     | result -> result
@@ -161,6 +182,11 @@ let exportCircuit (opts: Options) : int =
                 | GatePlacement.Annealed c ->
                     sprintf "anneal moves=%d seed=%d T0=%g T1=%g backward=%g"
                         c.Moves c.Seed c.InitialTemperature c.FinalTemperature c.BackwardPenalty
+                | GatePlacement.TimingDriven (c, t) ->
+                    sprintf "anneal-timing moves=%d seed=%d T0=%g T1=%g backward=%g | alpha=%g beta=%g rounds=%d movesPerRound=%d T0=%g T1=%g msWeight=%g memory=%g"
+                        c.Moves c.Seed c.InitialTemperature c.FinalTemperature c.BackwardPenalty
+                        t.Alpha t.Beta t.Rounds t.MovesPerRound t.InitialTemperature t.FinalTemperature
+                        t.MasterSlaveWeight t.CriticalityMemory
             let clockingLabel =
                 match opts.Clocking with
                 | Clocking.SingleEdge -> "single"
@@ -207,7 +233,7 @@ let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] [--place rowmajor|anneal] [--moves N] [--seed N] [--backward P] [--clocking single|two-phase]"
+        eprintfn "使い方: dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] [--place rowmajor|anneal|anneal-timing] [--moves N] [--seed N] [--backward P] [--td-alpha A] [--td-beta B] [--td-rounds N] [--clocking single|two-phase]"
         2
     | Ok opts -> exportCircuit opts
 

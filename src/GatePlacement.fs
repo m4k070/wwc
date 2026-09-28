@@ -41,10 +41,51 @@ module GatePlacement =
           /// 逆行アークは U ターン分だけ実配線が長くなる。0 で無効。
           BackwardPenalty: float }
 
+    /// タイミング駆動の再アニーリング (issue #7 (c)) の設定。アルゴリズム本体は
+    /// PlacementTiming.timingDrivenAnneal。ここにはデータだけを置く (PlacementStrategy から参照するため)。
+    ///
+    /// 各ラウンド: 配置段階の静的タイミング解析 → アークのクリティカリティ c ∈ [0,1] →
+    /// 重み w = 1 + Alpha · c^Beta → 重み付きアーク距離 Σ w·dist を低めの温度から焼き直す。
+    /// 重みの「1 +」の項が総配線長を保つ (λ に相当)。Alpha = 0 なら総アーク距離の焼き直しと同じ。
+    type TimingDrivenConfig =
+        { Alpha: float
+          Beta: float
+          /// 「解析 → 重み更新 → 焼き直し」の回数
+          Rounds: int
+          MovesPerRound: int
+          /// 焼き直しの開始温度 (格子単位 = AnnealConfig と同じ)。初期解を溶かさない低めの値にする
+          InitialTemperature: float
+          FinalTemperature: float
+          /// マスター → スレーブのアークの重みの基底 (他のアークは 1)。
+          /// マスターの非クロックのアークは「D の駆動元」と「スレーブ」の 2 本だけなので、
+          /// 重みが等しいと 2 点を結ぶ矩形のどこでもコストが同じになり (L1 の縮退)、
+          /// スレーブへ寄せる力が働かない。基底を 1 より大きくして縮退を崩す
+          MasterSlaveWeight: float
+          /// クリティカリティの記憶 γ ∈ [0, 1)。c̄_r = γ·c̄_(r−1) + (1−γ)·c_r。
+          /// ラウンドごとに重みが入れ替わって解が振動するのを抑える。0 で記憶なし
+          CriticalityMemory: float }
+
+    /// 既定値。sm83_full (pitch 20x14) の配置段階の掃引 (src/AnalyzePlacementTiming.fsx --sweep) で選んだ値:
+    /// 1 周期の予測 (3 窓の和) 22,329 → 12,493 (−44%)、総アーク距離 +2.3%。
+    /// β は 4 < 8 < 12 ≈ 16 (大きいほど本当にクリティカルなアークだけを重くし、総配線長が増えにくい)。
+    /// α は 20 にすると総アーク距離が +3% を超えるわりに縮まない。記憶 0.7 と MasterSlaveWeight 2 は
+    /// ラウンド間の振動 (特に phaseA) を抑える。1 ラウンド 10M 手 × 10 回で Debug 約 60 秒
+    let defaultTimingDrivenConfig : TimingDrivenConfig =
+        { Alpha = 10.0
+          Beta = 12.0
+          Rounds = 10
+          MovesPerRound = 10_000_000
+          InitialTemperature = 3.0
+          FinalTemperature = 0.1
+          MasterSlaveWeight = 2.0
+          CriticalityMemory = 0.7 }
+
     /// 配置戦略。RowMajor = JSON 宣言順の行優先 (従来動作)。
     type PlacementStrategy =
         | RowMajor
         | Annealed of AnnealConfig
+        /// Annealed の結果を初期解に、タイミング駆動の再アニーリングを重ねる (2 相クロックのみ)
+        | TimingDriven of AnnealConfig * TimingDrivenConfig
 
     /// 既定値。sm83_full (10,767 ゲート) の計測で効果が飽和し始める点 (50M moves、Debug で約 30 秒)。
     /// 温度は 24x16 で T0 = 5〜200 を掃引した結果、行優先の初期解を十分「溶かす」高温始まりが良かった。
@@ -61,6 +102,8 @@ module GatePlacement =
         | FinalAboveInitial of initial: float * final: float
         | NegativeBackwardPenalty of float
         | InvalidInitialAssignment of string
+        | WeightCountMismatch of weights: int * arcs: int
+        | NegativeWeight of arc: int * weight: int64
 
     let describeConfigError (e: AnnealConfigError) : string =
         match e with
@@ -69,6 +112,8 @@ module GatePlacement =
         | FinalAboveInitial (t0, t1) -> sprintf "FinalTemperature は InitialTemperature 以下が必要: initial=%g final=%g" t0 t1
         | NegativeBackwardPenalty p -> sprintf "BackwardPenalty は 0 以上が必要: %g" p
         | InvalidInitialAssignment msg -> sprintf "初期割り当てが不正: %s" msg
+        | WeightCountMismatch (w, a) -> sprintf "重みの数 %d がアーク数 %d と一致しない" w a
+        | NegativeWeight (i, w) -> sprintf "アーク %d の重みが負: %d" i w
 
     // --- 問題の表現 -------------------------------------------------------
 
@@ -104,6 +149,17 @@ module GatePlacement =
 
     /// 割り当て: 添字 = ゲート番号 (Netlist.Gates の順)、値 = スロット番号。
     type Assignment = int[]
+
+    /// アークの重み。Uniform = 全アーク 1 (従来の総アーク距離)。Weighted = アークごとの
+    /// 固定小数点の重み (WeightScale が 1.0)。int64 にするのは、重み付きコストでも
+    /// 増分評価と全再計算を完全一致させるため (CostScale と同じ理由)。
+    type ArcWeights =
+        | Uniform
+        | Weighted of int64[]
+
+    /// ArcWeights.Weighted の固定小数点スケール (1.0 = WeightScale)。
+    [<Literal>]
+    let WeightScale = 1000L
 
     /// 行優先 (従来配置): ゲート i → スロット i。
     let rowMajorAssignment (gateCount: int) : Assignment = Array.init gateCount id
@@ -153,18 +209,31 @@ module GatePlacement =
         let backward = int64 (max 0 (sx - dx))
         CostScale * manhattan + penaltyScaled * backward
 
-    /// 全アークのコストを一から計算する (検証・初期値用)。
-    let totalCost (grid: SlotGrid) (arcs: Arc[]) (backwardPenalty: float) (assignment: Assignment) : int64 =
+    /// 重みの配列 (Uniform は全 1) と、温度をコスト単位へ換算するときの重みの単位。
+    /// Uniform の単位を 1 にすることで、従来の anneal と浮動小数点の演算まで同一になる。
+    let private weightArrayOf (arcCount: int) (weights: ArcWeights) : int64[] * int64 =
+        match weights with
+        | Uniform -> Array.create arcCount 1L, 1L
+        | Weighted ws -> ws, WeightScale
+
+    /// 全アークの重み付きコストを一から計算する (検証・初期値用)。
+    let totalWeightedCost (grid: SlotGrid) (arcs: Arc[]) (backwardPenalty: float) (weights: ArcWeights) (assignment: Assignment) : int64 =
         let penaltyScaled = scaledPenalty backwardPenalty
+        let ws, _ = weightArrayOf arcs.Length weights
         let coordOfGate (g: int) = slotCoord grid assignment.[g]
         arcs
-        |> Array.sumBy (fun arc ->
+        |> Array.mapi (fun i arc ->
             let src =
                 match arc.Source with
                 | FromGate g -> coordOfGate g
                 | FromFixed c -> c
             let dst = coordOfGate arc.Sink
-            arcCostAt penaltyScaled src.X src.Y dst.X dst.Y)
+            ws.[i] * arcCostAt penaltyScaled src.X src.Y dst.X dst.Y)
+        |> Array.sum
+
+    /// 全アークのコストを一から計算する (検証・初期値用)。
+    let totalCost (grid: SlotGrid) (arcs: Arc[]) (backwardPenalty: float) (assignment: Assignment) : int64 =
+        totalWeightedCost grid arcs backwardPenalty Uniform assignment
 
     /// 割り当ての妥当性: 全ゲートがちょうど 1 スロット、スロット範囲内、重複なし。
     let validateAssignment (grid: SlotGrid) (gateCount: int) (assignment: Assignment) : Result<unit, string> =
@@ -254,17 +323,30 @@ module GatePlacement =
             | FromFixed _ -> ())
         offsets, index
 
-    /// シミュレーテッドアニーリング。initial は変更しない (内部でコピーする)。
+    let private validateWeights (arcs: Arc[]) (weights: ArcWeights) : Result<unit, AnnealConfigError> =
+        match weights with
+        | Uniform -> Ok ()
+        | Weighted ws when ws.Length <> arcs.Length -> Error (WeightCountMismatch (ws.Length, arcs.Length))
+        | Weighted ws ->
+            match ws |> Array.tryFindIndex (fun w -> w < 0L) with
+            | Some i -> Error (NegativeWeight (i, ws.[i]))
+            | None -> Ok ()
+
+    /// 重み付きシミュレーテッドアニーリング。コスト = Σ weight_i · (アーク i のコスト)。
+    /// initial は変更しない (内部でコピーする)。
     /// 内部は配列の破壊的更新で書くが、関数としては入力 → 出力の純粋関数。
-    let anneal
+    /// weights = Uniform なら anneal と完全に同じ結果になる (乱数列・受理判定まで同一)。
+    let annealWeighted
         (cfg: AnnealConfig)
         (grid: SlotGrid)
         (gateCount: int)
         (arcs: Arc[])
+        (weights: ArcWeights)
         (initial: Assignment)
         : Result<AnnealOutcome, AnnealConfigError> =
         let validated =
             validateConfig cfg
+            |> Result.bind (fun () -> validateWeights arcs weights)
             |> Result.bind (fun () ->
                 validateAssignment grid gateCount initial |> Result.mapError InvalidInitialAssignment)
         match validated with
@@ -272,6 +354,7 @@ module GatePlacement =
         | Ok () ->
             let slots = slotCount grid
             let penaltyScaled = scaledPenalty cfg.BackwardPenalty
+            let arcWeight, weightUnit = weightArrayOf arcs.Length weights
             // スロット座標を前計算 (内側ループで除算しない)
             let slotX = Array.init slots (fun s -> (slotCoord grid s).X)
             let slotY = Array.init slots (fun s -> (slotCoord grid s).Y)
@@ -289,11 +372,13 @@ module GatePlacement =
             let arcCost (i: int) : int64 =
                 let dstSlot = gateSlot.[arcSink.[i]]
                 let src = arcSrcGate.[i]
-                if src >= 0 then
-                    let srcSlot = gateSlot.[src]
-                    arcCostAt penaltyScaled slotX.[srcSlot] slotY.[srcSlot] slotX.[dstSlot] slotY.[dstSlot]
-                else
-                    arcCostAt penaltyScaled arcFixedX.[i] arcFixedY.[i] slotX.[dstSlot] slotY.[dstSlot]
+                let unweighted =
+                    if src >= 0 then
+                        let srcSlot = gateSlot.[src]
+                        arcCostAt penaltyScaled slotX.[srcSlot] slotY.[srcSlot] slotX.[dstSlot] slotY.[dstSlot]
+                    else
+                        arcCostAt penaltyScaled arcFixedX.[i] arcFixedY.[i] slotX.[dstSlot] slotY.[dstSlot]
+                arcWeight.[i] * unweighted
 
             /// a と b (b = -1 なら空き) に接続するアークのコスト和。a-b 間のアークは 1 回だけ数える。
             let affectedCost (a: int) (b: int) : int64 =
@@ -316,7 +401,7 @@ module GatePlacement =
                 slotGate.[from] <- b
                 if b >= 0 then gateSlot.[b] <- from
 
-            let initialCost = totalCost grid arcs cfg.BackwardPenalty initial
+            let initialCost = totalWeightedCost grid arcs cfg.BackwardPenalty weights initial
             let mutable current = initialCost
             let mutable bestCost = initialCost
             let best = Array.copy initial
@@ -328,8 +413,8 @@ module GatePlacement =
                 if cfg.Moves = 0 then 1.0
                 else (cfg.FinalTemperature / cfg.InitialTemperature) ** (1.0 / float cfg.Moves)
             let mutable temperature = cfg.InitialTemperature
-            // 温度 (格子単位) → コスト単位 (セル × CostScale) への換算
-            let temperatureScale = float (grid.PitchX + grid.PitchY) / 2.0 * float CostScale
+            // 温度 (格子単位) → コスト単位 (セル × CostScale × 重みの単位) への換算
+            let temperatureScale = float (grid.PitchX + grid.PitchY) / 2.0 * float CostScale * float weightUnit
             // 最良解のスナップショットと窓半径の適応はバッチ単位 (O(n) のコピーを償却する)
             let batchSize = max 1 gateCount
             let mutable batchAccepted = 0
@@ -384,3 +469,13 @@ module GatePlacement =
                  LastCostIncremental = current
                  AcceptedMoves = accepted
                  AttemptedMoves = cfg.Moves }
+
+    /// シミュレーテッドアニーリング (全アークの重み 1 = 総アーク距離の最小化)。
+    let anneal
+        (cfg: AnnealConfig)
+        (grid: SlotGrid)
+        (gateCount: int)
+        (arcs: Arc[])
+        (initial: Assignment)
+        : Result<AnnealOutcome, AnnealConfigError> =
+        annealWeighted cfg grid gateCount arcs Uniform initial

@@ -9,6 +9,7 @@
     <Compile Include="TwoPhaseClock.fs" />
     <Compile Include="Library.fs" />
     <Compile Include="GatePlacement.fs" />
+    <Compile Include="PlacementTiming.fs" />
     <Compile Include="Place.fs" />
     <Compile Include="Route.fs" />
     <Compile Include="Sta.fs" />
@@ -24,5 +25,6 @@
     <Compile Include="TestbenchTests.fs" />
     <Compile Include="TwoPhaseTests.fs" />
     <Compile Include="TimingAnalysisTests.fs" />
+    <Compile Include="PlacementTimingTests.fs" />
   </ItemGroup>
 </Project>
