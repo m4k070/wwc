@@ -3,7 +3,7 @@
 //
 // 使い方:
 //   dotnet fsi src/AnalyzePlacementTiming.fsx <circuit> [--pitch X Y] [--moves N] [--seed N]
-//                                             [--init-cache FILE] [--routed DIR]
+//                                             [--clock-pins K] [--init-cache FILE] [--routed DIR]
 //                                             [--sweep "α,β,rounds,movesPerRound,T0,msWeight,memory;..."]
 //     <circuit>     verilog/<circuit>.json を 2 相化して配置する (配線はしない)
 //     --pitch       配置ピッチ (既定 20 14 = sm83_full の配線実績)
@@ -33,6 +33,8 @@ type Options =
     { Circuit: string
       Pitch: int * int
       Anneal: GatePlacement.AnnealConfig
+      /// 2 相クロックのピン本数 (予測のクロック下限に効く。既定 1)
+      ClockPins: int
       InitCache: string option
       RoutedDir: string option
       RoutedIsTimingDriven: bool
@@ -71,6 +73,10 @@ let parseArgs (args: string list) : Result<Options, string> =
             match UInt64.TryParse n with
             | true, v -> go { opts with Anneal = { opts.Anneal with Seed = v } } tail
             | _ -> Error (sprintf "--seed には 0 以上の整数が必要: %s" n)
+        | "--clock-pins" :: n :: tail ->
+            match Int32.TryParse n with
+            | true, v when v > 0 -> go { opts with ClockPins = v } tail
+            | _ -> Error (sprintf "--clock-pins には正の整数が必要: %s" n)
         | "--init-cache" :: f :: tail -> go { opts with InitCache = Some (Path.GetFullPath f) } tail
         | "--routed" :: d :: tail -> go { opts with RoutedDir = Some (Path.GetFullPath d) } tail
         | "--routed-timing" :: tail -> go { opts with RoutedIsTimingDriven = true } tail
@@ -82,13 +88,14 @@ let parseArgs (args: string list) : Result<Options, string> =
             match entries |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
             | Some e -> Error e
             | None -> go { opts with Sweep = opts.Sweep @ (entries |> List.choose (function Ok c -> Some c | Error _ -> None)) } tail
-        | ("--pitch" | "--moves" | "--seed" | "--init-cache" | "--routed" | "--sweep") as o :: _ ->
+        | ("--pitch" | "--moves" | "--seed" | "--clock-pins" | "--init-cache" | "--routed" | "--sweep") as o :: _ ->
             Error (sprintf "%s の引数が足りない" o)
         | arg :: _ when arg.StartsWith "--" -> Error (sprintf "不明なオプション: %s" arg)
         | name :: tail when opts.Circuit = "" -> go { opts with Circuit = name } tail
         | extra :: _ -> Error (sprintf "余分な引数: %s" extra)
     let defaults =
         { Circuit = ""; Pitch = (20, 14); Anneal = GatePlacement.defaultAnnealConfig
+          ClockPins = 1
           InitCache = None; RoutedDir = None; RoutedIsTimingDriven = false; Sweep = [] }
     match go defaults args with
     | Ok opts when opts.Circuit = "" -> Error "回路名が必要 (例: sm83_full)"
@@ -318,7 +325,7 @@ let run (opts: Options) : int =
         | None -> Ok ()
         | Some dir when not opts.RoutedIsTimingDriven -> compareWithRouted dir opts.Circuit grid prepared net initial baseline
         | Some dir ->
-            PipelineWL.timingDrivenFrom GatePlacement.defaultTimingDrivenConfig opts.Anneal grid prepared initial
+            PipelineWL.timingDrivenFrom opts.ClockPins GatePlacement.defaultTimingDrivenConfig opts.Anneal grid prepared initial
             |> Result.mapError (sprintf "%A")
             |> Result.bind (fun td ->
                 evaluatePlacement grid prepared net td.Best
@@ -343,7 +350,7 @@ let run (opts: Options) : int =
                     cfg.Alpha cfg.Beta cfg.Rounds (cfg.MovesPerRound / 1_000_000) cfg.InitialTemperature
                     cfg.MasterSlaveWeight cfg.CriticalityMemory
             let sw = Diagnostics.Stopwatch.StartNew ()
-            match PipelineWL.timingDrivenFrom cfg opts.Anneal grid prepared initial with
+            match PipelineWL.timingDrivenFrom opts.ClockPins cfg opts.Anneal grid prepared initial with
             | Error e -> Some (sprintf "%s: %A" label e)
             | Ok td ->
                 let seconds = sw.Elapsed.TotalSeconds
@@ -363,7 +370,7 @@ let exitCode =
     match parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail) with
     | Error msg ->
         eprintfn "ERROR: %s" msg
-        eprintfn "使い方: dotnet fsi src/AnalyzePlacementTiming.fsx <circuit> [--pitch X Y] [--moves N] [--seed N] [--init-cache FILE] [--routed DIR] [--routed-timing] [--sweep \"α,β,rounds,moves,T0,msWeight,memory;...\"]"
+        eprintfn "使い方: dotnet fsi src/AnalyzePlacementTiming.fsx <circuit> [--pitch X Y] [--moves N] [--seed N] [--clock-pins K] [--init-cache FILE] [--routed DIR] [--routed-timing] [--sweep \"α,β,rounds,moves,T0,msWeight,memory;...\"]"
         2
     | Ok opts -> run opts
 
