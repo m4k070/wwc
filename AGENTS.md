@@ -33,9 +33,9 @@ dotnet fsi src/ExportRouted.fsx <circuit> [--pitch X Y] [--out DIR] \
     [--place rowmajor|anneal|anneal-timing] [--moves N] [--seed N] [--backward P] \
     [--clocking single|two-phase] [--clock-pins K]
 
-# sm83_full の配線実績コマンド（20x14 ピッチ・タイミング駆動アニーリング配置・2 相クロック・
-# クロックピン 16 本で約 16 分、rip-up 0）
-dotnet fsi src/ExportRouted.fsx sm83_full --pitch 20 14 --place anneal-timing --clocking two-phase --clock-pins 16
+# sm83_full の配線実績コマンド（14x12 ピッチ・タイミング駆動アニーリング配置・2 相クロック・
+# クロックピン 16 本で約 10 分、rip-up 0。16x12 も完走する / 12x10 は輻輳失敗）
+dotnet fsi src/ExportRouted.fsx sm83_full --pitch 14 12 --place anneal-timing --clocking two-phase --clock-pins 16
 
 # 保存済み配線結果の整合性・鮮度確認 (寸法/ピン座標/verilog JSON の SHA-256)
 dotnet fsi src/LoadRouted.fsx <circuit> [--dir DIR]
@@ -145,7 +145,8 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
   sm83_full はこの方式で 16.1 分・rip-up 0 で配線完走した (2026-09-27)。クロックピンは `--clock-pins K` で
   K 個の区画に分けられる (既定 1)。区画ごとに独立したピン・配線木を持ち、ホストは同じ相の全ピンを
   同じ世代に書く。到達時間が区画ごとにずれても、同相の DFF 間に組合せ経路が無いので hold 違反は起きない。
-  sm83_full は K=16 で配線し直してあり (16.3 分、rip-up 0)、クロック最大到達は 1,478 / 1,494 → 284 / 282 世代。
+  sm83_full は K=16 で配線し直してあり (10.0 分、rip-up 0)、クロック最大到達は 1,478 / 1,494 → 186 / 196 世代
+  (ピッチ 14x12 のとき。20x14 では 284 / 282 世代)。
 
 ## External dependency
 
@@ -156,11 +157,13 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
 ## sm83_full の現状 (2026-09-28)
 
 sm83_full (通常命令 (STOP を除く) + CB prefix 256 + 割込み + HALT バグ、組合せ 10,859 + DFF 181) は
-**20x14 ピッチ・タイミング駆動アニーリング配置・2 相クロック・クロックピン 16 本で配線完走**
-(16.3 分、rip-up 0、grid 2110x1480、`routed/sm83_full.{bin,meta.json}`、meta formatVersion 3)。
-クロック木の最大到達は clk_a 284 / clk_b 282 世代 (ピン 1 本のときは 1,478 / 1,494)。
+**14x12 ピッチ・タイミング駆動アニーリング配置・2 相クロック・クロックピン 16 本で配線完走**
+(10.0 分、rip-up 0、grid 1481x1273、`routed/sm83_full.{bin,meta.json}`、meta formatVersion 3)。
+クロック木の最大到達は clk_a 186 / clk_b 196 世代 (ピン 1 本のときは 1,478 / 1,494)。
+クリティカルパスの 97% はゲート間の「配置距離 (セル数)」なので、ピッチが 1 周期の直接のスケール因子になる
+(20x14 → 14x12 で 34 本の GPU 照合 150.7 → 112.6 秒)。12x10 は輻輳失敗 (18,041/18,691 で停止)。
 RTL の正しさは blargg `cpu_instrs` 個別版 **11/11 PASS** (`CoSimGbfs.fsx --lockstep`) で、
-RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式、34 本で 152 秒) で確認済み。
+RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式、34 本で 113 秒) で確認済み。
 残課題 (優先順) は TODO.md 「残課題」節を参照 (`data_in` 窓の組合せ収束、`compileWL` の既定値見直し、
 サイクル精度、mooneye acceptance 系、STOP 未実装、NetlistSim 高速化など)。
 
