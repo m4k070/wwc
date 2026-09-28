@@ -345,6 +345,38 @@ module WlTwoPhaseTest =
                           l.LowerBound <= l.IdealPinBound + pitchSlack ]
         | _ -> [ "WL-2PH: sm83_min has clk_a/clk_b pins (latency)", false ]
 
+    /// 外部入力ピン (data_in などクロック以外) は、そのネットの受け手 (ゲート入力終端) 群への
+    /// L1 ミニマックス中心の近くに置かれる (issue #7 (a))。左端 (X=0) に戻した場合より明らかに
+    /// 近いこと、理論下限 (minimaxCenter) の 1.1 倍 + 格子スナップの余裕以内であることを確かめる。
+    /// 受け手のないピン (未使用の入力) は対象外 (左端のままでよい仕様)。
+    let private inputPinTests (c: WlCompiled) : (string * bool) list =
+        match c.Clocking with
+        | SingleEdgeClock _ -> []
+        | TwoPhaseClock _ ->
+            let clockNets = clockNetsOf c.Clocking |> Set.ofList
+            let terminalsByNet = externalInputTerminals c.Placed
+            // 格子スナップ (ピッチの半分ずらし) + 探索半径分の余裕。sm83_min は defaultCompileOptions
+            // (AutoPitch) で pitchFor 380 gates = 20x14 になる
+            let pitchSlack = 20 + 14
+            [ for KeyValue (netId, pin) in c.Pins do
+                if not (Set.contains netId clockNets) then
+                    match Map.tryFind netId terminalsByNet with
+                    | None | Some [] -> ()  // 受け手が無い (未使用) 入力ピンは対象外
+                    | Some terminals ->
+                        let maxDist (p: Coord) =
+                            terminals |> List.map (fun t -> abs (t.X - p.X) + abs (t.Y - p.Y)) |> List.max
+                        let actual = maxDist pin
+                        let _, bound = minimaxCenter terminals
+                        let leftEdgeDist = maxDist { pin with X = 0 }
+                        printfn "  WL_2PH_INPUTPIN: net %A pin=%A maxDist=%d bound=%.1f left-edge(X=0)=%d"
+                            netId pin actual bound leftEdgeDist
+                        yield sprintf "WL-2PH: sm83_min input pin %A within 1.1x of minimax bound (dist %d, bound %.1f)"
+                                  netId actual bound,
+                              float actual <= bound * 1.1 + float pitchSlack
+                        yield sprintf "WL-2PH: sm83_min input pin %A closer to receivers than left edge (dist %d <= %d)"
+                                  netId actual leftEdgeDist,
+                              actual <= leftEdgeDist ]
+
     /// NetlistSimTest.sm83MinTest / wgpu-runner --program と同じ手順を 2 相で行う:
     ///   初期化: rst=1 で settleLow → rst=0 で settleLow
     ///   各命令: inst を書き settleLow → clockEdge (clk_a → clk_b) → レジスタ読出
@@ -408,6 +440,7 @@ module WlTwoPhaseTest =
                      | Ok _ -> ())
                     let dffCount = c.Placed |> List.filter (fun p -> p.Gate.Kind = Dff) |> List.length
                     [ yield! latencyTests c
+                      yield! inputPinTests c
                       sprintf "WL-2PH: sm83_min two-phase + anneal compiles (%d gates, %d DFF)" c.Placed.Length dffCount,
                       c.Placed.Length = 380 + 26 && dffCount = 2 * 26
                       "WL-2PH: sm83_min two-phase grid keeps the two-phase invariant", invariantHolds c
