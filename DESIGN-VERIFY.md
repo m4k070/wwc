@@ -124,8 +124,11 @@ meta の `inputs` にも載らない**。代わりに meta の `clocking.clkA` /
 
 世代の進め方は `--engine tiled` (既定) と `--engine dense` (参照実装、1 dispatch = 1 世代で全タイル) がある。
 tiled は変化のあるタイル (16x16) だけを `dispatch_workgroups_indirect` で計算し、さらに 1 dispatch で最大
-`BLOCK_GENS` (=8) 世代をまとめて進める。workgroup はタイルと周囲 8 セル (halo) を shared memory に読み、
-8 世代を shared memory 内で進めて内側 16x16 だけを書き戻す (von Neumann 近傍 1 セルなので内側は 8 世代後まで正しい)。
+`BLOCK_GENS` (=3) 世代をまとめて進める。workgroup はタイルと周囲 3 セル (halo) を shared memory に読み、
+3 世代を shared memory 内で進めて内側 16x16 だけを書き戻す (von Neumann 近傍 1 セルなので内側は 3 世代後まで正しい)。
+`BLOCK_GENS` は実測で決めた (2026-09-29、34 本の GPU 全周期照合): K=3 で 78 秒 / K=8 で 112.6 秒 /
+K=1 は dispatch 律速で悪化 (daa_edge 単体 16.8 秒) / K≥12 は halo の再計算で悪化。block_* は 1 世代ごとに
+計算範囲 (16+2K)² を走査するため、K を上げても世代あたりコストは下がらない。
 変化ログは内側のサブ世代ごとの変化で取るので、世代単位で正確なまま。
 
 次のブロックで計算するタイル (アクティブリスト、GPU 上でタイルごとのスタンプ付き atomic で作る):

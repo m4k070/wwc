@@ -11,8 +11,11 @@ const WGSL_SHADER: &str = include_str!("wirelevel.wgsl");
 const TILE_SIZE: u32 = 16;
 /// 1 回の読み戻しで扱える最大世代数 (changeLog と GenParams テーブルの長さ)
 const MAX_GENS_PER_BATCH: u32 = 1024;
-/// Tiled で 1 dispatch に進める最大世代数 (= halo の幅)。shared memory は 2×(16+2K)² × 4 バイト
-const BLOCK_GENS: u32 = 8;
+/// Tiled で 1 dispatch に進める世代数 (= halo の幅)。shared memory は 2×(16+2K)² × 4 バイト。
+/// 実測 (2026-09-29、34 本の GPU 全周期照合): K=3 で 77.6 秒 / K=4 79.2 秒 / K=8 112.6 秒 /
+/// K=12 以上は halo の再計算で悪化 / K=1 は dispatch 律速で悪化 (daa_edge 単体で 16.8 秒)。
+/// block_* は 1 世代ごとに計算範囲 (16+2K)² を走査するので、K を上げても世代あたりコストは下がらない
+const BLOCK_GENS: u32 = 3;
 // block_* の shared memory (計算範囲 (16+2K)² の 2 面) が既定の上限 16 KiB に収まること
 const _: () = assert!(2 * (TILE_SIZE + 2 * BLOCK_GENS) * (TILE_SIZE + 2 * BLOCK_GENS) * 4 <= 16384);
 /// pack_bytes の workgroup の大きさ (wirelevel.wgsl の PACK_WORKGROUP)

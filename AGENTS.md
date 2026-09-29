@@ -163,7 +163,8 @@ sm83_full (通常命令 (STOP を除く) + CB prefix 256 + 割込み + HALT バ�
 クリティカルパスの 97% はゲート間の「配置距離 (セル数)」なので、ピッチが 1 周期の直接のスケール因子になる
 (20x14 → 14x12 で 34 本の GPU 照合 150.7 → 112.6 秒)。12x10 は輻輳失敗 (18,041/18,691 で停止)。
 RTL の正しさは blargg `cpu_instrs` 個別版 **11/11 PASS** (`CoSimGbfs.fsx --lockstep`) で、
-RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式、34 本で 113 秒) で確認済み。
+RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式、34 本で 78 秒。tiled エンジンの
+`BLOCK_GENS` を実測で 8 → 3 にした効果。詳細は TODO.md 残課題 1 (e)) で確認済み。
 残課題 (優先順) は TODO.md 「残課題」節を参照 (`data_in` 窓の組合せ収束、`compileWL` の既定値見直し、
 サイクル精度、mooneye acceptance 系、STOP 未実装、NetlistSim 高速化など)。
 
