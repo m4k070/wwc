@@ -13,8 +13,10 @@ namespace WwHdl
 //             → mem_write なら書込 → int_ack のビットを IF から下ろす
 //             → mem_read なら data_in=mem[addr]、そうでなければ 0。irq = IE & IF & 0x1F
 //             → data_in と irq を書いて settle → clk=1 で settle → 全出力を読む
-//   メモリ:   ROM (0 から ROM 長) → RAM 窓 (ramBase から ramSize) → I/O (IF 0xFF0F、HRAM 0xFF80-0xFFFE、
-//             IE 0xFFFF) → それ以外は 0xFF。書込は RAM 窓と I/O のみ
+//   メモリ:   ブート ROM (0x0000-0x00FF、0xFF50 への書込で解除) → ROM (0 から ROM 長) →
+//             VRAM (0x8000-0x9FFF) → RAM 窓 (ramBase から ramSize) → I/O (IF 0xFF0F、HRAM 0xFF80-0xFFFE、
+//             IE 0xFFFF、0xFF00-0xFF7F のレジスタ、LY 0xFF44 は M サイクルから算出) → それ以外は 0xFF。
+//             書込は VRAM / RAM 窓 / I/O のみ (ROM と LY への書込は無視)
 //   割込み:   IE / IF は CPU の外 (このメモリモデル) に置く。回路に irq / int_ack ポートがなければ扱わない
 // ---------------------------------------------------------------------
 module Testbench =
@@ -38,6 +40,25 @@ module Testbench =
     let HramBase = 0xFF80
     [<Literal>]
     let HramSize = 0x7F
+    [<Literal>]
+    let VramBase = 0x8000
+    [<Literal>]
+    let VramSize = 0x2000
+    [<Literal>]
+    let IoBase = 0xFF00
+    [<Literal>]
+    let IoSize = 0x80
+    /// LY (0xFF44)。読み出し専用で、M サイクル番号から算出する
+    [<Literal>]
+    let LcdYAddress = 0xFF44
+    /// ブート ROM のマップ解除 (0xFF50 に 1 を書く)
+    [<Literal>]
+    let BootRomDisableAddress = 0xFF50
+    /// 1 フレーム = 154 ライン × 456 サイクル (LY の算出用)
+    [<Literal>]
+    let FrameCycles = 70224
+    [<Literal>]
+    let LineCycles = 456
 
     type MemoryImage =
         { Rom: byte[]
@@ -48,7 +69,15 @@ module Testbench =
           /// IF (0xFF0F)。書いたバイトをそのまま保持する (gbfs と同じ。実機は上位 3bit が 1 で読める)
           InterruptFlag: byte
           /// IE (0xFFFF)
-          InterruptEnable: byte }
+          InterruptEnable: byte
+          /// 0x8000-0x9FFF。ブート ROM がロゴを書く先
+          Vram: byte[]
+          /// 0xFF00-0xFF7F のレジスタ。未使用分は 0xFF で初期化 (従来の「未モデルは 0xFF」挙動と同じ)
+          Io: byte[]
+          /// 0x0000-0x00FF に重ねるブート ROM (None なら重ねない)
+          BootRom: byte[] option
+          /// ブート ROM のマップ状態。0xFF50 に 1 を書くと解除される
+          BootRomEnabled: bool }
 
     let createMemory (rom: byte[]) (config: MemoryConfig) : MemoryImage =
         { Rom = Array.copy rom
@@ -56,7 +85,17 @@ module Testbench =
           Config = config
           Hram = Array.zeroCreate HramSize
           InterruptFlag = 0uy
-          InterruptEnable = 0uy }
+          InterruptEnable = 0uy
+          Vram = Array.zeroCreate VramSize
+          Io = Array.init IoSize (fun i -> if i = LcdYAddress - IoBase then 0uy else 0xFFuy)
+          BootRom = None
+          BootRomEnabled = false }
+
+    /// ブート ROM を 0x0000-0x00FF に重ねたメモリを作る (0xFF50 への書込で解除される)。
+    let createMemoryWithBootRom (rom: byte[]) (bootRom: byte[]) (config: MemoryConfig) : MemoryImage =
+        { createMemory rom config with
+            BootRom = Some (Array.copy bootRom)
+            BootRomEnabled = true }
 
     let private ramOffset (m: MemoryImage) (addr: uint16) : int option =
         let a = int addr
@@ -67,31 +106,57 @@ module Testbench =
 
     let readMemory (m: MemoryImage) (addr: uint16) : byte =
         let a = int addr
-        if a < m.Rom.Length then m.Rom.[a]
-        else
-            match ramOffset m addr with
-            | Some i -> m.Ram.[i]
-            | None when a = InterruptFlagAddress -> m.InterruptFlag
-            | None when a = InterruptEnableAddress -> m.InterruptEnable
-            | None when isHram a -> m.Hram.[a - HramBase]
-            | None -> 0xFFuy
+        match m.BootRom with
+        | Some bootRom when m.BootRomEnabled && a < bootRom.Length -> bootRom.[a]
+        | _ ->
+            if a < m.Rom.Length then m.Rom.[a]
+            elif a >= VramBase && a < VramBase + VramSize then m.Vram.[a - VramBase]
+            else
+                match ramOffset m addr with
+                | Some i -> m.Ram.[i]
+                | None when a = InterruptFlagAddress -> m.InterruptFlag
+                | None when a = InterruptEnableAddress -> m.InterruptEnable
+                | None when isHram a -> m.Hram.[a - HramBase]
+                | None when a >= IoBase && a < IoBase + IoSize -> m.Io.[a - IoBase]
+                | None -> 0xFFuy
 
-    /// RAM 窓と I/O (IF / HRAM / IE) への書込を反映した新しいイメージを返す (ROM への書込は無視)。
-    /// RAM 窓が I/O 領域と重なる場合は RAM 窓を優先する。
+    /// RAM 窓と I/O (IF / HRAM / IE / 0xFF00-0xFF7F / VRAM) への書込を反映した新しいイメージを返す
+    /// (ROM と LY への書込は無視)。RAM 窓が I/O 領域と重なる場合は RAM 窓を優先する。
     let writeMemory (m: MemoryImage) (addr: uint16) (value: byte) : MemoryImage =
         let a = int addr
-        match ramOffset m addr with
-        | Some i ->
-            let ram = Array.copy m.Ram
-            ram.[i] <- value
-            { m with Ram = ram }
-        | None when a = InterruptFlagAddress -> { m with InterruptFlag = value }
-        | None when a = InterruptEnableAddress -> { m with InterruptEnable = value }
-        | None when isHram a ->
-            let hram = Array.copy m.Hram
-            hram.[a - HramBase] <- value
-            { m with Hram = hram }
-        | None -> m
+        if a >= VramBase && a < VramBase + VramSize then
+            let vram = Array.copy m.Vram
+            vram.[a - VramBase] <- value
+            { m with Vram = vram }
+        else
+            match ramOffset m addr with
+            | Some i ->
+                let ram = Array.copy m.Ram
+                ram.[i] <- value
+                { m with Ram = ram }
+            | None when a = InterruptFlagAddress -> { m with InterruptFlag = value }
+            | None when a = InterruptEnableAddress -> { m with InterruptEnable = value }
+            | None when a = BootRomDisableAddress -> { m with BootRomEnabled = (value &&& 1uy) = 0uy }
+            | None when a = LcdYAddress -> m
+            | None when isHram a ->
+                let hram = Array.copy m.Hram
+                hram.[a - HramBase] <- value
+                { m with Hram = hram }
+            | None when a >= IoBase && a < IoBase + IoSize ->
+                let io = Array.copy m.Io
+                io.[a - IoBase] <- value
+                { m with Io = io }
+            | None -> m
+
+    /// M サイクル番号から LY (0xFF44) を更新する (1 フレーム = 154 ライン × 456 サイクル)。
+    /// ホスト側 (TB / runner) が周期の先頭で呼ぶ。LY は読み出し専用なので writeMemory では扱わない。
+    let setLcdY (m: MemoryImage) (cycle: int) : MemoryImage =
+        let ly = byte ((cycle % FrameCycles) / LineCycles)
+        if m.Io.[LcdYAddress - IoBase] = ly then m
+        else
+            let io = Array.copy m.Io
+            io.[LcdYAddress - IoBase] <- ly
+            { m with Io = io }
 
     /// CPU の irq 入力に渡す値 (IE & IF の割込み要因 5bit)。
     let pendingInterrupts (m: MemoryImage) : byte =
@@ -114,6 +179,8 @@ module Testbench =
           MetaPath: string
           InitPath: string
           Rom: RomSource
+          /// memory.bootRom (省略可)。0x0000-0x00FF に重ねるブート ROM
+          BootRom: RomSource option
           Memory: MemoryConfig
           RstPulses: int
           Cycles: int
@@ -185,6 +252,13 @@ module Testbench =
             let rom =
                 if romSpec.StartsWith "base64:" then RomBase64 (romSpec.Substring "base64:".Length)
                 else RomFile (resolve romSpec)
+            let bootRom =
+                match tryProperty memory "bootRom" with
+                | None -> None
+                | Some v ->
+                    let spec = v.GetString ()
+                    if spec.StartsWith "base64:" then Some (RomBase64 (spec.Substring "base64:".Length))
+                    else Some (RomFile (resolve spec))
             let expect =
                 match tryProperty root "expect" with
                 | Some e -> e.EnumerateObject () |> Seq.map (fun p -> p.Name, p.Value.GetUInt64 ()) |> Map.ofSeq
@@ -205,6 +279,7 @@ module Testbench =
                    MetaPath = resolve (root.GetProperty("meta").GetString ())
                    InitPath = resolve (root.GetProperty("init").GetString ())
                    Rom = rom
+                   BootRom = bootRom
                    Memory = { RamBase = intOr memory "ramBase" defaultMemoryConfig.RamBase
                               RamSize = intOr memory "ramSize" defaultMemoryConfig.RamSize }
                    RstPulses = intOr root "rstPulses" 2
@@ -337,6 +412,8 @@ module Testbench =
                 readOutputs c ports s
                 |> Result.map (fun final -> { Cycles = List.rev acc; FinalOutputs = final; Memory = mem })
             else
+                // この周期の LY (0xFF44) を反映してからバスを見る
+                let mem = setLcdY mem k
                 // runner は rst=0 を書いた直後に最初の clk=0 settle を行う
                 let lowWrites = if k = 0 then [ bus.Reset, 0UL; bus.Clock, 0UL ] else [ bus.Clock, 0UL ]
                 let readLow sLow =
@@ -397,6 +474,8 @@ module Testbench =
           SourceSha256: string
           /// ROM バイト列の SHA-256
           RomSha256: string
+          /// ブート ROM バイト列の SHA-256 (ブート ROM を使うプログラムのみ)
+          BootRomSha256: string option
           RstPulses: int }
 
     let goldenToJson (info: GoldenInfo) (cycles: CycleRecord list) : string =
@@ -408,6 +487,9 @@ module Testbench =
         w.WriteString ("program", info.GoldenProgram)
         w.WriteString ("sourceSha256", info.SourceSha256)
         w.WriteString ("romSha256", info.RomSha256)
+        match info.BootRomSha256 with
+        | Some sha -> w.WriteString ("bootRomSha256", sha)
+        | None -> ()
         w.WriteNumber ("rstPulses", info.RstPulses)
         w.WriteStartArray "cycles"
         for cycle in cycles do

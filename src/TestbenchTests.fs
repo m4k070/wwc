@@ -25,7 +25,7 @@ module TestbenchTest =
         let m = createMemory rom defaultMemoryConfig
         let written = writeMemory (writeMemory m 0xC010us 0x5Auy) 0x0010us 0x99uy
         [ "TB: memory reads ROM, RAM (initially 0), and 0xFF elsewhere",
-          readMemory m 0x0123us = 0x23uy && readMemory m 0xC000us = 0uy && readMemory m 0x8000us = 0xFFuy
+          readMemory m 0x0123us = 0x23uy && readMemory m 0xC000us = 0uy && readMemory m 0xFE00us = 0xFFuy
           "TB: memory writes only the RAM window (ROM write ignored, original unchanged)",
           readMemory written 0xC010us = 0x5Auy && readMemory written 0x0010us = 0x10uy && readMemory m 0xC010us = 0uy
           "TB: memory I/O holds IF (0xFF0F), IE (0xFFFF), and HRAM (0xFF80-0xFFFE)",
@@ -39,6 +39,30 @@ module TestbenchTest =
           (let overlap = createMemory rom { RamBase = 0xF000; RamSize = 4096 }
            let w = writeMemory overlap 0xFF0Fus 0x1Fuy
            readMemory w 0xFF0Fus = 0x1Fuy && w.InterruptFlag = 0uy) ]
+
+    /// ブート ROM / VRAM / I/O レジスタ / LY のモデル (2026-09-29 追加)
+    let private bootRomTests () : (string * bool) list =
+        let rom = Array.init 0x8000 (fun i -> byte (i &&& 0xFF))
+        let boot = Array.init 0x100 (fun i -> byte (0x40 + (i &&& 0x3F)))
+        let m = createMemoryWithBootRom rom boot defaultMemoryConfig
+        let unmapped = writeMemory m 0xFF50us 1uy
+        [ "TB: boot ROM overlays 0x0000-0x00FF until 0xFF50 is written",
+          readMemory m 0x0000us = 0x40uy && readMemory m 0x00FFus = 0x7Fuy
+          && readMemory m 0x0100us = 0x00uy && readMemory m 0x7FFFus = 0xFFuy
+          && readMemory unmapped 0x0000us = 0x00uy && not unmapped.BootRomEnabled && m.BootRomEnabled
+          "TB: VRAM (0x8000-0x9FFF) is read/write; OAM (0xFE00) stays open bus",
+          (let v = writeMemory (writeMemory m 0x8010us 0xABuy) 0x9FFFus 0xCDuy
+           readMemory v 0x8010us = 0xABuy && readMemory v 0x9FFFus = 0xCDuy
+           && readMemory v 0x8000us = 0uy && readMemory v 0xA000us = 0xFFuy
+           && readMemory m 0x8010us = 0uy && readMemory m 0xFE00us = 0xFFuy)
+          "TB: I/O registers (0xFF00-0xFF7F) keep written values; LY (0xFF44) is read-only",
+          (let io = writeMemory (writeMemory m 0xFF40us 0x91uy) 0xFF42us 0x64uy
+           readMemory io 0xFF40us = 0x91uy && readMemory io 0xFF42us = 0x64uy
+           && readMemory (writeMemory io 0xFF44us 0x99uy) 0xFF44us = 0uy
+           && readMemory m 0xFF40us = 0xFFuy)
+          "TB: LY advances with the M-cycle counter (456 cycles/line, 70224 cycles/frame)",
+          (let ly c = readMemory (setLcdY m c) 0xFF44us
+           ly 0 = 0uy && ly 455 = 0uy && ly 456 = 1uy && ly 70223 = 153uy && ly 70224 = 0uy && ly 70380 = 0uy) ]
 
     let private parseTests () : (string * bool) list =
         let smokePath = repoPath "routed/sm83_subset_smoke.json"
@@ -115,14 +139,22 @@ module TestbenchTest =
             [ "TB: sm83_subset smoke matches the GPU trace cycle by cycle (data_in/pc/a)", observed = gpuSmokeTrace
               "TB: sm83_subset smoke expectations pass on NetlistSim", mismatches.IsEmpty ]
 
+    /// プログラムの ROM (とブート ROM) を読んでメモリイメージを作る。ブート ROM があれば重ねる。
+    let private memoryOf (program: MemoryProgram) : Result<MemoryImage, TestbenchError> =
+        loadRom program.Rom
+        |> Result.bind (fun rom ->
+            match program.BootRom with
+            | None -> Ok (createMemory rom program.Memory)
+            | Some src -> loadRom src |> Result.map (fun boot -> createMemoryWithBootRom rom boot program.Memory))
+
     /// routed/sm83_full_*.json の仕様テスト (期待値は SM83 仕様から手で導いたもの) を NetlistSim で実行する。
     /// RTL を直したら再合成してこのテストを回す。1 プログラム = 1 テスト項目
     let private fullSpecProgramTests () : (string * bool) list =
         let programPaths =
-            Directory.GetFiles (repoPath "routed", "sm83_full_*.json")
-            |> Array.filter (fun p -> not (p.EndsWith ".golden.json"))
-            |> Array.sort
-            |> List.ofArray
+            [ yield! Directory.GetFiles (repoPath "routed", "sm83_full_*.json")
+              yield! Directory.GetFiles (repoPath "routed", "bootrom_*.json") ]
+            |> List.filter (fun p -> not (p.EndsWith ".golden.json"))
+            |> List.sort
         match loadCircuit "sm83_full" with
         | Error msg -> [ sprintf "TB: sm83_full loads (%s)" msg, false ]
         | Ok _ when programPaths.IsEmpty -> [ "TB: routed/sm83_full_*.json spec programs present", false ]
@@ -135,9 +167,9 @@ module TestbenchTest =
                     let outcome =
                         parseProgram path (File.ReadAllText path)
                         |> Result.bind (fun program ->
-                            loadRom program.Rom
-                            |> Result.bind (fun rom ->
-                                run c ports bus (createMemory rom program.Memory) program.RstPulses program.Cycles)
+                            memoryOf program
+                            |> Result.bind (fun memory ->
+                                run c ports bus memory program.RstPulses program.Cycles)
                             |> Result.map (fun result -> checkExpectations program result, program.Expect.Count + program.ExpectMem.Count))
                     match outcome with
                     | Error e -> yield sprintf "TB-SPEC: %s runs (%s)" name (describeTestbenchError e), false
@@ -211,7 +243,8 @@ module TestbenchTest =
 
     let private goldenJsonTest () : (string * bool) list =
         let info : GoldenInfo =
-            { GoldenCircuit = "c"; GoldenProgram = "p"; SourceSha256 = "s"; RomSha256 = "r"; RstPulses = 2 }
+            { GoldenCircuit = "c"; GoldenProgram = "p"; SourceSha256 = "s"; RomSha256 = "r"
+              BootRomSha256 = Some "b"; RstPulses = 2 }
         let cycles = [ { DataIn = 62UL; Irq = 0UL; Outputs = Map.ofList [ "addr", 256UL; "a_out", 1UL ] } ]
         use doc = JsonDocument.Parse (goldenToJson info cycles)
         let root = doc.RootElement
@@ -219,10 +252,11 @@ module TestbenchTest =
         [ "TB: golden JSON has format, hashes, and per-cycle dataIn/outputs",
           root.GetProperty("format").GetString () = GoldenFormat
           && root.GetProperty("romSha256").GetString () = "r"
+          && root.GetProperty("bootRomSha256").GetString () = "b"
           && root.GetProperty("cycles").GetArrayLength () = 1
           && first.GetProperty("dataIn").GetUInt64 () = 62UL
           && first.GetProperty("outputs").GetProperty("addr").GetUInt64 () = 256UL ]
 
     let runAll () : (string * bool) list =
-        memoryTests () @ parseTests () @ busTests () @ subsetSmokeTest () @ goldenJsonTest () @ fullSpecProgramTests ()
-        @ daaExhaustiveTest ()
+        memoryTests () @ bootRomTests () @ parseTests () @ busTests () @ subsetSmokeTest () @ goldenJsonTest ()
+        @ fullSpecProgramTests () @ daaExhaustiveTest ()
