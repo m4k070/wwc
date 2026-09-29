@@ -132,6 +132,28 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
         dispatch 数が CPU 律速なので、粒度を上げれば encode が減る (代わりに GPU との重なりが減る)
       * 計測の常時コストは map/submit ごとの `Instant::now()` 2 回だけで無視できる。
         表示は `WWC_STATS=1` のときだけ (main.rs の `print_stats`、stderr)
+      * **`SUBMIT_CHUNK_DISPATCHES` を掃引 — 既定の 16 が最良** (2026-09-29)。`WWC_CHUNK` で
+        上書きできるようにして 1/4/16/64/256/1024 を実測 (ブート ROM 400 周期、計 = encode+wait):
+        **25.55 / 17.47 / 17.16 / 19.08 / 19.11 / 18.81 秒**。encode は 16.88 → 7.75 → 5.14 →
+        4.79 → 4.79 → 4.76 秒で **4.8 秒で飽和** = 757k dispatch を 1 個 6.3 µs で記録する床で、
+        これ以上は粒度を上げても減らない。大きい側は wait が 12.0 → 14.3 秒に増えて負ける
+        (submit をまとめると GPU が走り出せず、CPU との重なりが消える)。**既定変更なし**
+      * 総時間の下限は「CPU 4.8 秒 (dispatch 数 × 6.3 µs)」と「GPU 5.4 µs/世代」の重ね合わせで、
+        CHUNK=16 はほぼ最適点。**残るレバーは GPU 側のセルあたりコスト** (TILE は効かず、
+        `rule` の branchless 化が候補)。ただし着手前に「1 世代あたり何セル走査しているか」を出す —
+        changeLog の変化タイル数を足せば走査セル数が出るので、計算律速か起動律速かを切り分けられる
+      * **走査セル数を計測 → 計算律速ではない** (2026-09-29)。changeLog の変化タイル数を足した:
+        世代 2,261,555 / 変化タイル計 144,205,959 = **63.8 タイル/世代 ≒ 走査 10,266 セル/世代
+        = 524 ps/セル**。RTX 3060 の理論スループット (~200 G セル/秒 = 5 ps/セル) の **~1%** しか
+        出ていない。1 dispatch は 64 workgroup 程度しかなく GPU が埋まらないので、
+        **セルあたりは命令数ではなくメモリレイテンシと占有で決まっている**
+      * これで**安いマイクロ最適化は打ち止め**と判断: `rule` の branchless 化は効かない見込み
+        (セルあたりはレイテンシ律速で命令数ではない)。TILE 掃引 (16 が最適) と CHUNK 掃引
+        (16 が最適) が横ばいだったのも同じ理由。残るのは構造側 —
+        (1) 世代数を減らす (クリティカルパス = 配置とピッチは既に限界) か、
+        (2) dispatch を跨がず GPU 内で固定点まで回す (on-device fixpoint / megakernel) か
+      * 計測コマンド: `WWC_STATS=1 ./wgpu-runner/target/release/wgpu-runner --memory routed/_bench_bootrom.json`
+        (ベンチ `routed/_bench_bootrom.json` = bootrom_minimal.json の cycles を 400 にしたもの、未追跡)
 2. **`compileWL` / `ExportRouted.fsx` の既定値の見直し**: 既定は今も**単相・行優先** (`--place rowmajor`
    `--clocking single`)。sm83_full の配線に使った `--place anneal --clocking two-phase` を既定にするか検討する
    (小規模回路では行優先で十分なため、回路規模で自動判定する案もある)。ピッチも同じ: `pitchFor` は >3000 で

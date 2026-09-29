@@ -12,6 +12,10 @@ const WGSL_SHADER: &str = include_str!("wirelevel.wgsl");
 /// encode: dispatch 列の記録 + submit (CPU 側)。wait: 読み戻しの map 待ち (未実行の GPU 仕事を含む)
 pub static STAT_ENCODE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static STAT_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 実行した世代数 (収束判定で止まった分だけ。余分に走った世代は含まない)
+pub static STAT_GENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// changeLog の「変化したタイル数」の総和 (= 次世代に dispatch されるタイル数にほぼ等しい)
+pub static STAT_CHANGED_TILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// タイル (= workgroup) の一辺。wirelevel.wgsl の TILE / @workgroup_size と一致させる
 const TILE_SIZE: u32 = 16;
@@ -28,6 +32,19 @@ const _: () = assert!(2 * (TILE_SIZE + 2 * BLOCK_GENS) * (TILE_SIZE + 2 * BLOCK_
 const PACK_WORKGROUP: u32 = 256;
 /// 1 回の submit に積む dispatch 数。小さいほど GPU が早く走り出し、CPU の記録と重なる
 const SUBMIT_CHUNK_DISPATCHES: usize = 16;
+
+/// 実験用: SUBMIT_CHUNK_DISPATCHES を環境変数 `WWC_CHUNK` で上書きする。
+/// 既定は const のままなので通常の実行には影響しない (掃引のたびに再ビルドしないため)
+fn submit_chunk_dispatches() -> usize {
+    static OVERRIDE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("WWC_CHUNK")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&v| v >= 1)
+            .unwrap_or(SUBMIT_CHUNK_DISPATCHES)
+    })
+}
 /// GenParams テーブルの 1 エントリの間隔 (dynamic offset の既定アラインメント)
 const GEN_PARAMS_STRIDE: u64 = 256;
 /// GenParams テーブルのエントリ: 0..MAX_GENS_PER_BATCH は { slot: i, gens: BLOCK_GENS } (固定)、
@@ -561,7 +578,7 @@ impl GpuSim {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
         first(&mut encoder);
         let plan = self.begin_batch(&mut encoder, n);
-        let mut chunks = plan.chunks(SUBMIT_CHUNK_DISPATCHES).peekable();
+        let mut chunks = plan.chunks(submit_chunk_dispatches()).peekable();
         let mut last = Some(last);
         while let Some(chunk) = chunks.next() {
             self.encode_dispatches(&mut encoder, chunk);
@@ -649,8 +666,14 @@ impl GpuSim {
             let log = self.run_logged(n)?;
             if let Some(i) = log.iter().position(|&changed_tiles| changed_tiles == 0) {
                 gens += i as u32 + 1;
+                let tiles: u64 = log[..i].iter().map(|&v| v as u64).sum();
+                STAT_GENS.fetch_add(i as u64 + 1, std::sync::atomic::Ordering::Relaxed);
+                STAT_CHANGED_TILES.fetch_add(tiles, std::sync::atomic::Ordering::Relaxed);
                 return Ok((self.read_cells()?, gens, true));
             }
+            let tiles: u64 = log.iter().map(|&v| v as u64).sum();
+            STAT_GENS.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+            STAT_CHANGED_TILES.fetch_add(tiles, std::sync::atomic::Ordering::Relaxed);
             gens += n;
         }
         Ok((self.read_cells()?, gens, false))
