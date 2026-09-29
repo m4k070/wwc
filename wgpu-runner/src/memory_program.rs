@@ -8,6 +8,7 @@
 //     "init": "routed/sm83_subset.bin",
 //     "memory": {
 //       "rom": "rom/rom.bin",              // 相対パス or "base64:XXXX"
+//       "bootRom": "bootrom.bin",          // 省略可: 0x0000-0x00FF に重ねる (0xFF50 で解除)
 //       "ramBase": 49152,                  // 0xC000 (省略可)
 //       "ramSize": 8192                    // 省略可
 //     },
@@ -71,6 +72,9 @@ pub struct Golden {
     pub program: String,
     pub source_sha256: String,
     pub rom_sha256: String,
+    /// ブート ROM を使うプログラムのみ (Testbench.goldenToJson)
+    #[serde(default)]
+    pub boot_rom_sha256: Option<String>,
     pub rst_pulses: u32,
     pub cycles: Vec<GoldenCycle>,
 }
@@ -107,6 +111,9 @@ pub struct MemoryProgram {
 #[serde(rename_all = "camelCase")]
 pub struct MemorySection {
     pub rom: String,
+    /// 省略可: 0x0000-0x00FF に重ねるブート ROM (0xFF50 に 1 を書くと解除)
+    #[serde(default)]
+    pub boot_rom: Option<String>,
     #[serde(default)]
     pub ram_base: Option<u32>,
     #[serde(default)]
@@ -247,7 +254,8 @@ fn validate_expect(outputs: &BTreeMap<String, Vec<OutputProbe>>, expect: &BTreeM
 }
 
 /// golden がこの配線結果・ROM・プログラムに対して作られたものかを実行前に検査する。
-fn validate_golden(golden: &Golden, meta: &RoutedMeta, rst_pulses: u32, cycles: u32, rom_sha256: &str) -> Result<()> {
+fn validate_golden(golden: &Golden, meta: &RoutedMeta, rst_pulses: u32, cycles: u32, rom_sha256: &str,
+    boot_rom_sha256: Option<&str>) -> Result<()> {
     anyhow::ensure!(golden.format == GOLDEN_FORMAT,
         "golden format '{}' is not supported (expected {GOLDEN_FORMAT})", golden.format);
     anyhow::ensure!(golden.circuit == meta.circuit,
@@ -260,6 +268,18 @@ fn validate_golden(golden: &Golden, meta: &RoutedMeta, rst_pulses: u32, cycles: 
     anyhow::ensure!(golden.rom_sha256 == rom_sha256,
         "golden romSha256 {}… != ROM {}… — regenerate golden (src/ExportGolden.fsx)",
         short_hash(&golden.rom_sha256), short_hash(rom_sha256));
+    match (boot_rom_sha256, golden.boot_rom_sha256.as_deref()) {
+        (Some(actual), Some(expected)) => anyhow::ensure!(expected == actual,
+            "golden bootRomSha256 {}… != boot ROM {}… — regenerate golden (src/ExportGolden.fsx)",
+            short_hash(expected), short_hash(actual)),
+        (Some(actual), None) => anyhow::bail!(
+            "golden has no bootRomSha256 but the program supplies a boot ROM ({}…) — regenerate golden",
+            short_hash(actual)),
+        (None, Some(expected)) => anyhow::bail!(
+            "golden expects a boot ROM ({}…) but the program has no memory.bootRom — regenerate golden",
+            short_hash(expected)),
+        (None, None) => {}
+    }
     anyhow::ensure!(golden.rst_pulses == rst_pulses,
         "golden rstPulses {} != program rstPulses {rst_pulses}", golden.rst_pulses);
     anyhow::ensure!(golden.cycles.len() == cycles as usize,
@@ -478,6 +498,11 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let rom_src = parse_rom_source(&prog.memory.rom, &dir)?;
     let rom = rom_src.load().context("loading ROM")?;
     let rom_sha256 = sha256_hex(&rom);
+    let boot_rom = match &prog.memory.boot_rom {
+        Some(spec) => Some(parse_rom_source(spec, &dir)?.load().context("loading boot ROM")?),
+        None => None,
+    };
+    let boot_rom_sha256 = boot_rom.as_ref().map(|b| sha256_hex(b));
 
     let golden: Option<Golden> = match &prog.golden {
         Some(spec) => {
@@ -485,7 +510,7 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
             let g: Golden = serde_json::from_str(
                 &fs::read_to_string(&path).with_context(|| format!("reading golden {path:?}"))?
             ).with_context(|| format!("parsing golden {path:?}"))?;
-            validate_golden(&g, &meta, prog.rst_pulses, prog.cycles, &rom_sha256)?;
+            validate_golden(&g, &meta, prog.rst_pulses, prog.cycles, &rom_sha256, boot_rom_sha256.as_deref())?;
             println!("Golden: {} ({} cycles, program={})", path.display(), g.cycles.len(), g.program);
             Some(g)
         }
@@ -496,8 +521,15 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
         ram_base: prog.memory.ram_base.unwrap_or(0xC000) as u16,
         ram_size: prog.memory.ram_size.unwrap_or(8192),
     };
-    let mut mem = Memory::new(rom, cfg);
-    println!("Program: {} cycles, circuit={}, grid {w}×{h} (gates={}, DFF={}), rom={}B, ram={}B@{:#X}, meta v{} clocking={}",
+    let mut mem = match boot_rom {
+        Some(boot) => Memory::with_boot_rom(rom, boot, cfg),
+        None => Memory::new(rom, cfg),
+    };
+    let boot_str = match &mem.boot_rom {
+        Some(b) => format!(", bootRom={}B", b.len()),
+        None => String::new(),
+    };
+    println!("Program: {} cycles, circuit={}, grid {w}×{h} (gates={}, DFF={}), rom={}B, ram={}B@{:#X}{boot_str}, meta v{} clocking={}",
         prog.cycles, meta.circuit, meta.gate_count, meta.dff_count,
         mem.rom.len(), mem.ram.len(), mem.config.ram_base, meta.format_version, clock.scheme_name());
 
@@ -531,6 +563,8 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let mut divergence: Option<Vec<String>> = None;
 
     for cycle in 0..prog.cycles {
+        // この周期の LY (0xFF44) を反映してからバスを見る (TB / Testbench.fs と同じ契約)
+        mem.set_lcd_y(cycle);
         let result = run_bus_cycle(&mut driver, &clock, &bus, &mut mem, w, &last_cells, cycle == 0)?;
         last_cells = result.output_cells().to_vec();
 
@@ -751,7 +785,26 @@ mod tests {
     #[test]
     fn validate_golden_accepts_matching_golden() {
         let meta = RoutedMeta::from_json(sample_meta_json()).unwrap();
-        assert!(validate_golden(&sample_golden("r"), &meta, 2, 1, "r").is_ok());
+        assert!(validate_golden(&sample_golden("r"), &meta, 2, 1, "r", None).is_ok());
+    }
+
+    #[test]
+    fn validate_golden_checks_boot_rom_hash_both_ways() {
+        let meta = RoutedMeta::from_json(sample_meta_json()).unwrap();
+        let with_boot = |sha: &str| {
+            let json = format!(r#"{{"format":"wwc-golden/1","circuit":"c","program":"p","sourceSha256":"ab",
+                "romSha256":"r","bootRomSha256":"{sha}","rstPulses":2,
+                "cycles":[{{"dataIn":62,"outputs":{{"b_out":1,"flag":0}}}}]}}"#);
+            serde_json::from_str::<Golden>(&json).unwrap()
+        };
+        assert!(validate_golden(&with_boot("b"), &meta, 2, 1, "r", Some("b")).is_ok());
+        let err = validate_golden(&with_boot("b"), &meta, 2, 1, "r", Some("other")).unwrap_err().to_string();
+        assert!(err.contains("bootRomSha256"), "{err}");
+        // golden にハッシュが無いのにプログラムがブート ROM を持つ / その逆
+        let err = validate_golden(&sample_golden("r"), &meta, 2, 1, "r", Some("b")).unwrap_err().to_string();
+        assert!(err.contains("bootRomSha256"), "{err}");
+        let err = validate_golden(&with_boot("b"), &meta, 2, 1, "r", None).unwrap_err().to_string();
+        assert!(err.contains("memory.bootRom"), "{err}");
     }
 
     #[test]
@@ -763,12 +816,12 @@ mod tests {
             ("cycles", 2, 5, "r"),
         ];
         for (needle, rst, cycles, rom) in cases {
-            let err = validate_golden(&sample_golden("r"), &meta, rst, cycles, rom).unwrap_err().to_string();
+            let err = validate_golden(&sample_golden("r"), &meta, rst, cycles, rom, None).unwrap_err().to_string();
             assert!(err.contains(needle), "expected '{needle}' in: {err}");
         }
         let mut stale = sample_golden("r");
         stale.source_sha256 = "zz".into();
-        let err = validate_golden(&stale, &meta, 2, 1, "r").unwrap_err().to_string();
+        let err = validate_golden(&stale, &meta, 2, 1, "r", None).unwrap_err().to_string();
         assert!(err.contains("sourceSha256"), "{err}");
     }
 
@@ -777,7 +830,7 @@ mod tests {
         let meta = RoutedMeta::from_json(sample_meta_json()).unwrap();
         let mut g = sample_golden("r");
         g.cycles[0].outputs.remove("flag");
-        let err = validate_golden(&g, &meta, 2, 1, "r").unwrap_err().to_string();
+        let err = validate_golden(&g, &meta, 2, 1, "r", None).unwrap_err().to_string();
         assert!(err.contains("outputs"), "{err}");
     }
 

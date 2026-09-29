@@ -82,15 +82,24 @@ let exportGolden (programPath: string) : int =
                     |> Result.mapError describeSimError
                     |> Result.bind (fun c ->
                         resolveBus ports
-                        |> Result.bind (fun bus -> loadRom program.Rom |> Result.map (fun rom -> c, ports, bus, rom))
+                        |> Result.bind (fun bus ->
+                            loadRom program.Rom
+                            |> Result.bind (fun rom ->
+                                match program.BootRom with
+                                | None -> Ok (c, ports, bus, rom, None)
+                                | Some src -> loadRom src |> Result.map (fun bootRom -> c, ports, bus, rom, Some bootRom)))
                         |> Result.mapError describeTestbenchError)
             match setup with
             | Error msg ->
                 eprintfn "ERROR: %s" msg
                 2
-            | Ok (c, ports, bus, rom) ->
+            | Ok (c, ports, bus, rom, bootRom) ->
                 let sw = System.Diagnostics.Stopwatch.StartNew ()
-                match run c ports bus (createMemory rom program.Memory) program.RstPulses program.Cycles with
+                let memory =
+                    match bootRom with
+                    | None -> createMemory rom program.Memory
+                    | Some br -> createMemoryWithBootRom rom br program.Memory
+                match run c ports bus memory program.RstPulses program.Cycles with
                 | Error e ->
                     eprintfn "ERROR: %s" (describeTestbenchError e)
                     1
@@ -102,6 +111,7 @@ let exportGolden (programPath: string) : int =
                           GoldenProgram = program.ProgramName
                           SourceSha256 = sourceSha
                           RomSha256 = sourceSha256 rom
+                          BootRomSha256 = bootRom |> Option.map sourceSha256
                           RstPulses = program.RstPulses }
                     Directory.CreateDirectory (Path.GetDirectoryName program.GoldenPath) |> ignore
                     File.WriteAllText (program.GoldenPath, goldenToJson info result.Cycles)
