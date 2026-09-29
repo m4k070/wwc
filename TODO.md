@@ -119,6 +119,19 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
       * 残る候補は `rule` の branchless 化 (warp 発散の解消)。ただし変更タイル内の ~99% は
         Wire/Empty (ゲートは全セルの 0.6%) なので warp 内の分岐は少ない見込みで、効果は未検証。
         先に発散の実測をしてから着手するのが順序。**TILE=32 は実測で悪化したので候補から外す**
+      * **世代あたりコストの内訳を計測** (2026-09-29、`WWC_STATS=1`)。gpu.rs に累積タイマを入れ、
+        「dispatch 列の記録+submit (CPU 側)」と「読み戻しの map 待ち (未実行の GPU 仕事を含む)」を
+        分けた。ブート ROM 400 周期 (2,254,101 世代、wall 17.90 s) で
+        **encode 5.26 s (30%) / wait 12.14 s (70%)** = 世代あたり **CPU 2.3 µs + GPU 5.4 µs**。
+        **両方が効いており、片方だけ削っても頭打ちになる** (TILE 掃引が効かなかった一因)
+      * 換算: `settle()` は `run_until_settled(max_steps, check_interval)` を呼び、既定の
+        check_interval=256 なので 1 バッチ = 86 dispatch (1 full + 255/3 block) + 1 読み戻し。
+        よって **CPU は 1 dispatch あたり 6.9 µs** (757k dispatch で 5.26 s)、
+        **GPU は 1 世代あたり 5.4 µs** (読み戻し待ちは 1 回 1.38 ms = 256 世代分の実行)。
+        次の候補は CPU 側の `SUBMIT_CHUNK_DISPATCHES` (encoder/submit の粒度) の掃引 —
+        dispatch 数が CPU 律速なので、粒度を上げれば encode が減る (代わりに GPU との重なりが減る)
+      * 計測の常時コストは map/submit ごとの `Instant::now()` 2 回だけで無視できる。
+        表示は `WWC_STATS=1` のときだけ (main.rs の `print_stats`、stderr)
 2. **`compileWL` / `ExportRouted.fsx` の既定値の見直し**: 既定は今も**単相・行優先** (`--place rowmajor`
    `--clocking single`)。sm83_full の配線に使った `--place anneal --clocking two-phase` を既定にするか検討する
    (小規模回路では行優先で十分なため、回路規模で自動判定する案もある)。ピッチも同じ: `pitchFor` は >3000 で

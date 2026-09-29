@@ -7,6 +7,12 @@ use anyhow::{Context, Result};
 /// WireLevel の世代を進めるシェーダー。先頭に BLOCK_GENS の定義を付け足して使う (shader_source)
 const WGSL_SHADER: &str = include_str!("wirelevel.wgsl");
 
+/// 診断用の累積時間 (ns)。`WWC_STATS=1` のとき memory_program が表示する。
+/// 1 プロセス 1 GPU なのでグローバルで足りる。
+/// encode: dispatch 列の記録 + submit (CPU 側)。wait: 読み戻しの map 待ち (未実行の GPU 仕事を含む)
+pub static STAT_ENCODE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static STAT_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// タイル (= workgroup) の一辺。wirelevel.wgsl の TILE / @workgroup_size と一致させる
 const TILE_SIZE: u32 = 16;
 /// 1 回の読み戻しで扱える最大世代数 (changeLog と GenParams テーブルの長さ)
@@ -551,6 +557,7 @@ impl GpuSim {
     fn submit_batch(&mut self, n: u32,
                     first: impl FnOnce(&mut wgpu::CommandEncoder),
                     last: impl FnOnce(&mut wgpu::CommandEncoder)) {
+        let t0 = std::time::Instant::now();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
         first(&mut encoder);
         let plan = self.begin_batch(&mut encoder, n);
@@ -565,6 +572,7 @@ impl GpuSim {
             encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sim") });
         }
         self.end_batch(n);
+        STAT_ENCODE_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// steps 世代進める (変化ログは読まない)。
@@ -651,6 +659,7 @@ impl GpuSim {
 
 /// buf の先頭 size バイトを map して f で変換する。map の失敗はエラーとして返す。
 fn map_read<T>(device: &wgpu::Device, buf: &wgpu::Buffer, size: u64, f: impl FnOnce(&[u8]) -> T) -> Result<T> {
+    let t0 = std::time::Instant::now();
     let slice = buf.slice(..size);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -664,6 +673,7 @@ fn map_read<T>(device: &wgpu::Device, buf: &wgpu::Buffer, size: u64, f: impl FnO
         f(&mapped)
     };
     buf.unmap();
+    STAT_WAIT_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     Ok(value)
 }
 
