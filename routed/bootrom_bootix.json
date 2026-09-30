@@ -1,0 +1,19 @@
+{
+  "circuit": "sm83_full",
+  "comment": "CA \u30C7\u30E2: \u81EA\u4F5C\u306E\u6700\u5C0F\u30D6\u30FC\u30C8 ROM \u3092 0x0000 \u306B\u91CD\u306D\u3066\u8D70\u3089\u305B\u308B (\u6BB5\u968E 0)",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_bootrom_bootix.bin",
+    "bootRom": "bootix_dmg.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 2000,
+  "maxStepsPerPhase": 12000,
+  "checkInterval": 64,
+  "expectMem": {},
+  "golden": "bootrom_bootix.golden.json",
+  "trace": false
+}

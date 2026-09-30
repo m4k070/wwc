@@ -155,7 +155,7 @@ let private writeProgramJson (path: string) (romName: string) (bootRomName: stri
 
 // --- main --------------------------------------------------------------------
 
-type private Args = { LogoFile: string option; Cycles: int; OutDir: string option }
+type private Args = { LogoFile: string option; Cycles: int; OutDir: string option; BootRomFile: string option; Name: string }
 
 let private parseArgs (argv: string list) =
     let rec go args acc =
@@ -163,15 +163,21 @@ let private parseArgs (argv: string list) =
         | "--logo-file" :: v :: rest -> go rest { acc with LogoFile = Some v }
         | "--cycles" :: v :: rest -> go rest { acc with Cycles = int v }
         | "--out" :: v :: rest -> go rest { acc with OutDir = Some v }
+        | "--bootrom" :: v :: rest -> go rest { acc with BootRomFile = Some v }
+        | "--name" :: v :: rest -> go rest { acc with Name = v }
         | [] -> acc
         | other -> failwithf "不明な引数: %A" other
-    go argv { LogoFile = None; Cycles = 2600; OutDir = None }
+    go argv { LogoFile = None; Cycles = 2600; OutDir = None; BootRomFile = None; Name = "bootrom_minimal" }
 
 let exitCode =
     try
         let args = parseArgs (fsi.CommandLineArgs |> Array.toList |> List.tail)
         let outDir = Path.GetFullPath (Path.Combine (repoRoot, defaultArg args.OutDir "routed"))
-        let bootRomPath = Path.Combine (outDir, "bootrom_minimal.bin")
+        let custom = args.BootRomFile.IsSome
+        let bootRomPath =
+            match args.BootRomFile with
+            | Some f -> Path.GetFullPath (Path.Combine (repoRoot, f))
+            | None -> Path.Combine (outDir, "bootrom_minimal.bin")
         if not (File.Exists bootRomPath) then
             eprintfn "ERROR: %s がない。先に bootrom/minimal.asm を rgbasm でビルドする" bootRomPath
             2
@@ -182,8 +188,11 @@ let exitCode =
                 2
             else
                 // ROM 内の展開テーブル (0x00E0-0x00EF) と F# 側の計算が一致することを確認する
+                // 自作 ROM は 0x00E0 に展開テーブルを持つ (F# 側の計算と一致することを確認する)。
+                // 外部 ROM (Bootix 等) はこの配置を持たないので、検査は自作 ROM のときだけ行う
                 let tableOk =
-                    [ 0 .. 15 ] |> List.forall (fun n -> int bootRom.[0xE0 + n] = duplicateBits n)
+                    custom
+                    || ([ 0 .. 15 ] |> List.forall (fun n -> int bootRom.[0xE0 + n] = duplicateBits n))
                 if not tableOk then
                     eprintfn "ERROR: ブート ROM の展開テーブル (0x00E0) が F# 側の計算と一致しない"
                     1
@@ -194,7 +203,7 @@ let exitCode =
                         | None -> customLogo ()
                     let logoName = if args.LogoFile.IsSome then "外部ファイル" else "自作パターン (WWC)"
                     let cartridge = buildCartridge logo
-                    let romPath = Path.Combine (outDir, "rom_bootrom_minimal.bin")
+                    let romPath = Path.Combine (outDir, sprintf "rom_%s.bin" args.Name)
                     File.WriteAllBytes (romPath, cartridge)
                     // expectMem: VRAM の展開結果 + タイルマップ + I/O + RAM マーカー
                     let vramExpect =
@@ -209,9 +218,14 @@ let exitCode =
                         [ 0xC001us, 0x42uy;   // カートリッジ側プログラムのマーカー
                           0xC002us, 0xC3uy;   // 解除後の 0x0000 = カートリッジ (jp のオペコード)
                           0xC003us, 0x00uy ]  // 解除後の 0x00E0 = ブート ROM の表は見えない
-                    let expectMem = vramExpect @ tilemapExpect @ ioExpect @ ramExpect
-                    let programPath = Path.Combine (outDir, "bootrom_minimal.json")
-                    writeProgramJson programPath "rom_bootrom_minimal.bin" "bootrom_minimal.bin" args.Cycles expectMem
+                    // 外部 ROM は VRAM への展開手順が違うので、VRAM/タイルマップの期待値は出さない。
+                    // LCDC の書込は ROM の終盤 (Bootix は約 62K サイクル) なので、短い prefix を回すときは
+                    // 期待値を出さず golden (全周期照合) だけにする
+                    let expectMem =
+                        if custom then []
+                        else vramExpect @ tilemapExpect @ ioExpect @ ramExpect
+                    let programPath = Path.Combine (outDir, sprintf "%s.json" args.Name)
+                    writeProgramJson programPath (sprintf "rom_%s.bin" args.Name) (Path.GetFileName bootRomPath) args.Cycles expectMem
                     printfn "[bootrom] ブート ROM : %s (%d バイト, sha256 %s…)"
                         bootRomPath bootRom.Length (Convert.ToHexString (System.Security.Cryptography.SHA256.HashData bootRom).[0..15])
                     printfn "[bootrom] カートリッジ: %s (%d バイト)" romPath cartridge.Length
