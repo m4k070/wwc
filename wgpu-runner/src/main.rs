@@ -17,6 +17,34 @@ fn print_usage() {
     eprintln!("       wgpu-runner --memory prog.json [--batch B] [--dump-dir DIR]   # メモリバスモード (Step B)");
 }
 
+/// WWC_STATS=1 のとき、GPU 実行の内訳を stderr に出す。
+/// encode = dispatch 列の記録 + submit (CPU 側)、wait = 読み戻しの map 待ち (未実行の GPU 仕事を含む)
+fn print_stats() {
+    if env::var("WWC_STATS").is_err() {
+        return;
+    }
+    let enc = gpu::STAT_ENCODE_NS.load(std::sync::atomic::Ordering::Relaxed);
+    let wait = gpu::STAT_WAIT_NS.load(std::sync::atomic::Ordering::Relaxed);
+    let total = enc + wait;
+    let pct = |v: u64| if total == 0 { 0.0 } else { v as f64 * 100.0 / total as f64 };
+    eprintln!(
+        "[stats] encode(記録+submit) = {:.2}s ({:.0}%) / wait(読み戻し) = {:.2}s ({:.0}%) / 計 {:.2}s",
+        enc as f64 / 1e9, pct(enc), wait as f64 / 1e9, pct(wait), total as f64 / 1e9
+    );
+    // 走査セル数の見積り: 1 タイルを dispatch すると (TILE+2K)² セルを走査して K 世代進む
+    // (TILE=16, K=3 → 484 セル / 3 世代 = 161 セル/世代/タイル)
+    let gens = gpu::STAT_GENS.load(std::sync::atomic::Ordering::Relaxed);
+    let tiles = gpu::STAT_CHANGED_TILES.load(std::sync::atomic::Ordering::Relaxed);
+    if gens > 0 {
+        let scanned = tiles as f64 / gens as f64 * 161.0;
+        eprintln!(
+            "[stats] 世代 {gens} / 変化タイル計 {tiles} = {:.1} タイル/世代 ≒ 走査 {:.0} セル/世代 / GPU 1 セルあたり {:.2} ps",
+            tiles as f64 / gens as f64, scanned,
+            if scanned > 0.0 { wait as f64 * 1000.0 / (scanned * gens as f64) } else { 0.0 }
+        );
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -62,6 +90,7 @@ fn main() -> Result<()> {
     if let Some(prog) = memory_path {
         let opts = memory_program::MemProgOpts { batch, engine, dump_dir };
         let code = memory_program::run_memory_program(&prog, &opts)?;
+        print_stats();
         std::process::exit(code);
     }
 

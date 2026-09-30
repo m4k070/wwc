@@ -108,8 +108,52 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
      * 分かったこと: 世代あたりコストは「アクティブタイル数 × タイルあたり走査セル数」に比例する
        (rule を外して CA を発散させると全タイルが毎世代変化し、世代あたり 88〜194 µs = 通常の 12〜27 倍)。
        ただし 1 セルあたり ~40 ps は命令スループットから期待される値の ~9 倍遅い
-     * 残る候補は `rule` の branchless 化 (warp 発散の解消) と TILE=32 (halo の比率を下げる)。
-       どちらも見込みは 10〜20% 程度で、**変更は破棄済み** (ブランチ `gpu-block-shrink` 削除)
+      * 続けて**タイル粒度 (TILE) を掃引 — 効果なし** (2026-09-29)。ブート ROM 400 周期
+        (2,254,101 世代、grid 1481×1273) で TILE 8 / 16 / 32 を実測: **8,083 / 7,968 / 12,502 ns/世代**。
+        世代数は全条件で同一なので比較は clean (ノイズ床は ±1%、baseline 再測 8,047)。
+        **TILE=16 (現行) が既に最適**で、大きくすると薄い波面でも「変化していないセル」を含む
+        タイルが活性化して再計算量が増え、57% 悪化する。TILE=8 はノイズと区別できない。
+        → **タイル粒度はレバーではないので変更は破棄**。なお TILE=32 は workgroup が
+        1024 スレッドになり wgpu の既定上限 (`maxComputeInvocationsPerWorkgroup=256`) を
+        超えるため `required_limits: adapter.limits()` が必要になる (検証エラーで判明)
+      * 残る候補は `rule` の branchless 化 (warp 発散の解消)。ただし変更タイル内の ~99% は
+        Wire/Empty (ゲートは全セルの 0.6%) なので warp 内の分岐は少ない見込みで、効果は未検証。
+        先に発散の実測をしてから着手するのが順序。**TILE=32 は実測で悪化したので候補から外す**
+      * **世代あたりコストの内訳を計測** (2026-09-29、`WWC_STATS=1`)。gpu.rs に累積タイマを入れ、
+        「dispatch 列の記録+submit (CPU 側)」と「読み戻しの map 待ち (未実行の GPU 仕事を含む)」を
+        分けた。ブート ROM 400 周期 (2,254,101 世代、wall 17.90 s) で
+        **encode 5.26 s (30%) / wait 12.14 s (70%)** = 世代あたり **CPU 2.3 µs + GPU 5.4 µs**。
+        **両方が効いており、片方だけ削っても頭打ちになる** (TILE 掃引が効かなかった一因)
+      * 換算: `settle()` は `run_until_settled(max_steps, check_interval)` を呼び、既定の
+        check_interval=256 なので 1 バッチ = 86 dispatch (1 full + 255/3 block) + 1 読み戻し。
+        よって **CPU は 1 dispatch あたり 6.9 µs** (757k dispatch で 5.26 s)、
+        **GPU は 1 世代あたり 5.4 µs** (読み戻し待ちは 1 回 1.38 ms = 256 世代分の実行)。
+        次の候補は CPU 側の `SUBMIT_CHUNK_DISPATCHES` (encoder/submit の粒度) の掃引 —
+        dispatch 数が CPU 律速なので、粒度を上げれば encode が減る (代わりに GPU との重なりが減る)
+      * 計測の常時コストは map/submit ごとの `Instant::now()` 2 回だけで無視できる。
+        表示は `WWC_STATS=1` のときだけ (main.rs の `print_stats`、stderr)
+      * **`SUBMIT_CHUNK_DISPATCHES` を掃引 — 既定の 16 が最良** (2026-09-29)。`WWC_CHUNK` で
+        上書きできるようにして 1/4/16/64/256/1024 を実測 (ブート ROM 400 周期、計 = encode+wait):
+        **25.55 / 17.47 / 17.16 / 19.08 / 19.11 / 18.81 秒**。encode は 16.88 → 7.75 → 5.14 →
+        4.79 → 4.79 → 4.76 秒で **4.8 秒で飽和** = 757k dispatch を 1 個 6.3 µs で記録する床で、
+        これ以上は粒度を上げても減らない。大きい側は wait が 12.0 → 14.3 秒に増えて負ける
+        (submit をまとめると GPU が走り出せず、CPU との重なりが消える)。**既定変更なし**
+      * 総時間の下限は「CPU 4.8 秒 (dispatch 数 × 6.3 µs)」と「GPU 5.4 µs/世代」の重ね合わせで、
+        CHUNK=16 はほぼ最適点。**残るレバーは GPU 側のセルあたりコスト** (TILE は効かず、
+        `rule` の branchless 化が候補)。ただし着手前に「1 世代あたり何セル走査しているか」を出す —
+        changeLog の変化タイル数を足せば走査セル数が出るので、計算律速か起動律速かを切り分けられる
+      * **走査セル数を計測 → 計算律速ではない** (2026-09-29)。changeLog の変化タイル数を足した:
+        世代 2,261,555 / 変化タイル計 144,205,959 = **63.8 タイル/世代 ≒ 走査 10,266 セル/世代
+        = 524 ps/セル**。RTX 3060 の理論スループット (~200 G セル/秒 = 5 ps/セル) の **~1%** しか
+        出ていない。1 dispatch は 64 workgroup 程度しかなく GPU が埋まらないので、
+        **セルあたりは命令数ではなくメモリレイテンシと占有で決まっている**
+      * これで**安いマイクロ最適化は打ち止め**と判断: `rule` の branchless 化は効かない見込み
+        (セルあたりはレイテンシ律速で命令数ではない)。TILE 掃引 (16 が最適) と CHUNK 掃引
+        (16 が最適) が横ばいだったのも同じ理由。残るのは構造側 —
+        (1) 世代数を減らす (クリティカルパス = 配置とピッチは既に限界) か、
+        (2) dispatch を跨がず GPU 内で固定点まで回す (on-device fixpoint / megakernel) か
+      * 計測コマンド: `WWC_STATS=1 ./wgpu-runner/target/release/wgpu-runner --memory routed/_bench_bootrom.json`
+        (ベンチ `routed/_bench_bootrom.json` = bootrom_minimal.json の cycles を 400 にしたもの、未追跡)
 2. **`compileWL` / `ExportRouted.fsx` の既定値の見直し**: 既定は今も**単相・行優先** (`--place rowmajor`
    `--clocking single`)。sm83_full の配線に使った `--place anneal --clocking two-phase` を既定にするか検討する
    (小規模回路では行優先で十分なため、回路規模で自動判定する案もある)。ピッチも同じ: `pitchFor` は >3000 で
