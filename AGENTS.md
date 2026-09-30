@@ -43,6 +43,18 @@ dotnet fsi src/LoadRouted.fsx <circuit> [--dir DIR]
 # プログラム JSON (wgpu-runner --memory と同形式) を NetlistSim で実行し golden を生成
 dotnet fsi src/ExportGolden.fsx <program.json>
 
+# ブート ROM プログラム (メモリモデル + カートリッジ) を生成する。引数なしは自作最小 ROM
+# (bootrom/minimal.asm → routed/bootrom_minimal.bin)。外部 ROM は --bootrom で指定する
+# (例: Bootix v1.2 = routed/bootix_dmg.bin、CC0-1.0、詳細は bootrom/bootix/README.md)。
+# 外部 ROM は 0x00E0 の展開テーブルを持たないので、テーブル検査と expectMem は自作 ROM のときだけ出す
+# 注: routed/bootrom_*.json は F# 側の仕様テスト (NetlistSim) が自動で拾う。GPU スイートの
+#     glob (sm83_full_*) には入れない (1 本で 1〜3 分かかるため)
+dotnet fsi src/ExportBootRom.fsx [--bootrom routed/bootix_dmg.bin] [--name bootrom_bootix] [--cycles N]
+
+# ブート ROM プログラムの最終メモリを gbfs の PPU で描いて PNG にする (CA に PPU が無いため)。
+# 前提: dotnet build src/WwHdl.fsproj -c Release (Release DLL を参照する)
+dotnet fsi src/RenderBootRom.fsx [--program routed/bootrom_minimal.json] [--scy N] [--scale 4] [--out FILE]
+
 # 配線済みグリッドの hold 静的解析 (single-edge: skew 検査 / two-phase: 相間経路 0 本の検査)
 dotnet fsi src/AnalyzeHold.fsx <circuit> [--dir DIR] [--top N] [--clk PORT]
 dotnet fsi src/AnalyzeHold.fsx --compile <circuit> [--place rowmajor|anneal] [--clocking single|two-phase]
