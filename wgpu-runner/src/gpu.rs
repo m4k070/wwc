@@ -25,11 +25,24 @@ const MAX_GENS_PER_BATCH: u32 = 1024;
 /// 実測 (2026-09-29、34 本の GPU 全周期照合): K=3 で 77.6 秒 / K=4 79.2 秒 / K=8 112.6 秒 /
 /// K=12 以上は halo の再計算で悪化 / K=1 は dispatch 律速で悪化 (daa_edge 単体で 16.8 秒)。
 /// block_* は 1 世代ごとに計算範囲 (16+2K)² を走査するので、K を上げても世代あたりコストは下がらない
-const BLOCK_GENS: u32 = 3;
+pub const BLOCK_GENS: u32 = 3;
 // block_* の shared memory (計算範囲 (16+2K)² の 2 面) が既定の上限 16 KiB に収まること
 const _: () = assert!(2 * (TILE_SIZE + 2 * BLOCK_GENS) * (TILE_SIZE + 2 * BLOCK_GENS) * 4 <= 16384);
 /// pack_bytes の workgroup の大きさ (wirelevel.wgsl の PACK_WORKGROUP)
 const PACK_WORKGROUP: u32 = 256;
+
+/// 1 dispatch が 1 タイルについて計算するセル数。block_* は世代ごとに領域全体を再計算するので
+/// 1 世代あたりの計算セル数はこれと同じ (TILE+2K)²。
+pub fn region_cells() -> f64 {
+    let r = (TILE_SIZE + 2 * BLOCK_GENS) as f64;
+    r * r
+}
+
+/// 1 世代あたりのグローバルメモリ読み書きに相当するセル数 (領域のロード/ストアだけ) = (TILE+2K)²/K。
+/// 実測のコストモデルは計算セル数 (region_cells) のほうに比例する (2026-09-29、K=1/K=3 の 2 点)。
+pub fn region_cells_per_gen() -> f64 {
+    region_cells() / BLOCK_GENS as f64
+}
 /// 1 回の submit に積む dispatch 数。小さいほど GPU が早く走り出し、CPU の記録と重なる
 const SUBMIT_CHUNK_DISPATCHES: usize = 16;
 

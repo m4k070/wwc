@@ -154,6 +154,21 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
         (2) dispatch を跨がず GPU 内で固定点まで回す (on-device fixpoint / megakernel) か
       * 計測コマンド: `WWC_STATS=1 ./wgpu-runner/target/release/wgpu-runner --memory routed/_bench_bootrom.json`
         (ベンチ `routed/_bench_bootrom.json` = bootrom_minimal.json の cycles を 400 にしたもの、未追跡)
+      * **K を振ってコストモデルを実測** (2026-09-29)。前項の「走査 10,266 セル/世代 = 524 ps/セル」は
+        `(TILE+2K)²/K` で割っていた誤り。block_* は **世代ごとに領域全体 (TILE+2K)² を再計算する**ので
+        計算セル数はその K 倍。正しくは K=3 で **30,862 計算セル/世代 = 175 ps/セル**
+        (グローバルメモリの読み書きは 10,287 セル/世代 = 領域のロード/ストアのみ)
+      * K=1 と K=3 の 2 点で解くと **GPU 時間 ≒ 1.4 µs/dispatch + 0.16 ns/計算セル**。
+        K=3 では計算セルが 91% を占め、**dispatch の起動・排出は 9% しかない**
+      * K=1 の実測: 変化タイル/世代は 63.8 で K=3 と同じ (同一の計算)。GPU は
+        **4.72 µs/世代 (K=3 は 5.40) と K=1 のほうが速い**。遅いのは CPU 側で
+        encode 13.71 s = **6.1 µs/dispatch × 227 万回** (K=3 は 5.14 s / 757k = 6.8 µs/dispatch)。
+        つまり **GPU は K=1 を好み、CPU は大きい K を好む**。K=3 はその妥協点で、
+        wgpu の dispatch 記録コスト (6〜7 µs/dispatch) が実質の制約になっている
+      * 結論 (2026-09-29): megakernel (dispatch を跨がず GPU 内で固定点まで回す) の伸びしろは
+        **GPU 1.4 µs/dispatch + CPU 6.1 µs/dispatch の除去 = 最大 ~1.6 倍**で、数日規模の
+        作り直しに見合わない。段階 2 (フル起動演出 3.5M サイクル) は 45 → 28 時間程度にしかならず、
+        到達可能にはならない。**マイクロ最適化も構造変更も打ち止め**と判断し、高速化はここで止める
 2. **`compileWL` / `ExportRouted.fsx` の既定値の見直し**: 既定は今も**単相・行優先** (`--place rowmajor`
    `--clocking single`)。sm83_full の配線に使った `--place anneal --clocking two-phase` を既定にするか検討する
    (小規模回路では行優先で十分なため、回路規模で自動判定する案もある)。ピッチも同じ: `pitchFor` は >3000 で

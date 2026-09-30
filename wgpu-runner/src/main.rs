@@ -31,16 +31,18 @@ fn print_stats() {
         "[stats] encode(記録+submit) = {:.2}s ({:.0}%) / wait(読み戻し) = {:.2}s ({:.0}%) / 計 {:.2}s",
         enc as f64 / 1e9, pct(enc), wait as f64 / 1e9, pct(wait), total as f64 / 1e9
     );
-    // 走査セル数の見積り: 1 タイルを dispatch すると (TILE+2K)² セルを走査して K 世代進む
-    // (TILE=16, K=3 → 484 セル / 3 世代 = 161 セル/世代/タイル)
+    // コストモデルの実測 (2026-09-29、K=1/K=3 の 2 点で解いた): GPU 時間 ≒ 1.4 µs/dispatch + 0.16 ns/計算セル。
+    // block_* は 1 dispatch で 1 タイルの領域 (TILE+2K)² を世代ごとに再計算するので、計算セル数はこれで数える。
     let gens = gpu::STAT_GENS.load(std::sync::atomic::Ordering::Relaxed);
     let tiles = gpu::STAT_CHANGED_TILES.load(std::sync::atomic::Ordering::Relaxed);
     if gens > 0 {
-        let scanned = tiles as f64 / gens as f64 * 161.0;
+        let tiles_per_gen = tiles as f64 / gens as f64;
+        let compute = tiles_per_gen * gpu::region_cells();
+        let traffic = tiles_per_gen * gpu::region_cells_per_gen();
         eprintln!(
-            "[stats] 世代 {gens} / 変化タイル計 {tiles} = {:.1} タイル/世代 ≒ 走査 {:.0} セル/世代 / GPU 1 セルあたり {:.2} ps",
-            tiles as f64 / gens as f64, scanned,
-            if scanned > 0.0 { wait as f64 * 1000.0 / (scanned * gens as f64) } else { 0.0 }
+            "[stats] 世代 {gens} / 変化タイル計 {tiles} = {tiles_per_gen:.1} タイル/世代 (K={}) / 計算 {compute:.0} セル/世代 = {:.0} ps/セル (メモリ {traffic:.0} セル/世代)",
+            gpu::BLOCK_GENS,
+            if compute > 0.0 { wait as f64 * 1000.0 / (compute * gens as f64) } else { 0.0 }
         );
     }
 }
