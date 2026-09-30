@@ -47,6 +47,8 @@ module NetlistSim =
         | UndrivenOutput (port, i, net) -> sprintf "出力 %s[%d] (net %d) に駆動元がない" port i (netNo net)
 
     /// 組合せゲート (NAND/NOT)。インデックスは CompiledNetlist.NetIndex の密な番号。
+    /// struct にすることでゲート配列が連続配置になり、1 ゲートあたりのポインタ追跡が減る
+    [<Struct>]
     type SimGate = { Output: int; Inputs: int[] }
 
     type SimDff = { GateId: int; Output: int; D: int }
@@ -59,10 +61,14 @@ module NetlistSim =
           Clock: (NetId * int) option
           /// トポロジカル順に並べた組合せゲート
           CombGates: SimGate[]
-          Dffs: SimDff[] }
+          Dffs: SimDff[]
+          /// 差分評価用: 密インデックスのネットを入力に持つ組合せゲートの位置
+          NetConsumers: int[][] }
 
     /// ネット値 (密インデックス)。DFF の q も出力ネットの値として持つ。
-    type SimState = { Values: bool[] }
+    /// Cold = まだ一度も apply していない。最初の apply だけは全ゲートを評価する
+    /// (CA の初期グリッドと同じで、組合せゲートは最初の settle で評価されるため)
+    type SimState = { Values: bool[]; Cold: bool }
 
     let private traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
         let folder x acc =
@@ -172,17 +178,30 @@ module NetlistSim =
                         let clock =
                             if dffs.Length = 0 then None
                             else nl.ClockNet |> Option.map (fun clk -> clk, index.[clk])
+                        // 差分評価用の消費者表 (コンパイル時に 1 度だけ作る)
+                        let netConsumers =
+                            let buckets = Array.init index.Count (fun _ -> ResizeArray<int> ())
+                            sorted |> Array.iteri (fun gi g -> for net in g.Inputs do buckets.[net].Add gi)
+                            buckets |> Array.map (fun b -> b.ToArray ())
                         { NetIndex = index
                           PrimaryInputs = Set.ofList nl.PrimaryInputs
                           Clock = clock
                           CombGates = sorted
-                          Dffs = dffs }))))
+                          Dffs = dffs
+                          NetConsumers = netConsumers }))))
 
     // --- 実行 ---------------------------------------------------------------
 
     /// 全ネット 0 (CA の初期グリッドと同じ。組合せ回路は最初の apply で評価される)。
     let initial (c: CompiledNetlist) : SimState =
-        { Values = Array.zeroCreate c.NetIndex.Count }
+        { Values = Array.zeroCreate c.NetIndex.Count; Cold = true }
+
+    // --- 差分評価の作業用スクラッチ -----------------------------------------------
+    // apply は単一スレッドで順に呼ばれる前提で配列を使い回す (毎回 11 KB 確保すると
+    // gen0 GC が支配的になる)。ループを抜けた時点で dirty は全 false、work/changed は空に戻る
+    let mutable private scratchDirty : bool[] = Array.empty
+    let mutable private scratchWork : ResizeArray<int> = ResizeArray ()
+    let mutable private scratchChanged : ResizeArray<int> = ResizeArray ()
 
     /// 入力を書いて収束させる (CA の setPin + settle に対応)。書かなかった入力は前の値を保つ。
     let apply (c: CompiledNetlist) (inputs: Map<NetId, bool>) (s: SimState) : Result<SimState, SimError> =
@@ -196,16 +215,55 @@ module NetlistSim =
                     let nextClock = inputs |> Map.tryFind clkNet |> Option.defaultValue s.Values.[clkIndex]
                     not s.Values.[clkIndex] && nextClock
                 | None -> false
+            // 値が変わったネット (差分評価の起点)。スクラッチを再利用する
+            let changed = scratchChanged
+            changed.Clear ()
+            let setNet (idx: int) (v: bool) =
+                if values.[idx] <> v then
+                    values.[idx] <- v
+                    changed.Add idx
             if isRisingEdge then
-                for dff in c.Dffs do
-                    values.[dff.Output] <- s.Values.[dff.D]
-            for KeyValue (net, v) in inputs do
-                values.[c.NetIndex.[net]] <- v
-            for g in c.CombGates do
-                values.[g.Output] <-
-                    if g.Inputs.Length = 0 then false
-                    else not (g.Inputs |> Array.forall (fun i -> values.[i]))
-            Ok { Values = values }
+                for dff in c.Dffs do setNet dff.Output s.Values.[dff.D]
+            for KeyValue (net, v) in inputs do setNet c.NetIndex.[net] v
+            // 1 ゲートの評価 (NAND/NOT)。入力が全部 1 なら 0、そうでなければ 1。入力 0 本は 0。
+            // デリゲート呼び出し (Array.forall) を避けるため明示ループにする
+            let evalGate (g: SimGate) : bool =
+                let ins = g.Inputs
+                let mutable allTrue = true
+                let mutable k = 0
+                while allTrue && k < ins.Length do
+                    if not values.[ins.[k]] then allTrue <- false
+                    k <- k + 1
+                not allTrue
+            if s.Cold then
+                // 最初の 1 回は全ゲートを評価する (CA の初期グリッドからの settle と同じ)
+                for g in c.CombGates do
+                    values.[g.Output] <- evalGate g
+            else
+                // 差分評価: 変化したネットを入力に持つゲートだけを、変化が伝播する範囲で評価する。
+                // DAG なので、どの入力も変化しなくなった時点の値が固定点になる
+                let dirty =
+                    if scratchDirty.Length <> c.CombGates.Length then
+                        scratchDirty <- Array.zeroCreate c.CombGates.Length
+                    scratchDirty
+                let work = scratchWork
+                work.Clear ()
+                let enqueue (netIdx: int) =
+                    for gi in c.NetConsumers.[netIdx] do
+                        if not dirty.[gi] then
+                            dirty.[gi] <- true
+                            work.Add gi
+                for n in changed do enqueue n
+                while work.Count > 0 do
+                    let gi = work.[work.Count - 1]
+                    work.RemoveAt (work.Count - 1)
+                    dirty.[gi] <- false
+                    let g = c.CombGates.[gi]
+                    let v = evalGate g
+                    if v <> values.[g.Output] then
+                        values.[g.Output] <- v
+                        enqueue g.Output
+            Ok { Values = values; Cold = false }
 
     /// 入力ポートに整数値を書くためのネット割り当て (LSB first)。定数ビットは無視する。
     let portInputs (port: YosysPortBits) (value: uint64) : Map<NetId, bool> =
