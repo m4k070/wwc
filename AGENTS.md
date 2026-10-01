@@ -43,6 +43,11 @@ dotnet fsi src/LoadRouted.fsx <circuit> [--dir DIR]
 # プログラム JSON (wgpu-runner --memory と同形式) を NetlistSim で実行し golden を生成
 dotnet fsi src/ExportGolden.fsx <program.json>
 
+# NetlistSim の速度計測 (golden の直列化を含めない純粋なシミュレーション時間、既定 3 回の中央値)。
+# 最適化の前後は同じプログラム・同じ負荷条件で測ること (1 回の計測は ±10% 以上ばらつき、
+# 他の重い処理と同時に走らせると大きくずれる)。前提: -c Release でビルド
+dotnet fsi src/BenchNetlistSim.fsx [<program.json>] [<repeat>]
+
 # ブート ROM プログラム (メモリモデル + カートリッジ) を生成する。引数なしは自作最小 ROM
 # (bootrom/minimal.asm → routed/bootrom_minimal.bin)。外部 ROM は --bootrom で指定する
 # (例: Bootix v1.2 = routed/bootix_dmg.bin、CC0-1.0、詳細は bootrom/bootix/README.md)。
