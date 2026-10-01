@@ -435,6 +435,63 @@ module Testbench =
                         |> Result.map (fun dataOut ->
                             { Addr = addr; MemRead = memRead; MemWrite = memWrite; DataOut = dataOut; IntAck = ack })))))
 
+    /// 入力ポートの計画。書き込み用なので、解決時に「外部入力か」も検査する
+    let private planInputPort (c: CompiledNetlist) (p: YosysPortBits) : Result<PortPlan, SimError> =
+        p.Bits
+        |> List.mapi (fun i bit ->
+            match bit with
+            | ConstBit b -> Ok (if b then -2 else -1)
+            | NetBit net ->
+                match Map.tryFind net c.NetIndex with
+                | Some idx when c.PrimaryInputs.Contains net -> Ok idx
+                | Some _ -> Error (NotPrimaryInput net)
+                | None -> Error (UndrivenOutput (p.Name, i, net)))
+        |> traverse id
+        |> Result.map (fun bits -> { PlanName = p.Name; Bits = List.toArray bits })
+
+    /// 入力書き込みの計画
+    type InputPlan =
+        { Clock: PortPlan
+          Reset: PortPlan
+          DataIn: PortPlan
+          /// 割込みを持たない回路では None
+          Irq: PortPlan option
+          /// pairs バッファに必要な最大個数 (定数ビットは書かないので実際はこれ以下)
+          Capacity: int }
+
+    let private planInputs (c: CompiledNetlist) (bus: BusPorts) : Result<InputPlan, SimError> =
+        let irq =
+            match bus.Interrupt with
+            | Some p -> planInputPort c p.Irq |> Result.map Some
+            | None -> Ok None
+        irq
+        |> Result.bind (fun irq ->
+            planInputPort c bus.Clock
+            |> Result.bind (fun clock ->
+                planInputPort c bus.Reset
+                |> Result.bind (fun reset ->
+                    planInputPort c bus.DataIn
+                    |> Result.map (fun dataIn ->
+                        let capacity =
+                            [ yield clock; yield reset; yield dataIn
+                              match irq with
+                              | Some p -> yield p
+                              | None -> () ]
+                            |> List.sumBy (fun p -> p.Bits.Length)
+                        { Clock = clock; Reset = reset; DataIn = dataIn; Irq = irq; Capacity = capacity }))))
+
+    /// 計画に従って (密インデックス, 値) の組を pairs に書き、次の書き込み位置を返す。
+    /// 定数ビットは書かない (値が固定なので)。ホットパスなので割り当てしない。
+    let private fillPairs (plan: PortPlan) (value: uint64) (pairs: struct (int * bool)[]) (offset: int) : int =
+        let bits = plan.Bits
+        let mutable n = offset
+        for i = 0 to bits.Length - 1 do
+            let b = bits.[i]
+            if b >= 0 then
+                pairs.[n] <- struct (b, (value >>> i) &&& 1UL = 1UL)
+                n <- n + 1
+        n
+
     type CycleRecord =
         { /// この周期で書いた data_in
           DataIn: uint64
@@ -482,13 +539,19 @@ module Testbench =
         (cycles: int)
         : Result<TestbenchRun, TestbenchError> =
         let runCore () =
-            match planOutputs c ports, planBus c bus with
-            | Error e, _ | _, Error e -> Error e
-            | Ok outputPlan, Ok busPlan ->
+            match planOutputs c ports, planBus c bus, planInputs c bus with
+            | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+            | Ok outputPlan, Ok busPlan, Ok inputPlan ->
+                // 入力は「密インデックス, 値」の組で直接書く (Map を作らない)
+                let pairs = Array.zeroCreate inputPlan.Capacity
                 let resetPulse (s: SimState) =
-                    s
-                    |> applyPorts c [ bus.Reset, 1UL; bus.Clock, 0UL ]
-                    |> Result.bind (applyPorts c [ bus.Clock, 1UL ])
+                    let n =
+                        let mutable n = fillPairs inputPlan.Reset 1UL pairs 0
+                        fillPairs inputPlan.Clock 0UL pairs n
+                    applyPairs c pairs n (Some false) s
+                    |> Result.bind (fun s1 ->
+                        let n1 = fillPairs inputPlan.Clock 1UL pairs 0
+                        applyPairs c pairs n1 (Some true) s1)
 
                 let rec loop (k: int) (s: SimState) (mem: MemoryImage) (acc: CycleRecord list) =
                     if k = cycles then
@@ -499,7 +562,10 @@ module Testbench =
                         // この周期の LY (0xFF44) を反映してからバスを見る
                         let mem = setLcdY mem k
                         // runner は rst=0 を書いた直後に最初の clk=0 settle を行う
-                        let lowWrites = if k = 0 then [ bus.Reset, 0UL; bus.Clock, 0UL ] else [ bus.Clock, 0UL ]
+                        let nLow =
+                            let mutable n = 0
+                            if k = 0 then n <- fillPairs inputPlan.Reset 0UL pairs n
+                            fillPairs inputPlan.Clock 0UL pairs n
                         // バスは解決済みインデックスから直接読む (Map を引かない)
                         let readLow (sLow: SimState) =
                             let addr = readPlanned sLow busPlan.Addr
@@ -508,7 +574,7 @@ module Testbench =
                             let dataOut = readPlanned sLow busPlan.DataOut
                             let intAck = match busPlan.IntAck with Some p -> readPlanned sLow p | None -> 0UL
                             (sLow, (uint16 addr, memRead = 1UL, memWrite = 1UL, byte dataOut), byte intAck)
-                        match applyPorts c lowWrites s with
+                        match applyPairs c pairs nLow (Some false) s with
                         | Error e -> Error e
                         | Ok sLow0 ->
                             let sLow, (addr, memRead, memWrite, dataOut), intAck = readLow sLow0
@@ -517,16 +583,23 @@ module Testbench =
                             let mem'' = acknowledgeInterrupts mem' intAck
                             let dataIn = if memRead then uint64 (readMemory mem'' addr) else 0UL
                             let irq = uint64 (pendingInterrupts mem'')
-                            let inputWrites =
-                                match bus.Interrupt with
-                                | Some ports -> [ bus.DataIn, dataIn; ports.Irq, irq ]
-                                | None -> [ bus.DataIn, dataIn ]
+                            let nIn =
+                                let mutable n = fillPairs inputPlan.DataIn dataIn pairs 0
+                                match inputPlan.Irq with
+                                | Some irqPlan -> fillPairs irqPlan irq pairs n
+                                | None -> n
                             let recordedIrq = if bus.Interrupt.IsSome then irq else 0UL
-                            match sLow |> applyPorts c inputWrites |> Result.bind (applyPorts c [ bus.Clock, 1UL ]) with
+                            // 入力を収束させてからクロックを立てる (DFF は収束後の D を捕捉する)。
+                            // まとめて 1 回にすると古い D を掴むので、必ず 2 回に分ける
+                            match applyPairs c pairs nIn (Some false) sLow with
                             | Error e -> Error e
-                            | Ok sHigh ->
-                                let outputs = readOutputsPlanned sHigh outputPlan
-                                loop (k + 1) sHigh mem'' ({ DataIn = dataIn; Irq = recordedIrq; Outputs = outputs } :: acc)
+                            | Ok sMid ->
+                                let nClk = fillPairs inputPlan.Clock 1UL pairs 0
+                                match applyPairs c pairs nClk (Some true) sMid with
+                                | Error e -> Error e
+                                | Ok sHigh ->
+                                    let outputs = readOutputsPlanned sHigh outputPlan
+                                    loop (k + 1) sHigh mem'' ({ DataIn = dataIn; Irq = recordedIrq; Outputs = outputs } :: acc)
 
                 [ 1 .. rstPulses ]
                 |> List.fold (fun acc _ -> Result.bind resetPulse acc) (Ok (initial c))

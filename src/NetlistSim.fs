@@ -58,6 +58,8 @@ module NetlistSim =
     type CompiledNetlist =
         { NetIndex: Map<NetId, int>
           PrimaryInputs: Set<NetId>
+          /// PrimaryInputs の密インデックス版 (applyPairs の検証用)
+          PrimaryInputIndices: Set<int>
           /// 主クロックのネットと密インデックス (DFF がなければ None)
           Clock: (NetId * int) option
           /// トポロジカル順に並べた組合せゲート
@@ -209,6 +211,8 @@ module NetlistSim =
                             counts, gatesOut
                         { NetIndex = index
                           PrimaryInputs = Set.ofList nl.PrimaryInputs
+                          PrimaryInputIndices =
+                            nl.PrimaryInputs |> List.choose (fun net -> Map.tryFind net index) |> Set.ofList
                           Clock = clock
                           CombGates = sorted
                           FlatInputs = flatInputs
@@ -229,72 +233,100 @@ module NetlistSim =
     let mutable private scratchWork : ResizeArray<int> = ResizeArray ()
     let mutable private scratchChanged : ResizeArray<int> = ResizeArray ()
 
+    /// 入力の組を書いて収束させる共通部分 (CA の setPin + settle に対応)。
+    /// 書かなかった入力は前の値を保つ。nextClock はこの settle でのクロック入力の値。
+    let private settle (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) (nextClock: bool option) (s: SimState) : SimState =
+        let values = Array.copy s.Values
+        let isRisingEdge =
+            match c.Clock, nextClock with
+            | Some (_, clkIndex), Some next -> not s.Values.[clkIndex] && next
+            | _ -> false
+        // 値が変わったネット (差分評価の起点)。スクラッチを再利用する
+        let changed = scratchChanged
+        changed.Clear ()
+        let setNet (idx: int) (v: bool) =
+            if values.[idx] <> v then
+                values.[idx] <- v
+                changed.Add idx
+        if isRisingEdge then
+            for dff in c.Dffs do setNet dff.Output s.Values.[dff.D]
+        for i = 0 to count - 1 do
+            let struct (idx, v) = pairs.[i]
+            setNet idx v
+        // 1 ゲートの評価 (NAND/NOT)。入力が全部 1 なら 0、そうでなければ 1。入力 0 本は 0。
+        // デリゲート呼び出し (Array.forall) を避けるため明示ループにする
+        let flatInputs = c.FlatInputs
+        let evalGate (g: SimGate) : bool =
+            let mutable allTrue = true
+            let mutable k = g.Start
+            let last = g.Start + g.Arity
+            while allTrue && k < last do
+                if not values.[flatInputs.[k]] then allTrue <- false
+                k <- k + 1
+            not allTrue
+        if s.Cold then
+            // 最初の 1 回は全ゲートを評価する (CA の初期グリッドからの settle と同じ)
+            for g in c.CombGates do
+                values.[g.Output] <- evalGate g
+        else
+            // 差分評価: 変化したネットを入力に持つゲートだけを、変化が伝播する範囲で評価する。
+            // DAG なので、どの入力も変化しなくなった時点の値が固定点になる
+            let dirty =
+                if scratchDirty.Length <> c.CombGates.Length then
+                    scratchDirty <- Array.zeroCreate c.CombGates.Length
+                scratchDirty
+            let work = scratchWork
+            work.Clear ()
+            let enqueue (netIdx: int) =
+                let stop = c.ConsumerStart.[netIdx + 1]
+                let mutable k = c.ConsumerStart.[netIdx]
+                while k < stop do
+                    let gi = c.ConsumerGates.[k]
+                    if not dirty.[gi] then
+                        dirty.[gi] <- true
+                        work.Add gi
+                    k <- k + 1
+            for n in changed do enqueue n
+            while work.Count > 0 do
+                let gi = work.[work.Count - 1]
+                work.RemoveAt (work.Count - 1)
+                dirty.[gi] <- false
+                let g = c.CombGates.[gi]
+                let v = evalGate g
+                if v <> values.[g.Output] then
+                    values.[g.Output] <- v
+                    enqueue g.Output
+        { Values = values; Cold = false }
+
     /// 入力を書いて収束させる (CA の setPin + settle に対応)。書かなかった入力は前の値を保つ。
     let apply (c: CompiledNetlist) (inputs: Map<NetId, bool>) (s: SimState) : Result<SimState, SimError> =
         match inputs |> Map.tryFindKey (fun net _ -> not (c.PrimaryInputs.Contains net)) with
         | Some net -> Error (NotPrimaryInput net)
         | None ->
-            let values = Array.copy s.Values
-            let isRisingEdge =
+            let pairs = Array.zeroCreate inputs.Count
+            let mutable i = 0
+            for KeyValue (net, v) in inputs do
+                pairs.[i] <- struct (c.NetIndex.[net], v)
+                i <- i + 1
+            let nextClock =
                 match c.Clock with
-                | Some (clkNet, clkIndex) ->
-                    let nextClock = inputs |> Map.tryFind clkNet |> Option.defaultValue s.Values.[clkIndex]
-                    not s.Values.[clkIndex] && nextClock
-                | None -> false
-            // 値が変わったネット (差分評価の起点)。スクラッチを再利用する
-            let changed = scratchChanged
-            changed.Clear ()
-            let setNet (idx: int) (v: bool) =
-                if values.[idx] <> v then
-                    values.[idx] <- v
-                    changed.Add idx
-            if isRisingEdge then
-                for dff in c.Dffs do setNet dff.Output s.Values.[dff.D]
-            for KeyValue (net, v) in inputs do setNet c.NetIndex.[net] v
-            // 1 ゲートの評価 (NAND/NOT)。入力が全部 1 なら 0、そうでなければ 1。入力 0 本は 0。
-            // デリゲート呼び出し (Array.forall) を避けるため明示ループにする
-            let flatInputs = c.FlatInputs
-            let evalGate (g: SimGate) : bool =
-                let mutable allTrue = true
-                let mutable k = g.Start
-                let last = g.Start + g.Arity
-                while allTrue && k < last do
-                    if not values.[flatInputs.[k]] then allTrue <- false
-                    k <- k + 1
-                not allTrue
-            if s.Cold then
-                // 最初の 1 回は全ゲートを評価する (CA の初期グリッドからの settle と同じ)
-                for g in c.CombGates do
-                    values.[g.Output] <- evalGate g
-            else
-                // 差分評価: 変化したネットを入力に持つゲートだけを、変化が伝播する範囲で評価する。
-                // DAG なので、どの入力も変化しなくなった時点の値が固定点になる
-                let dirty =
-                    if scratchDirty.Length <> c.CombGates.Length then
-                        scratchDirty <- Array.zeroCreate c.CombGates.Length
-                    scratchDirty
-                let work = scratchWork
-                work.Clear ()
-                let enqueue (netIdx: int) =
-                    let stop = c.ConsumerStart.[netIdx + 1]
-                    let mutable k = c.ConsumerStart.[netIdx]
-                    while k < stop do
-                        let gi = c.ConsumerGates.[k]
-                        if not dirty.[gi] then
-                            dirty.[gi] <- true
-                            work.Add gi
-                        k <- k + 1
-                for n in changed do enqueue n
-                while work.Count > 0 do
-                    let gi = work.[work.Count - 1]
-                    work.RemoveAt (work.Count - 1)
-                    dirty.[gi] <- false
-                    let g = c.CombGates.[gi]
-                    let v = evalGate g
-                    if v <> values.[g.Output] then
-                        values.[g.Output] <- v
-                        enqueue g.Output
-            Ok { Values = values; Cold = false }
+                | Some (clkNet, clkIndex) -> Some (inputs |> Map.tryFind clkNet |> Option.defaultValue s.Values.[clkIndex])
+                | None -> None
+            Ok (settle c pairs inputs.Count nextClock s)
+
+    /// 入力を「密インデックス, 値」の組で書いて収束させる (apply と同じ意味)。
+    /// 組は呼び出し側が用意するので NetIndex を引かない。密インデックスは外部入力でなければならない。
+    let applyPairs (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) (nextClock: bool option) (s: SimState) : Result<SimState, SimError> =
+        let mutable bad = -1
+        let mutable i = 0
+        while bad < 0 && i < count do
+            let struct (idx, _) = pairs.[i]
+            if not (c.PrimaryInputIndices.Contains idx) then bad <- idx
+            i <- i + 1
+        if bad >= 0 then
+            Error (NotPrimaryInput (c.NetIndex |> Map.findKey (fun _ v -> v = bad)))
+        else
+            Ok (settle c pairs count nextClock s)
 
     /// 入力ポートに整数値を書くためのネット割り当て (LSB first)。定数ビットは無視する。
     let portInputs (port: YosysPortBits) (value: uint64) : Map<NetId, bool> =
