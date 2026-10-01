@@ -8,6 +8,7 @@
   "cycles": [
     {
       "dataIn": 205,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 256,
@@ -19,6 +20,7 @@
     },
     {
       "dataIn": 205,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 258,
@@ -30,6 +32,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65533,
@@ -41,6 +44,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65532,
@@ -52,6 +56,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65531,
@@ -63,6 +68,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65530,
@@ -74,6 +80,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65529,
@@ -85,6 +92,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65528,
@@ -96,6 +104,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65527,
@@ -107,6 +116,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65526,
@@ -118,6 +128,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65525,
@@ -129,6 +140,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65524,
@@ -140,6 +152,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65523,
@@ -151,6 +164,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65522,
@@ -162,6 +176,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65521,
@@ -173,6 +188,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65520,
@@ -184,6 +200,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65519,
@@ -195,6 +212,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65518,
@@ -206,6 +224,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65517,
@@ -217,6 +236,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65516,
@@ -228,6 +248,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65515,
@@ -239,6 +260,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65514,
@@ -250,6 +272,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65513,
@@ -261,6 +284,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65512,
@@ -272,6 +296,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65511,
@@ -283,6 +308,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65510,
@@ -294,6 +320,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65509,
@@ -305,6 +332,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65508,
@@ -316,6 +344,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65507,
@@ -327,6 +356,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65506,
@@ -338,6 +368,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65505,
@@ -349,6 +380,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65504,
@@ -360,6 +392,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65503,
@@ -371,6 +404,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65502,
@@ -382,6 +416,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65501,
@@ -393,6 +428,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65500,
@@ -404,6 +440,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65499,
@@ -415,6 +452,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65498,
@@ -426,6 +464,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65497,
@@ -437,6 +476,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65496,
@@ -448,6 +488,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65495,
@@ -459,6 +500,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65494,
@@ -470,6 +512,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65493,
@@ -481,6 +524,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65492,
@@ -492,6 +536,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65491,
@@ -503,6 +548,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65490,
@@ -514,6 +560,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65489,
@@ -525,6 +572,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65488,
@@ -536,6 +584,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65487,
@@ -547,6 +596,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65486,
@@ -558,6 +608,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65485,
@@ -569,6 +620,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65484,
@@ -580,6 +632,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65483,
@@ -591,6 +644,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65482,
@@ -602,6 +656,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65481,
@@ -613,6 +668,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65480,
@@ -624,6 +680,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65479,
@@ -635,6 +692,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65478,
@@ -646,6 +704,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65477,
@@ -657,6 +716,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65476,
@@ -668,6 +728,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65475,
@@ -679,6 +740,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65474,
@@ -690,6 +752,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65473,
@@ -701,6 +764,7 @@
     },
     {
       "dataIn": 1,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 65472,

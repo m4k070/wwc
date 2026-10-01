@@ -127,9 +127,11 @@ module TestbenchTest =
         match outcome with
         | Error msg -> [ sprintf "TB: sm83_subset smoke runs (%s)" msg, false ]
         | Ok (program, result) ->
+            let out (name: string) (cy: CycleRecord) =
+                cy.Outputs |> Array.find (fun (n, _) -> n = name) |> snd
             let observed =
                 result.Cycles
-                |> List.map (fun cy -> cy.DataIn, cy.Outputs.["pc_out"], cy.Outputs.["a_out"])
+                |> List.map (fun cy -> cy.DataIn, out "pc_out" cy, out "a_out" cy)
             let mismatches = checkExpectations program result
             for m in mismatches do
                 printfn "  TB_SMOKE: %s" m
@@ -245,7 +247,7 @@ module TestbenchTest =
         let info : GoldenInfo =
             { GoldenCircuit = "c"; GoldenProgram = "p"; SourceSha256 = "s"; RomSha256 = "r"
               BootRomSha256 = Some "b"; RstPulses = 2 }
-        let cycles = [ { DataIn = 62UL; Irq = 0UL; Outputs = Map.ofList [ "addr", 256UL; "a_out", 1UL ] } ]
+        let cycles = [ { DataIn = 62UL; Irq = 0UL; Outputs = [| "addr", 256UL; "a_out", 1UL |] } ]
         use doc = JsonDocument.Parse (goldenToJson info cycles)
         let root = doc.RootElement
         let first = root.GetProperty("cycles").[0]

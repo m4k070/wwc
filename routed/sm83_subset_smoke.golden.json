@@ -8,6 +8,7 @@
   "cycles": [
     {
       "dataIn": 62,
+      "irq": 0,
       "outputs": {
         "a_out": 1,
         "addr": 257,
@@ -19,6 +20,7 @@
     },
     {
       "dataIn": 66,
+      "irq": 0,
       "outputs": {
         "a_out": 66,
         "addr": 257,
@@ -30,6 +32,7 @@
     },
     {
       "dataIn": 0,
+      "irq": 0,
       "outputs": {
         "a_out": 66,
         "addr": 257,
