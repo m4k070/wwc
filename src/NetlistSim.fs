@@ -232,11 +232,15 @@ module NetlistSim =
     let mutable private scratchDirty : bool[] = Array.empty
     let mutable private scratchWork : ResizeArray<int> = ResizeArray ()
     let mutable private scratchChanged : ResizeArray<int> = ResizeArray ()
+    /// in-place の settle で DFF の D を退避する作業配列
+    let mutable private scratchDffD : bool[] = Array.empty
 
     /// 入力の組を書いて収束させる共通部分 (CA の setPin + settle に対応)。
     /// 書かなかった入力は前の値を保つ。nextClock はこの settle でのクロック入力の値。
-    let private settle (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) (nextClock: bool option) (s: SimState) : SimState =
-        let values = Array.copy s.Values
+    /// copyValues = false のときは s.Values を直接書き換える (呼び出し側が s の古い値を
+    /// もう読まないと分かっている場合のみ。そうでないと差分の起点が壊れる)。
+    let private settle (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) (nextClock: bool option) (copyValues: bool) (s: SimState) : SimState =
+        let values = if copyValues then Array.copy s.Values else s.Values
         let isRisingEdge =
             match c.Clock, nextClock with
             | Some (_, clkIndex), Some next -> not s.Values.[clkIndex] && next
@@ -249,7 +253,16 @@ module NetlistSim =
                 values.[idx] <- v
                 changed.Add idx
         if isRisingEdge then
-            for dff in c.Dffs do setNet dff.Output s.Values.[dff.D]
+            // DFF は「収束した後」の D を捕捉する。in-place では後続の DFF の書き込みが
+            // 先の DFF の D を壊しうるので、先に D を退避してから書く
+            let d =
+                if scratchDffD.Length <> c.Dffs.Length then
+                    scratchDffD <- Array.zeroCreate c.Dffs.Length
+                scratchDffD
+            for i = 0 to c.Dffs.Length - 1 do
+                d.[i] <- s.Values.[c.Dffs.[i].D]
+            for i = 0 to c.Dffs.Length - 1 do
+                setNet c.Dffs.[i].Output d.[i]
         for i = 0 to count - 1 do
             let struct (idx, v) = pairs.[i]
             setNet idx v
@@ -312,21 +325,30 @@ module NetlistSim =
                 match c.Clock with
                 | Some (clkNet, clkIndex) -> Some (inputs |> Map.tryFind clkNet |> Option.defaultValue s.Values.[clkIndex])
                 | None -> None
-            Ok (settle c pairs inputs.Count nextClock s)
+            Ok (settle c pairs inputs.Count nextClock true s)
 
     /// 入力を「密インデックス, 値」の組で書いて収束させる (apply と同じ意味)。
     /// 組は呼び出し側が用意するので NetIndex を引かない。密インデックスは外部入力でなければならない。
-    let applyPairs (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) (nextClock: bool option) (s: SimState) : Result<SimState, SimError> =
+    let private checkPairs (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) : SimError option =
         let mutable bad = -1
         let mutable i = 0
         while bad < 0 && i < count do
             let struct (idx, _) = pairs.[i]
             if not (c.PrimaryInputIndices.Contains idx) then bad <- idx
             i <- i + 1
-        if bad >= 0 then
-            Error (NotPrimaryInput (c.NetIndex |> Map.findKey (fun _ v -> v = bad)))
-        else
-            Ok (settle c pairs count nextClock s)
+        if bad >= 0 then Some (NotPrimaryInput (c.NetIndex |> Map.findKey (fun _ v -> v = bad))) else None
+
+    let applyPairs (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) (nextClock: bool option) (s: SimState) : Result<SimState, SimError> =
+        match checkPairs c pairs count with
+        | Some e -> Error e
+        | None -> Ok (settle c pairs count nextClock true s)
+
+    /// applyPairs の in-place 版。s.Values を直接書き換えるので、呼び出し側が s の古い値を
+    /// もう読まないと分かっている場合だけ使う (コピーしないぶん速い)。
+    let applyPairsInPlace (c: CompiledNetlist) (pairs: struct (int * bool)[]) (count: int) (nextClock: bool option) (s: SimState) : Result<SimState, SimError> =
+        match checkPairs c pairs count with
+        | Some e -> Error e
+        | None -> Ok (settle c pairs count nextClock false s)
 
     /// 入力ポートに整数値を書くためのネット割り当て (LSB first)。定数ビットは無視する。
     let portInputs (port: YosysPortBits) (value: uint64) : Map<NetId, bool> =
