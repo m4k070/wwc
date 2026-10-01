@@ -548,10 +548,10 @@ module Testbench =
                     let n =
                         let mutable n = fillPairs inputPlan.Reset 1UL pairs 0
                         fillPairs inputPlan.Clock 0UL pairs n
-                    applyPairs c pairs n (Some false) s
+                    applyPairsInPlace c pairs n (Some false) s
                     |> Result.bind (fun s1 ->
                         let n1 = fillPairs inputPlan.Clock 1UL pairs 0
-                        applyPairs c pairs n1 (Some true) s1)
+                        applyPairsInPlace c pairs n1 (Some true) s1)
 
                 let rec loop (k: int) (s: SimState) (mem: MemoryImage) (acc: CycleRecord list) =
                     if k = cycles then
@@ -574,7 +574,7 @@ module Testbench =
                             let dataOut = readPlanned sLow busPlan.DataOut
                             let intAck = match busPlan.IntAck with Some p -> readPlanned sLow p | None -> 0UL
                             (sLow, (uint16 addr, memRead = 1UL, memWrite = 1UL, byte dataOut), byte intAck)
-                        match applyPairs c pairs nLow (Some false) s with
+                        match applyPairsInPlace c pairs nLow (Some false) s with
                         | Error e -> Error e
                         | Ok sLow0 ->
                             let sLow, (addr, memRead, memWrite, dataOut), intAck = readLow sLow0
@@ -591,11 +591,11 @@ module Testbench =
                             let recordedIrq = if bus.Interrupt.IsSome then irq else 0UL
                             // 入力を収束させてからクロックを立てる (DFF は収束後の D を捕捉する)。
                             // まとめて 1 回にすると古い D を掴むので、必ず 2 回に分ける
-                            match applyPairs c pairs nIn (Some false) sLow with
+                            match applyPairsInPlace c pairs nIn (Some false) sLow with
                             | Error e -> Error e
                             | Ok sMid ->
                                 let nClk = fillPairs inputPlan.Clock 1UL pairs 0
-                                match applyPairs c pairs nClk (Some true) sMid with
+                                match applyPairsInPlace c pairs nClk (Some true) sMid with
                                 | Error e -> Error e
                                 | Ok sHigh ->
                                     let outputs = readOutputsPlanned sHigh outputPlan
