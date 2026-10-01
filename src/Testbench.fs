@@ -356,13 +356,92 @@ module Testbench =
 
     // --- 実行 ---------------------------------------------------------------
 
+    // --- ポートの密解決 -------------------------------------------------------
+    // ホットパス (1 周期あたり読み書きが 100 回前後ある) では Map を引かず、
+    // 起動時に解決した密インデックスを配列として持つ。リスト・クロージャ・Result を
+    // ビットごとに作らないことが要点。
+
+    /// 解決済みポート。Bits.[i] は LSB first で
+    /// -1 = 定数 0 / -2 = 定数 1 / >= 0 = SimState.Values の密インデックス
+    type PortPlan =
+        { PlanName: string
+          Bits: int[] }
+
+    let private planPort (c: CompiledNetlist) (p: YosysPortBits) : Result<PortPlan, SimError> =
+        p.Bits
+        |> List.mapi (fun i bit ->
+            match bit with
+            | ConstBit b -> Ok (if b then -2 else -1)
+            | NetBit net ->
+                match Map.tryFind net c.NetIndex with
+                | Some idx -> Ok idx
+                | None -> Error (UndrivenOutput (p.Name, i, net)))
+        |> traverse id
+        |> Result.map (fun bits -> { PlanName = p.Name; Bits = List.toArray bits })
+
+    /// 解決済みポートの値を読む (定数ビット込み、LSB first)。ホットパスなので割り当てしない。
+    let private readPlanned (s: SimState) (plan: PortPlan) : uint64 =
+        let bits = plan.Bits
+        let mutable acc = 0UL
+        for i = 0 to bits.Length - 1 do
+            let b = bits.[i]
+            if b >= 0 then
+                if s.Values.[b] then acc <- acc ||| (1UL <<< i)
+            elif b = -2 then
+                acc <- acc ||| (1UL <<< i)
+        acc
+
+    /// 出力ポートの計画。名前は Map と同じ昇順に並べる (golden の出力順を変えないため)
+    type OutputPlan =
+        { Names: string[]
+          Ports: PortPlan[] }
+
+    let private planOutputs (c: CompiledNetlist) (ports: YosysPortBits list) : Result<OutputPlan, SimError> =
+        ports
+        |> List.filter (fun p -> p.Direction = OutputPort)
+        |> List.sortBy (fun p -> p.Name)
+        |> List.map (planPort c)
+        |> traverse id
+        |> Result.map (fun planned ->
+            { Names = planned |> List.map (fun p -> p.PlanName) |> List.toArray
+              Ports = List.toArray planned })
+
+    let private readOutputsPlanned (s: SimState) (plan: OutputPlan) : (string * uint64)[] =
+        Array.init plan.Ports.Length (fun i -> plan.Names.[i], readPlanned s plan.Ports.[i])
+
+    /// バス読み出しの計画 (1 周期に 1 回まとめて読む)
+    type BusPlan =
+        { Addr: PortPlan
+          MemRead: PortPlan
+          MemWrite: PortPlan
+          DataOut: PortPlan
+          /// 割込みを持たない回路では None
+          IntAck: PortPlan option }
+
+    let private planBus (c: CompiledNetlist) (bus: BusPorts) : Result<BusPlan, SimError> =
+        let ack =
+            match bus.Interrupt with
+            | Some p -> planPort c p.IntAck |> Result.map Some
+            | None -> Ok None
+        ack
+        |> Result.bind (fun ack ->
+            planPort c bus.Addr
+            |> Result.bind (fun addr ->
+                planPort c bus.MemRead
+                |> Result.bind (fun memRead ->
+                    planPort c bus.MemWrite
+                    |> Result.bind (fun memWrite ->
+                        planPort c bus.DataOut
+                        |> Result.map (fun dataOut ->
+                            { Addr = addr; MemRead = memRead; MemWrite = memWrite; DataOut = dataOut; IntAck = ack })))))
+
     type CycleRecord =
         { /// この周期で書いた data_in
           DataIn: uint64
           /// この周期で書いた irq (割込みポートがなければ 0)
           Irq: uint64
-          /// clk=1 で settle した後の全出力ポート
-          Outputs: Map<string, uint64> }
+          /// clk=1 で settle した後の全出力ポート (ポート名の昇順)
+          Outputs: (string * uint64)[] }
 
     type TestbenchRun =
         { Cycles: CycleRecord list
@@ -402,53 +481,57 @@ module Testbench =
         (rstPulses: int)
         (cycles: int)
         : Result<TestbenchRun, TestbenchError> =
-        let resetPulse (s: SimState) =
-            s
-            |> applyPorts c [ bus.Reset, 1UL; bus.Clock, 0UL ]
-            |> Result.bind (applyPorts c [ bus.Clock, 1UL ])
+        let runCore () =
+            match planOutputs c ports, planBus c bus with
+            | Error e, _ | _, Error e -> Error e
+            | Ok outputPlan, Ok busPlan ->
+                let resetPulse (s: SimState) =
+                    s
+                    |> applyPorts c [ bus.Reset, 1UL; bus.Clock, 0UL ]
+                    |> Result.bind (applyPorts c [ bus.Clock, 1UL ])
 
-        let rec loop (k: int) (s: SimState) (mem: MemoryImage) (acc: CycleRecord list) =
-            if k = cycles then
-                readOutputs c ports s
-                |> Result.map (fun final -> { Cycles = List.rev acc; FinalOutputs = final; Memory = mem })
-            else
-                // この周期の LY (0xFF44) を反映してからバスを見る
-                let mem = setLcdY mem k
-                // runner は rst=0 を書いた直後に最初の clk=0 settle を行う
-                let lowWrites = if k = 0 then [ bus.Reset, 0UL; bus.Clock, 0UL ] else [ bus.Clock, 0UL ]
-                let readLow sLow =
-                    readBus c bus sLow
-                    |> Result.bind (fun b ->
-                        match bus.Interrupt with
-                        | Some ports -> readPort c sLow ports.IntAck |> Result.map (fun ack -> sLow, b, byte ack)
-                        | None -> Ok (sLow, b, 0uy))
-                match applyPorts c lowWrites s |> Result.bind readLow with
-                | Error e -> Error e
-                | Ok (sLow, (addr, memRead, memWrite, dataOut), intAck) ->
-                    // 書込 → 割込み受付で IF を下ろす → 読出 (runner の memory_program.rs と同じ順序)
-                    let mem' = if memWrite then writeMemory mem addr dataOut else mem
-                    let mem'' = acknowledgeInterrupts mem' intAck
-                    let dataIn = if memRead then uint64 (readMemory mem'' addr) else 0UL
-                    let irq = uint64 (pendingInterrupts mem'')
-                    let inputWrites =
-                        match bus.Interrupt with
-                        | Some ports -> [ bus.DataIn, dataIn; ports.Irq, irq ]
-                        | None -> [ bus.DataIn, dataIn ]
-                    let recordedIrq = if bus.Interrupt.IsSome then irq else 0UL
-                    let high =
-                        sLow
-                        |> applyPorts c inputWrites
-                        |> Result.bind (applyPorts c [ bus.Clock, 1UL ])
-                        |> Result.bind (fun sHigh -> readOutputs c ports sHigh |> Result.map (fun o -> sHigh, o))
-                    match high with
-                    | Error e -> Error e
-                    | Ok (sHigh, outputs) ->
-                        loop (k + 1) sHigh mem'' ({ DataIn = dataIn; Irq = recordedIrq; Outputs = outputs } :: acc)
+                let rec loop (k: int) (s: SimState) (mem: MemoryImage) (acc: CycleRecord list) =
+                    if k = cycles then
+                        Ok { Cycles = List.rev acc
+                             FinalOutputs = readOutputsPlanned s outputPlan |> Map.ofArray
+                             Memory = mem }
+                    else
+                        // この周期の LY (0xFF44) を反映してからバスを見る
+                        let mem = setLcdY mem k
+                        // runner は rst=0 を書いた直後に最初の clk=0 settle を行う
+                        let lowWrites = if k = 0 then [ bus.Reset, 0UL; bus.Clock, 0UL ] else [ bus.Clock, 0UL ]
+                        // バスは解決済みインデックスから直接読む (Map を引かない)
+                        let readLow (sLow: SimState) =
+                            let addr = readPlanned sLow busPlan.Addr
+                            let memRead = readPlanned sLow busPlan.MemRead
+                            let memWrite = readPlanned sLow busPlan.MemWrite
+                            let dataOut = readPlanned sLow busPlan.DataOut
+                            let intAck = match busPlan.IntAck with Some p -> readPlanned sLow p | None -> 0UL
+                            (sLow, (uint16 addr, memRead = 1UL, memWrite = 1UL, byte dataOut), byte intAck)
+                        match applyPorts c lowWrites s with
+                        | Error e -> Error e
+                        | Ok sLow0 ->
+                            let sLow, (addr, memRead, memWrite, dataOut), intAck = readLow sLow0
+                            // 書込 → 割込み受付で IF を下ろす → 読出 (runner の memory_program.rs と同じ順序)
+                            let mem' = if memWrite then writeMemory mem addr dataOut else mem
+                            let mem'' = acknowledgeInterrupts mem' intAck
+                            let dataIn = if memRead then uint64 (readMemory mem'' addr) else 0UL
+                            let irq = uint64 (pendingInterrupts mem'')
+                            let inputWrites =
+                                match bus.Interrupt with
+                                | Some ports -> [ bus.DataIn, dataIn; ports.Irq, irq ]
+                                | None -> [ bus.DataIn, dataIn ]
+                            let recordedIrq = if bus.Interrupt.IsSome then irq else 0UL
+                            match sLow |> applyPorts c inputWrites |> Result.bind (applyPorts c [ bus.Clock, 1UL ]) with
+                            | Error e -> Error e
+                            | Ok sHigh ->
+                                let outputs = readOutputsPlanned sHigh outputPlan
+                                loop (k + 1) sHigh mem'' ({ DataIn = dataIn; Irq = recordedIrq; Outputs = outputs } :: acc)
 
-        [ 1 .. rstPulses ]
-        |> List.fold (fun acc _ -> Result.bind resetPulse acc) (Ok (initial c))
-        |> Result.bind (fun s -> loop 0 s memory [])
-        |> Result.mapError SimulationFailed
+                [ 1 .. rstPulses ]
+                |> List.fold (fun acc _ -> Result.bind resetPulse acc) (Ok (initial c))
+                |> Result.bind (fun s -> loop 0 s memory [])
+        runCore () |> Result.mapError SimulationFailed
 
     /// expect / expectMem を最終状態と照合し、不一致の説明を返す (空なら合格)。
     let checkExpectations (program: MemoryProgram) (result: TestbenchRun) : string list =
@@ -497,7 +580,7 @@ module Testbench =
             w.WriteNumber ("dataIn", cycle.DataIn)
             w.WriteNumber ("irq", cycle.Irq)
             w.WriteStartObject "outputs"
-            for KeyValue (name, value) in cycle.Outputs do
+            for (name, value) in cycle.Outputs do
                 w.WriteNumber (name, value)
             w.WriteEndObject ()
             w.WriteEndObject ()
