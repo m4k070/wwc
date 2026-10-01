@@ -47,10 +47,9 @@ module NetlistSim =
         | UndrivenOutput (port, i, net) -> sprintf "出力 %s[%d] (net %d) に駆動元がない" port i (netNo net)
 
     /// 組合せゲート (NAND/NOT)。インデックスは CompiledNetlist.NetIndex の密な番号。
-    /// struct + 平坦配列にして、ゲート配列も入力配列も連続配置にする。入力は
-    /// CompiledNetlist.FlatInputs 上の区間 [Start, Start + Arity) で表す
+    /// struct にすることでゲート配列が連続配置になり、1 ゲートあたりのポインタ追跡が減る
     [<Struct>]
-    type SimGate = { Output: int; Start: int; Arity: int }
+    type SimGate = { Output: int; Inputs: int[] }
 
     type SimDff = { GateId: int; Output: int; D: int }
 
@@ -62,13 +61,9 @@ module NetlistSim =
           Clock: (NetId * int) option
           /// トポロジカル順に並べた組合せゲート
           CombGates: SimGate[]
-          /// 全組合せゲートの入力を連結した配列 (SimGate.Start/Arity で区切る)
-          FlatInputs: int[]
           Dffs: SimDff[]
-          /// 差分評価用: 密インデックスのネットを入力に持つゲート。
-          /// ネット n の消費者は ConsumerGates.[ConsumerStart.[n] .. ConsumerStart.[n + 1]] の区間
-          ConsumerStart: int[]
-          ConsumerGates: int[] }
+          /// 差分評価用: 密インデックスのネットを入力に持つ組合せゲートの位置
+          NetConsumers: int[][] }
 
     /// ネット値 (密インデックス)。DFF の q も出力ネットの値として持つ。
     /// Cold = まだ一度も apply していない。最初の apply だけは全ゲートを評価する
@@ -115,8 +110,7 @@ module NetlistSim =
         | _ -> Ok g
 
     /// 組合せゲートを Kahn 法で並べる。DFF 出力と外部入力が source になる。
-    /// 戻り値は (トポロジカル順のゲート, 入力を連結した配列)
-    let private topoSort (index: Map<NetId, int>) (combGates: Gate list) : Result<SimGate[] * int[], SimError> =
+    let private topoSort (index: Map<NetId, int>) (combGates: Gate list) : Result<SimGate[], SimError> =
         let gates = combGates |> Array.ofList
         let combDriver =
             gates |> Array.mapi (fun i g -> g.Output, i) |> Map.ofArray
@@ -154,16 +148,12 @@ module NetlistSim =
                 |> List.ofArray
             Error (CombinationalLoop loopNets)
         else
-            let flat = ResizeArray<int> ()
-            let sorted =
-                order
-                |> Seq.map (fun i ->
-                    let g = gates.[i]
-                    let start = flat.Count
-                    for net in g.Inputs do flat.Add index.[net]
-                    { Output = index.[g.Output]; Start = start; Arity = g.Inputs.Length })
-                |> Array.ofSeq
-            Ok (sorted, flat.ToArray ())
+            order
+            |> Seq.map (fun i ->
+                let g = gates.[i]
+                { Output = index.[g.Output]; Inputs = g.Inputs |> List.map (fun n -> index.[n]) |> Array.ofList })
+            |> Array.ofSeq
+            |> Ok
 
     let compile (nl: Netlist) : Result<CompiledNetlist, SimError> =
         nl.Gates
@@ -178,7 +168,7 @@ module NetlistSim =
                     let index = driven |> Seq.mapi (fun i net -> net, i) |> Map.ofSeq
                     let dffGates, combGates = gates |> List.partition (fun g -> g.Kind = Dff)
                     topoSort index combGates
-                    |> Result.map (fun (sorted, flatInputs) ->
+                    |> Result.map (fun sorted ->
                         let dffs =
                             dffGates
                             |> List.map (fun g ->
@@ -188,33 +178,17 @@ module NetlistSim =
                         let clock =
                             if dffs.Length = 0 then None
                             else nl.ClockNet |> Option.map (fun clk -> clk, index.[clk])
-                        // 差分評価用の消費者表 (コンパイル時に 1 度だけ作る)。ネットごとの消費者を
-                        // 連結配列にまとめる (数え上げ → 累積和 → 詰める)。ゲート番号の昇順は保たれる
-                        let consumerStart, consumerGates =
-                            let counts = Array.zeroCreate (index.Count + 1)
-                            sorted
-                            |> Array.iter (fun g ->
-                                for k in g.Start .. g.Start + g.Arity - 1 do
-                                    let net = flatInputs.[k]
-                                    counts.[net + 1] <- counts.[net + 1] + 1)
-                            for n in 1 .. index.Count do counts.[n] <- counts.[n] + counts.[n - 1]
-                            let cursor = Array.copy counts
-                            let gatesOut = Array.zeroCreate cursor.[index.Count]
-                            sorted
-                            |> Array.iteri (fun gi g ->
-                                for k in g.Start .. g.Start + g.Arity - 1 do
-                                    let net = flatInputs.[k]
-                                    gatesOut.[cursor.[net]] <- gi
-                                    cursor.[net] <- cursor.[net] + 1)
-                            counts, gatesOut
+                        // 差分評価用の消費者表 (コンパイル時に 1 度だけ作る)
+                        let netConsumers =
+                            let buckets = Array.init index.Count (fun _ -> ResizeArray<int> ())
+                            sorted |> Array.iteri (fun gi g -> for net in g.Inputs do buckets.[net].Add gi)
+                            buckets |> Array.map (fun b -> b.ToArray ())
                         { NetIndex = index
                           PrimaryInputs = Set.ofList nl.PrimaryInputs
                           Clock = clock
                           CombGates = sorted
-                          FlatInputs = flatInputs
                           Dffs = dffs
-                          ConsumerStart = consumerStart
-                          ConsumerGates = consumerGates }))))
+                          NetConsumers = netConsumers }))))
 
     // --- 実行 ---------------------------------------------------------------
 
@@ -253,13 +227,12 @@ module NetlistSim =
             for KeyValue (net, v) in inputs do setNet c.NetIndex.[net] v
             // 1 ゲートの評価 (NAND/NOT)。入力が全部 1 なら 0、そうでなければ 1。入力 0 本は 0。
             // デリゲート呼び出し (Array.forall) を避けるため明示ループにする
-            let flatInputs = c.FlatInputs
             let evalGate (g: SimGate) : bool =
+                let ins = g.Inputs
                 let mutable allTrue = true
-                let mutable k = g.Start
-                let last = g.Start + g.Arity
-                while allTrue && k < last do
-                    if not values.[flatInputs.[k]] then allTrue <- false
+                let mutable k = 0
+                while allTrue && k < ins.Length do
+                    if not values.[ins.[k]] then allTrue <- false
                     k <- k + 1
                 not allTrue
             if s.Cold then
@@ -276,14 +249,10 @@ module NetlistSim =
                 let work = scratchWork
                 work.Clear ()
                 let enqueue (netIdx: int) =
-                    let stop = c.ConsumerStart.[netIdx + 1]
-                    let mutable k = c.ConsumerStart.[netIdx]
-                    while k < stop do
-                        let gi = c.ConsumerGates.[k]
+                    for gi in c.NetConsumers.[netIdx] do
                         if not dirty.[gi] then
                             dirty.[gi] <- true
                             work.Add gi
-                        k <- k + 1
                 for n in changed do enqueue n
                 while work.Count > 0 do
                     let gi = work.[work.Count - 1]
