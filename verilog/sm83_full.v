@@ -422,7 +422,9 @@ module sm83_full (
                 PHASE_MEM_WRITE: begin
                     // 書き込みは前のフェーズが立てた mem_write で、このフェーズに適用される。
                     // ここで再表明すると次の FETCH 相で mem_read が潰れてオペコードが読めない。
-                    phase <= PHASE_FETCH;
+                    // CALL は 2 バイト push の後に内部サイクルを 1 個挟んで 6 M サイクル。
+                    phase <= ((ir == 8'hCD) || ((ir & 8'hC7) == 8'hC4) || ((ir & 8'hC7) == 8'hD4))
+                           ? PHASE_INTERNAL : PHASE_FETCH;
                 end
 
                 // =====================================================
@@ -490,7 +492,11 @@ module sm83_full (
                 PHASE_POP2: begin
                     sp <= sp + 1;
                     exec_pop(data_in);
-                    phase <= PHASE_FETCH;
+                    // RET/RETI は 4 M サイクル、RET cc 成立は 5 M サイクル (POP rr は 3)。
+                    // ir はこの命令のオペコードのまま (PHASE_FETCH でしか更新しない)。
+                    phase <= ((ir == 8'hC9) || (ir == 8'hD9)) ? PHASE_INTERNAL
+                           : (((ir & 8'hC7) == 8'hC0) || ((ir & 8'hC7) == 8'hD0)) ? PHASE_INTERNAL2
+                           : PHASE_FETCH;
                 end
 
                 // =====================================================
@@ -753,9 +759,9 @@ module sm83_full (
                 // === RET / RET cc / RETI ===
                 8'hC9, 8'hD9: begin addr_r <= sp; mem_read_r <= 1; phase <= PHASE_POP; end
                 8'hC0: begin if (f[7]==0) begin addr_r <= sp; mem_read_r <= 1; phase <= PHASE_POP; end else phase <= PHASE_INTERNAL; end
-                8'hC8: begin if (f[7]==1) begin addr_r <= sp; mem_read_r <= 1; phase <= PHASE_POP; end else phase <= PHASE_FETCH; end
+                8'hC8: begin if (f[7]==1) begin addr_r <= sp; mem_read_r <= 1; phase <= PHASE_POP; end else phase <= PHASE_INTERNAL; end
                 8'hD0: begin if (f[4]==0) begin addr_r <= sp; mem_read_r <= 1; phase <= PHASE_POP; end else phase <= PHASE_INTERNAL; end
-                8'hD8: begin if (f[4]==1) begin addr_r <= sp; mem_read_r <= 1; phase <= PHASE_POP; end else phase <= PHASE_FETCH; end
+                8'hD8: begin if (f[4]==1) begin addr_r <= sp; mem_read_r <= 1; phase <= PHASE_POP; end else phase <= PHASE_INTERNAL; end
 
                 // === PUSH rr ===
                 8'hC5: begin sp <= sp - 1; addr_r <= sp - 1; data_out <= b; mem_write <= 1; operand <= c; phase <= PHASE_MEM_WRITE2; end
