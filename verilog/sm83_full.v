@@ -1041,9 +1041,10 @@ module sm83_full (
                 8'h21: begin h <= hi; l <= operand; phase <= PHASE_FETCH; end
                 8'h31: begin sp <= {hi, operand}; phase <= PHASE_FETCH; end
 
-                8'hC3: begin pc <= {hi, operand}; phase <= PHASE_FETCH; end
+                8'hC3: begin pc <= {hi, operand}; phase <= PHASE_INTERNAL; end
                 8'hC2, 8'hCA, 8'hD2, 8'hDA: begin
-                    pc <= {hi, operand}; phase <= PHASE_FETCH; end
+                    // JP cc 成立も 4 M サイクル
+                    pc <= {hi, operand}; phase <= PHASE_INTERNAL; end
 
                 8'hCD, 8'hC4, 8'hCC, 8'hD4, 8'hDC: begin
                     // CALL: push PC[15:8] first

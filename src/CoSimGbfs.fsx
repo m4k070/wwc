@@ -316,6 +316,9 @@ type LockstepState =
       Reference: Decoder.CpuState
       Pending: PendingStep option
       Boundaries: int64
+      /// 参照 CPU が消費した累積 T サイクル (gbfs の stepWithCycles の総和)。
+      /// 境界ごとに 4 × RTL サイクル数と比べると、M サイクル数のずれが直接見える。
+      RefTCycles: int64
       Mismatches: Mismatch list
       MismatchCount: int64
       IoMismatchCount: int64 }
@@ -412,19 +415,27 @@ let lockstepBoundary
         | None -> ls
         | Some pending ->
             patchIoReads ioReads pending.Prepared.Mem
-            let stepped = Decoder.step pending.Prepared
-            let diffs = formatDiffs (diffRegisters (refRegisters stepped) rtlRegs) (diffMemory stepped.Mem peripherals.Mem)
+            let stepped, refCycles = Decoder.stepWithCycles pending.Prepared
+            let refTCycles = ls.RefTCycles + int64 refCycles
+            // 境界は「次の命令が始まるサイクル」なので、直前の命令までの累積 T は 4 × cycle と一致するはず。
+            // レジスタが一致していても M サイクル数がずれていればここで出る。
+            let cycleDiffs =
+                if refTCycles = 4L * cycle then []
+                else
+                    [ sprintf "累積T: gbfs=%d (%d M) rtl=%d (%d M) 差=%+d M"
+                        refTCycles (refTCycles / 4L) (4L * cycle) cycle (refTCycles / 4L - cycle) ]
+            let diffs = formatDiffs (diffRegisters (refRegisters stepped) rtlRegs) (diffMemory stepped.Mem peripherals.Mem) @ cycleDiffs
             // 読み違えないよう、食い違った命令の実行前の値 (RTL と一致していたもの) も添える
             let before =
                 refRegisters pending.Prepared
                 |> List.map (fun (name, v) -> sprintf "%s=%0*X" name (if name = "SP" || name = "PC" then 4 else 2) v)
                 |> String.concat " "
             let diffs = if diffs.IsEmpty then diffs else diffs @ [ "実行前: " + before ]
-            if diffs.IsEmpty then { ls with Reference = stepped }
+            if diffs.IsEmpty then { ls with Reference = stepped; RefTCycles = refTCycles }
             else
                 let m = { BoundaryIndex = ls.Boundaries; Cycle = cycle; Instruction = pending.Description
                           ReadIo = not ioReads.IsEmpty; Diffs = diffs }
-                { recordMismatch maxMismatches m ls with Reference = resyncReference rtlRegs control stepped }
+                { recordMismatch maxMismatches m ls with Reference = resyncReference rtlRegs control stepped; RefTCycles = refTCycles }
     // 2. この境界の種類を比べる (参照を RTL 側メモリのコピーに載せてから)
     let memCopy = copyMemory peripherals.Mem
     let reference =
@@ -506,7 +517,7 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
     let mutable lockstep =
         if opts.Lockstep then
             let reference = Decoder.createState () |> Decoder.loadRomToState rom
-            Some { Reference = reference; Pending = None; Boundaries = 0L; Mismatches = []; MismatchCount = 0L; IoMismatchCount = 0L }
+            Some { Reference = reference; Pending = None; Boundaries = 0L; RefTCycles = 0L; Mismatches = []; MismatchCount = 0L; IoMismatchCount = 0L }
         else None
 
     while not finished do
