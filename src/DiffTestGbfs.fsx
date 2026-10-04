@@ -99,7 +99,10 @@ let diffSnapshots (expected: Snapshot) (actual: Snapshot) : string list =
             if expected.Wram.[i] <> actual.Wram.[i] then
                 yield sprintf "mem[0x%04X]: gbfs=0x%02X netlist=0x%02X" (0xC000 + i) expected.Wram.[i] actual.Wram.[i] ]
     let ioDiffs =
-        [ if expected.InterruptFlag <> actual.InterruptFlag then
+        [ // IF の未使用ビット (5-7) は実機では 1 を読む。gbfs は読み出し時に 0xE0 を立てるが、
+          // RTL のネットリストは素のフリップフロップなので 0x00 のまま。これはメモリモデル側の
+          // 差であって CPU の差ではないので、使われている下位 5bit だけを比べる。
+          if (expected.InterruptFlag &&& 0x1F) <> (actual.InterruptFlag &&& 0x1F) then
               yield sprintf "IF: gbfs=0x%02X netlist=0x%02X" expected.InterruptFlag actual.InterruptFlag
           if expected.InterruptEnable <> actual.InterruptEnable then
               yield sprintf "IE: gbfs=0x%02X netlist=0x%02X" expected.InterruptEnable actual.InterruptEnable
@@ -156,7 +159,11 @@ let interruptNetlistCycles = 300
 let interruptGbfsSteps = 400
 
 let runNetlistCycles (cycles: int) (c, ports, bus) (rom: byte[]) : Result<Snapshot, string> =
-    match run c ports bus (createMemory rom defaultMemoryConfig) 2 cycles with
+    // IF の起動直後の値は gbfs に合わせる (gbfs Memory.fs:212 が 0xE1 = VBlank フラグ + 未使用ビット 1)。
+    // Testbench の createMemory は 0 で作るので、ここで上書きしないと bit 0 が食い違う。
+    // 未使用ビットは RTL 側の IF レジスタが保持できないので、比較側でマスクする (diffSnapshots)。
+    let memory = { createMemory rom defaultMemoryConfig with InterruptFlag = 0xE1uy }
+    match run c ports bus memory 2 cycles with
     | Error e -> Error (describeTestbenchError e)
     | Ok result ->
         let o name = int result.FinalOutputs.[name]
