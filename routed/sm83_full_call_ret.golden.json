@@ -2,31 +2,10 @@
   "format": "wwc-golden/1",
   "circuit": "sm83_full",
   "program": "sm83_full_call_ret",
-  "sourceSha256": "79c502a112f713280fbc6be5923c7fd7c6c11b86354496eee7454a976e774857",
+  "sourceSha256": "08f46c87b7cb86c076dc5545b89692abaf840b2643c634d7d30f6ff9471ce03e",
   "romSha256": "011ac6cb98ee3246bd939262665dd1ec8baf3358c9a02c7889abe9160b5b6318",
   "rstPulses": 2,
   "cycles": [
-    {
-      "dataIn": 0,
-      "irq": 0,
-      "outputs": {
-        "a_out": 1,
-        "addr": 256,
-        "b_out": 0,
-        "c_out": 19,
-        "d_out": 0,
-        "data_out": 0,
-        "e_out": 216,
-        "f_out": 176,
-        "h_out": 1,
-        "int_ack": 0,
-        "l_out": 77,
-        "mem_read": 1,
-        "mem_write": 0,
-        "pc_out": 256,
-        "sp_out": 65534
-      }
-    },
     {
       "dataIn": 49,
       "irq": 0,
@@ -71,27 +50,6 @@
     },
     {
       "dataIn": 208,
-      "irq": 0,
-      "outputs": {
-        "a_out": 1,
-        "addr": 258,
-        "b_out": 0,
-        "c_out": 19,
-        "d_out": 0,
-        "data_out": 0,
-        "e_out": 216,
-        "f_out": 176,
-        "h_out": 1,
-        "int_ack": 0,
-        "l_out": 77,
-        "mem_read": 0,
-        "mem_write": 0,
-        "pc_out": 259,
-        "sp_out": 53248
-      }
-    },
-    {
-      "dataIn": 0,
       "irq": 0,
       "outputs": {
         "a_out": 1,
@@ -200,6 +158,27 @@
       "irq": 0,
       "outputs": {
         "a_out": 1,
+        "addr": 53246,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 6,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "int_ack": 0,
+        "l_out": 77,
+        "mem_read": 0,
+        "mem_write": 0,
+        "pc_out": 272,
+        "sp_out": 53246
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 1,
         "addr": 272,
         "b_out": 0,
         "c_out": 19,
@@ -239,27 +218,6 @@
     },
     {
       "dataIn": 119,
-      "irq": 0,
-      "outputs": {
-        "a_out": 119,
-        "addr": 273,
-        "b_out": 0,
-        "c_out": 19,
-        "d_out": 0,
-        "data_out": 6,
-        "e_out": 216,
-        "f_out": 176,
-        "h_out": 1,
-        "int_ack": 0,
-        "l_out": 77,
-        "mem_read": 0,
-        "mem_write": 0,
-        "pc_out": 274,
-        "sp_out": 53246
-      }
-    },
-    {
-      "dataIn": 0,
       "irq": 0,
       "outputs": {
         "a_out": 119,
@@ -368,7 +326,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -378,7 +336,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -389,7 +347,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -399,7 +357,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -410,7 +368,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -420,7 +378,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -431,7 +389,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -441,7 +399,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -452,7 +410,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -462,7 +420,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -473,7 +431,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -483,7 +441,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -494,7 +452,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -504,7 +462,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -515,7 +473,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -525,7 +483,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -536,7 +494,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -546,7 +504,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -557,7 +515,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -567,7 +525,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -578,7 +536,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -588,7 +546,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -599,7 +557,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -609,7 +567,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -620,7 +578,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -630,7 +588,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -641,7 +599,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -651,7 +609,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -662,7 +620,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -672,7 +630,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -683,7 +641,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -693,7 +651,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -704,7 +662,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -714,7 +672,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -725,7 +683,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -735,7 +693,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -746,7 +704,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -756,7 +714,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -767,7 +725,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -777,7 +735,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -788,7 +746,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -798,7 +756,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -809,7 +767,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -819,7 +777,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -830,7 +788,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -840,7 +798,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -851,7 +809,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -861,7 +819,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -872,7 +830,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -882,7 +840,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -893,7 +851,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -903,7 +861,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -914,7 +872,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -924,7 +882,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -935,7 +893,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -945,7 +903,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -956,7 +914,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -966,7 +924,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -977,7 +935,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -987,7 +945,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -998,7 +956,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1008,7 +966,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1019,7 +977,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1029,7 +987,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1040,7 +998,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1050,7 +1008,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1061,7 +1019,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1071,7 +1029,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1082,7 +1040,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1092,7 +1050,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1103,7 +1061,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1113,7 +1071,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1124,7 +1082,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1134,7 +1092,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1145,7 +1103,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1155,7 +1113,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1166,7 +1124,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1176,7 +1134,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1187,7 +1145,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1197,7 +1155,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1208,7 +1166,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1218,7 +1176,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1229,7 +1187,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1239,7 +1197,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1250,7 +1208,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1260,7 +1218,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1271,7 +1229,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1281,7 +1239,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1292,7 +1250,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1302,7 +1260,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1313,7 +1271,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1323,7 +1281,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1334,7 +1292,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1344,7 +1302,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1355,7 +1313,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1365,7 +1323,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1376,7 +1334,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1386,7 +1344,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1397,7 +1355,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1407,7 +1365,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1418,7 +1376,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1428,7 +1386,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1439,7 +1397,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1449,7 +1407,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1460,7 +1418,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1470,7 +1428,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1481,7 +1439,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1491,7 +1449,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1502,7 +1460,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1512,7 +1470,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1523,7 +1481,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1533,7 +1491,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1544,7 +1502,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1554,7 +1512,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1565,7 +1523,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1575,7 +1533,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1586,7 +1544,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1596,7 +1554,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1607,7 +1565,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1617,7 +1575,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1628,7 +1586,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1638,7 +1596,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1649,7 +1607,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1659,7 +1617,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1670,7 +1628,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1680,7 +1638,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1691,7 +1649,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1701,7 +1659,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1712,7 +1670,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1722,7 +1680,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1733,7 +1691,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1743,7 +1701,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1754,7 +1712,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1764,7 +1722,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1775,7 +1733,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1785,7 +1743,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1796,7 +1754,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1806,7 +1764,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1817,7 +1775,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1827,7 +1785,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1838,7 +1796,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1848,7 +1806,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1859,7 +1817,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1869,7 +1827,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1880,7 +1838,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1890,7 +1848,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1901,7 +1859,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1911,7 +1869,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1922,7 +1880,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1932,7 +1890,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1943,7 +1901,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1953,7 +1911,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1964,7 +1922,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1974,7 +1932,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -1985,7 +1943,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -1995,7 +1953,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2006,7 +1964,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2016,7 +1974,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2027,7 +1985,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2037,7 +1995,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2048,7 +2006,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2058,7 +2016,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2069,7 +2027,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2079,7 +2037,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2090,7 +2048,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2100,7 +2058,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2111,7 +2069,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2121,7 +2079,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2132,7 +2090,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2142,7 +2100,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2153,7 +2111,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2163,7 +2121,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2174,7 +2132,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2184,7 +2142,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2195,7 +2153,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2205,7 +2163,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2216,7 +2174,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2226,7 +2184,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2237,7 +2195,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2247,7 +2205,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2258,7 +2216,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2268,7 +2226,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2279,7 +2237,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2289,7 +2247,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2300,7 +2258,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2310,7 +2268,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2321,7 +2279,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2331,7 +2289,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2342,7 +2300,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2352,7 +2310,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2363,7 +2321,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2373,7 +2331,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2384,7 +2342,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2394,7 +2352,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2405,7 +2363,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2415,7 +2373,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2426,7 +2384,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2436,7 +2394,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2447,7 +2405,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2457,7 +2415,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2468,7 +2426,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2478,7 +2436,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2489,7 +2447,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2499,7 +2457,7 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
@@ -2510,7 +2468,7 @@
       "irq": 0,
       "outputs": {
         "a_out": 119,
-        "addr": 262,
+        "addr": 263,
         "b_out": 0,
         "c_out": 19,
         "d_out": 0,
@@ -2520,7 +2478,49 @@
         "h_out": 1,
         "int_ack": 0,
         "l_out": 77,
-        "mem_read": 0,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 53248
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 119,
+        "addr": 263,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 6,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "int_ack": 0,
+        "l_out": 77,
+        "mem_read": 1,
+        "mem_write": 0,
+        "pc_out": 263,
+        "sp_out": 53248
+      }
+    },
+    {
+      "dataIn": 0,
+      "irq": 0,
+      "outputs": {
+        "a_out": 119,
+        "addr": 263,
+        "b_out": 0,
+        "c_out": 19,
+        "d_out": 0,
+        "data_out": 6,
+        "e_out": 216,
+        "f_out": 176,
+        "h_out": 1,
+        "int_ack": 0,
+        "l_out": 77,
+        "mem_read": 1,
         "mem_write": 0,
         "pc_out": 263,
         "sp_out": 53248
