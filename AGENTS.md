@@ -18,7 +18,9 @@ No separate lint or typecheck step — the F# compiler covers both. No formatter
 You **must** `dotnet build` before `dotnet fsi src/RunTests.fsx` (or any `src/*.fsx` script) —
 they reference the compiled DLL (`src/bin/Debug/net8.0/WwHdl.dll`).
 
-**Current test results** (2026-09-28 に実測): F# `RunTests.fsx` **421/421** /
+**Current test results**: 2026-10-04 に sm83_full まわりを再測 — F# `RunTests.fsx` **427/427** /
+`wgpu-runner/memory-test.sh routed/sm83_full_*.json` (sm83_full 34 本 + 検証器の自己検証 3 本) **37/37**。
+以下は 2026-09-28 の実測のままで、sm83_full の変更の影響を受けない (別回路):
 `cargo test` (wgpu-runner) **49/49** / `wgpu-runner/run-tests.sh` (GPU golden) **24/24** /
 `wgpu-runner/memory-test.sh` (引数なし) **5/5**。
 Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計測。
@@ -81,28 +83,33 @@ dotnet fsi src/CoSimGbfs.fsx [--lockstep] [--tsv out.tsv] [--trace FROM:TO] <rom
 
 ## Architecture
 
-Multi-file F# project (18 files in `src/`, ~9,300 lines). Compile order is defined by
+Multi-file F# project (23 files in `src/`, ~12,000 lines). Compile order is defined by
 `src/WwHdl.fsproj` (this is also the dependency order):
 
 ```
-Domain.fs        # Units, Domain, Rule, Netlist                              (  98 lines)
-WireLevel.fs     # 独自CAルール (レベル駆動・pull型有向配線) — メインターゲット      ( 393 lines)
-TwoPhaseClock.fs # 2 相ノンオーバーラップクロック (toTwoPhase, DFF のマスタ/スレーブ分割) ( 257 lines)
-Library.fs       # StdCell definitions, CellTest (WireWorld legacy)          ( 516 lines)
-GatePlacement.fs # ゲート配置のシミュレーテッドアニーリング (アーク距離最小化)      ( 386 lines)
-Place.fs         # Placement algorithm (WireWorld legacy)                    (  23 lines)
-Route.fs         # Lee/BFS routing algorithm (WireWorld legacy)              ( 284 lines)
-Sta.fs           # Static timing analysis (WireWorld legacy)                 ( 290 lines)
-Sim.fs           # Clock-gated simulation (WireWorld legacy)                 ( 189 lines)
-Pipeline.fs      # Yosys JSON frontend/parse + WireWorld pipeline (legacy)   ( 760 lines)
-PipelineWL.fs    # yosys Netlist → WireLevel コンパイラ (配置・A* 配線・クロック均等化) (1337 lines)
-RoutedArtifact.fs # 配線済みグリッドの保存・再読込 (.bin + meta JSON、鮮度確認)   ( 534 lines)
-HoldAnalysis.fs  # 配線済みグリッドの hold 静的解析 (AnalyzeHold.fsx の本体)     ( 431 lines)
-NetlistSim.fs    # ゲートレベル周期シミュレータ (CA と同じ規則、検証の期待値生成用) ( 235 lines)
-Testbench.fs     # メモリバス TB (runner --memory と同じプログラム JSON、golden 生成) ( 425 lines)
-E2eTests.fs      # All test modules (CellTest 〜 MultiGateTest 等)            (2458 lines)
-TestbenchTests.fs # Testbench の単体テスト + sm83_full 仕様テスト             ( 228 lines)
-TwoPhaseTests.fs  # 2 相クロックの単体テスト・skew 耐性の実証テスト            ( 495 lines)
+Domain.fs        # Units, Domain, Rule, Netlist                                        (   98 lines)
+WireLevel.fs     # 独自CAルール (レベル駆動・pull型有向配線) — メインターゲット                (  393 lines)
+TwoPhaseClock.fs # 2 相ノンオーバーラップクロック (toTwoPhase, DFF のマスタ/スレーブ分割)    (  264 lines)
+Library.fs       # StdCell definitions, CellTest (WireWorld legacy)                    (  516 lines)
+GatePlacement.fs # ゲート配置のシミュレーテッドアニーリング (アーク距離最小化)                (  481 lines)
+PlacementTiming.fs # 配置段階の静的タイミング解析とタイミング駆動の再アニーリング (issue #7 (c)) (  523 lines)
+Place.fs         # Placement algorithm (WireWorld legacy)                              (   23 lines)
+Route.fs         # Lee/BFS routing algorithm (WireWorld legacy)                        (  284 lines)
+Sta.fs           # Static timing analysis (WireWorld legacy)                           (  290 lines)
+Sim.fs           # Clock-gated simulation (WireWorld legacy)                           (  189 lines)
+Pipeline.fs      # Yosys JSON frontend/parse + WireWorld pipeline (legacy)             (  760 lines)
+PipelineWL.fs    # yosys Netlist → WireLevel コンパイラ (配置・A* 配線・クロック均等化)    ( 1631 lines)
+RoutedArtifact.fs # 配線済みグリッドの保存・再読込 (.bin + meta JSON、鮮度確認)             (  554 lines)
+HoldAnalysis.fs  # 配線済みグリッドの hold 静的解析 (AnalyzeHold.fsx の本体)               (  450 lines)
+TimingAnalysis.fs # 配線済みグリッドのクリティカルパス (最長経路) 静的解析                  (  532 lines)
+NetlistSim.fs    # ゲートレベル周期シミュレータ (CA と同じ規則、検証の期待値生成用)          (  378 lines)
+Testbench.fs     # メモリバス TB (runner --memory と同じプログラム JSON、golden 生成)      (  663 lines)
+E2eTests.fs      # All test modules (CellTest 〜 MultiGateTest 等)                     ( 2458 lines)
+TestbenchTests.fs # Testbench の単体テスト + sm83_full 仕様テスト                        (  264 lines)
+TwoPhaseTests.fs  # 2 相クロックの単体テスト・skew 耐性の実証テスト                       (  537 lines)
+ClockPinSplitTests.fs  # クロックピンの複数分割 (issue #7 (b)) のテスト                  (  282 lines)
+TimingAnalysisTests.fs # TimingAnalysis (クリティカルパス静的解析) のテスト               (  224 lines)
+PlacementTimingTests.fs # PlacementTiming (配置段階のタイミング解析・駆動配置) のテスト     (  243 lines)
 ```
 
 yosys は `nix develop --command yosys ...` で使う (flake.nix に同梱)。
@@ -162,7 +169,7 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
   sm83_full はこの方式で 16.1 分・rip-up 0 で配線完走した (2026-09-27)。クロックピンは `--clock-pins K` で
   K 個の区画に分けられる (既定 1)。区画ごとに独立したピン・配線木を持ち、ホストは同じ相の全ピンを
   同じ世代に書く。到達時間が区画ごとにずれても、同相の DFF 間に組合せ経路が無いので hold 違反は起きない。
-  sm83_full は K=16 で配線し直してあり (10.0 分、rip-up 0)、クロック最大到達は 1,478 / 1,494 → 186 / 196 世代
+  sm83_full は K=16 で配線し直してあり (15.0 分、rip-up 80)、クロック最大到達は 1,478 / 1,494 → 186 / 196 世代
   (ピッチ 14x12 のとき。20x14 では 284 / 282 世代)。
 
 ## External dependency
@@ -171,19 +178,30 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
 - **gbfs** (`../gbfs`、別リポジトリの F# 製 Game Boy エミュレータ) — `DiffTestGbfs.fsx` / `CoSimGbfs.fsx`
   が参照モデルとして使う。事前に `gbfs.Lib` を Release ビルドしておく必要がある。
 
-## sm83_full の現状 (2026-09-28)
+## sm83_full の現状 (2026-10-04)
 
-sm83_full (通常命令 (STOP を除く) + CB prefix 256 + 割込み + HALT バグ、組合せ 10,859 + DFF 181) は
+sm83_full (通常命令 (STOP を除く) + CB prefix 256 + 割込み + HALT バグ、組合せ 10,782 + DFF 182) は
 **14x12 ピッチ・タイミング駆動アニーリング配置・2 相クロック・クロックピン 16 本で配線完走**
-(10.0 分、rip-up 0、grid 1481x1273、`routed/sm83_full.{bin,meta.json}`、meta formatVersion 3)。
+(15.0 分、rip-up 80、grid 1480x1271、gates 11146 (2 相分割後の DFF 364)、
+`routed/sm83_full.{bin,meta.json}`、meta formatVersion 3)。
 クロック木の最大到達は clk_a 186 / clk_b 196 世代 (ピン 1 本のときは 1,478 / 1,494)。
 クリティカルパスの 97% はゲート間の「配置距離 (セル数)」なので、ピッチが 1 周期の直接のスケール因子になる
 (20x14 → 14x12 で 34 本の GPU 照合 150.7 → 112.6 秒)。12x10 は輻輳失敗 (18,041/18,691 で停止)。
-RTL の正しさは blargg `cpu_instrs` 個別版 **11/11 PASS** (`CoSimGbfs.fsx --lockstep`) で、
-RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh` 一式、34 本で 78 秒。tiled エンジンの
+**RTL は実機と同じ M サイクル数で動く (2026-10-04)**。実機は「命令のフェッチ段が前命令の実行段の最後の
+M サイクルに必ず重なる」(gekkio *GB: Complete Technical Reference* §2.2) ので、フェッチと実行を分ける
+2 相構造 (`PHASE_FETCH` + `PHASE_FETCH2`) をやめ、`PHASE_FETCH2` の実行ロジックを `PHASE_FETCH` に統合した
+(プリフェッチ構造)。`addr`/`mem_read` は組合せ出力にし (`addr_r`/`mem_read_r` + mux)、バスを使わない
+M サイクル用に `PHASE_INTERNAL`/`PHASE_INTERNAL2` を追加して phase を 5bit 化した (15 → 17 フェーズ)。
+検証: blargg `instr_timing` **PASS**、lockstep (レジスタ + **累積 T**) 食い違い 0、opcode 表 221/223 (実質 223/223)。
+**タイミングを触ったら、まずロックステップの累積 T 比較を回すこと** — レジスタ比較では M サイクルのずれが
+見えない (`JP` はフラグもレジスタも書かないので 1 サイクル足りなくても状態が変わらない)。
+手順は `wwc-development` スキルの `references/cycle-accuracy.md`。
+
+RTL の正しさは blargg `cpu_instrs` 個別版と `instr_timing` (`CoSimGbfs.fsx`)、
+RTL ≡ CA は GPU 全周期照合 **37/37** (`wgpu-runner/memory-test.sh routed/sm83_full_*.json`、34 本。tiled エンジンの
 `BLOCK_GENS` を実測で 8 → 3 にした効果。詳細は TODO.md 残課題 1 (e)) で確認済み。
 残課題 (優先順) は TODO.md 「残課題」節を参照 (`data_in` 窓の組合せ収束、`compileWL` の既定値見直し、
-サイクル精度、mooneye acceptance 系、STOP 未実装、NetlistSim 高速化など)。
+mooneye acceptance 系、STOP 未実装、NetlistSim 高速化など)。
 
 ## 2026-06-10: LargeCircuit BFS timeout resolved
 
