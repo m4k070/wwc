@@ -420,7 +420,8 @@ module sm83_full (
                 // PHASE_MEM_WRITE
                 // =====================================================
                 PHASE_MEM_WRITE: begin
-                    mem_write <= 1;
+                    // 書き込みは前のフェーズが立てた mem_write で、このフェーズに適用される。
+                    // ここで再表明すると次の FETCH 相で mem_read が潰れてオペコードが読めない。
                     phase <= PHASE_FETCH;
                 end
 
@@ -472,7 +473,7 @@ module sm83_full (
                     data_out <= operand;  // low byte of return addr
                     mem_write <= 1;
                     pc <= call_target;
-                    phase <= PHASE_FETCH;
+                    phase <= PHASE_MEM_WRITE;
                 end
 
                 // =====================================================
@@ -1201,16 +1202,23 @@ module sm83_full (
             case (op[7:6])
                 0: begin
                     data_out <= res;  // PHASE_MEM_WRITE で (HL) に書く
+                    addr_r <= {h, l};
+                    mem_write <= 1;
                     f <= {(res == 0), 1'b0, 1'b0, roc, 4'b0000};
                 end
                 1: begin
+                    // BIT は書き戻さない
                     f <= {(mem_val[op[5:3]] == 0), 1'b0, 1'b1, f[4], 4'b0000};
                 end
                 2: begin
                     data_out <= mem_val & ~(8'h01 << op[5:3]);
+                    addr_r <= {h, l};
+                    mem_write <= 1;
                 end
                 3: begin
                     data_out <= mem_val | (8'h01 << op[5:3]);
+                    addr_r <= {h, l};
+                    mem_write <= 1;
                 end
             endcase
         end
