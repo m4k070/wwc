@@ -195,10 +195,10 @@ module sm83_full (
 
     // ALU / INC / DEC の右辺。呼び出し側の `operand <= X` は同じ周期のノンブロッキング代入で
     // まだ反映されていないため、operand レジスタではなくその周期の値を組み合わせ回路で選ぶ。
-    //   PHASE_FETCH2 (レジスタ版): opcode = data_in から対象レジスタを選ぶ
+    //   PHASE_FETCH (レジスタ版): opcode = data_in から対象レジスタを選ぶ
     //   PHASE_IMM (即値版) / PHASE_MEM_DATA ((HL) 版): data_in
-    wire [7:0] alu_rhs    = (phase == PHASE_FETCH2) ? read_r8(data_in[2:0]) : data_in;
-    wire [7:0] incdec_src = (phase == PHASE_FETCH2) ? read_r8(data_in[5:3]) : data_in;
+    wire [7:0] alu_rhs    = (phase == PHASE_FETCH) ? read_r8(data_in[2:0]) : data_in;
+    wire [7:0] incdec_src = (phase == PHASE_FETCH) ? read_r8(data_in[5:3]) : data_in;
 
     assign add8   = a + alu_rhs;
     assign sub8   = a - alu_rhs;

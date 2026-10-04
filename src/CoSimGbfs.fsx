@@ -514,6 +514,12 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
         let wasFetchPhase = sim.Values.[fetchBit]
         let wasCbPrefix = sim.Values.[circuit.Probes.CbPrefix]
         let request = readBusRequest circuit sim
+        // 境界は「FETCH 相のサイクル = その命令の開始」なので、参照と比べる RTL の状態は
+        // このサイクルのクロックを打つ前 (= 直前の命令が完了した状態) でなければならない。
+        // 1 フェーズ = 1 M サイクルでは 1 サイクル命令がそのサイクル内で完了するため、
+        // クロック後を読むと 1 命令ずれる。
+        let regsAtBoundary = readRegisters circuit sim
+        let controlAtBoundary = readControl circuit sim
         // 2. 書込 (シリアルの観測を含む) → 割込み受付で IF を下ろす → 読出
         let mutable mem = peripherals.Mem
         if request.IsWrite then
@@ -543,7 +549,12 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
             else
                 sim |> applyWrites c ((bus.Clock, 0UL) :: lowWrites)
         sim <- sLow |> applyWrites c [ bus.Clock, 1UL ]
-        // 4. 命令境界の観測 (posedge 後のバス出力で判定する)
+        // 命令境界の観測。位相機械は 1 フェーズ = 1 M サイクルで、FETCH 相がそのまま
+        // オペコード読み出しを出す (addr/mem_read は組合せ出力)。したがって境界は
+        // 「クロック前に FETCH 相だった」かつ「そのクロック前のバス要求が読み出し」で判定する。
+        // クロック後のバス要求 (next) は次フェーズのものなので、旧 FSM (FETCH → FETCH2 の
+        // 2 相構造) のときだけ偶然一致していた。
+        // 割込みだけは例外で、FETCH 相のクロックで int_ack が立つのでクロック後 (next) を見る。
         let next = readBusRequest circuit sim
         match opts.Trace with
         | Some (fromCycle, toCycle) when cycle >= fromCycle && cycle <= toCycle ->
@@ -564,16 +575,14 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
         let boundary =
             if not wasFetchPhase then None
             elif next.IntAck <> 0uy then Some (InterruptDispatch next.IntAck)
-            elif next.IsRead && not wasCbPrefix then Some (InstructionStart next.Addr)
+            elif request.IsRead && not wasCbPrefix then Some (InstructionStart request.Addr)
             else None
         match boundary with
         | Some (InstructionStart _) -> instructions <- instructions + 1L
         | _ -> ()
         match boundary, lockstep with
         | Some kind, Some ls ->
-            let regs = readRegisters circuit sim
-            let control = readControl circuit sim
-            lockstep <- Some (lockstepBoundary opts.MaxMismatches cycle kind regs control ioReadsSinceBoundary peripherals scratchPpu scratchApu ls)
+            lockstep <- Some (lockstepBoundary opts.MaxMismatches cycle kind regsAtBoundary controlAtBoundary ioReadsSinceBoundary peripherals scratchPpu scratchApu ls)
         | _ -> ()
         if boundary.IsSome then ioReadsSinceBoundary <- Map.empty
         // 5. 周辺回路を 4 T サイクル進める
