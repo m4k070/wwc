@@ -91,11 +91,25 @@ def ppu_rows(raw_path, scale):
         fb = f.read()
     if len(fb) < PPU_W * PPU_H:
         raise SystemExit(f"{raw_path}: 160x144 に対して {len(fb)} バイトしかない")
+    shades = [bytes(PPU_SHADES[min(i, 3)]) * scale for i in range(4)]
     rows = []
     for y in range(PPU_H):
-        line = b"".join(bytes(PPU_SHADES[min(v, 3)]) * scale for v in fb[y * PPU_W:(y + 1) * PPU_W])
+        line = b"".join([shades[min(v, 3)] for v in fb[y * PPU_W:(y + 1) * PPU_W]])
         rows.extend([line] * scale)
     return rows
+
+
+_EXP_CACHE = {}
+
+
+def _expand_table(scale):
+    """セル値 -> 横に scale 倍した 3 バイト。TAB[b] * scale を 1 セルずつ作るのを避ける。
+
+    合成フレームは 1 枚 0.3 秒かかり、律速はここ (1776x728 で 160x120 セルを 120 行)。
+    """
+    if scale not in _EXP_CACHE:
+        _EXP_CACHE[scale] = [TAB[b] * scale for b in range(256)]
+    return _EXP_CACHE[scale]
 
 
 def render_frame(bin_path, out_path, scale, crop=None, side=None):
@@ -112,9 +126,10 @@ def render_frame(bin_path, out_path, scale, crop=None, side=None):
     x, y, w, h = crop if crop else (0, 0, gw, gh)
     if x + w > gw or y + h > gh:
         raise SystemExit(f"{bin_path}: crop ({x},{y}) {w}x{h} が {gw}x{gh} の範囲外")
+    exp = _expand_table(scale)
     rows = []
     for row in range(y, y + h):
-        line = b"".join(TAB[b] * scale for b in cells[row * gw + x:row * gw + x + w])
+        line = b"".join([exp[b] for b in cells[row * gw + x:row * gw + x + w]])
         rows.extend([line] * scale)
 
     cw, ch = w * scale, h * scale
