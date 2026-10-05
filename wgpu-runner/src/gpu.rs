@@ -1,7 +1,7 @@
 // GpuSim — WireLevel CA の GPU シミュレータ本体。
 // ping-pong 2 バッファで世代を進め、収束判定は GPU 上の変化ログ (世代ごとの変化タイル数) で行う。
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 /// WireLevel の世代を進めるシェーダー。先頭に BLOCK_GENS の定義を付け足して使う (shader_source)
@@ -117,6 +117,51 @@ pub fn save_bin(path: &Path, w: u32, h: u32, cells: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// 世代ごとのフレーム書き出し (デモ映像用)。settle のバッチ (= プログラムの checkInterval 世代) ごとに
+/// グリッドを読み戻し、`f%06d.bin` として保存する。書式は load_bin/save_bin と同じ
+/// ([width:i32][height:i32][cell...]) なので、そのまま描画スクリプトに渡せる。
+/// 全体は 1 枚 1.8 MB あるので、デモでは通常 `crop` で領域を絞る。
+pub struct FrameSink {
+    pub dir: PathBuf,
+    /// N バッチに 1 枚だけ書く (1 = 毎バッチ)
+    pub every: u32,
+    /// (x, y, w, h) を指定するとその領域だけを書く
+    pub crop: Option<(u32, u32, u32, u32)>,
+    batch_index: u64,
+    /// 書いた枚数
+    pub count: u64,
+    /// ここまでに進んだ世代の累計 (最後のフレームの世代が分かる)
+    pub total_gens: u64,
+}
+
+impl FrameSink {
+    pub fn new(dir: PathBuf, every: u32, crop: Option<(u32, u32, u32, u32)>) -> Self {
+        FrameSink { dir, every: every.max(1), crop, batch_index: 0, count: 0, total_gens: 0 }
+    }
+
+    /// バッチが終わったところで呼ぶ。条件を満たせば 1 枚書く。
+    fn maybe_dump(&mut self, sim: &mut GpuSim, batch_gens: u32) -> Result<()> {
+        self.total_gens += batch_gens as u64;
+        let take = self.batch_index % self.every as u64 == 0;
+        self.batch_index += 1;
+        if !take {
+            return Ok(());
+        }
+        let cells = sim.read_cells()?;
+        let (x, y, w, h) = self.crop.unwrap_or((0, 0, sim.w, sim.h));
+        anyhow::ensure!(x + w <= sim.w && y + h <= sim.h,
+            "frame crop ({x},{y}) {w}x{h} is outside the {0}x{1} grid", sim.w, sim.h);
+        let mut sub = Vec::with_capacity((w as usize) * (h as usize));
+        for row in y..y + h {
+            let o = (row as usize) * (sim.w as usize) + (x as usize);
+            sub.extend_from_slice(&cells[o..o + w as usize]);
+        }
+        save_bin(&self.dir.join(format!("f{:06}.bin", self.count)), w, h, &sub)?;
+        self.count += 1;
+        Ok(())
+    }
+}
+
 
 /// WireLevel CA の GPU シミュレータ。
 /// セルは u32 に 1 個 (下位 8 ビット)。ping-pong 2 バッファで、front が現在の世代を持つ。
@@ -168,6 +213,8 @@ pub struct GpuSim {
     batch: u32,
     /// 現在の世代を持つバッファの添字 (0 or 1)
     front: usize,
+    /// 世代ごとのフレーム書き出し (None なら無効)。デモ映像用
+    frames: Option<FrameSink>,
 }
 
 /// バッチ内の 1 dispatch
@@ -489,6 +536,7 @@ impl GpuSim {
             pack_bytes, pack_bind_group, packed_cells, cells_read,
             w, h, tiles_x, tiles_y, batch,
             front: 0,
+            frames: None,
         })
     }
 
@@ -605,6 +653,11 @@ impl GpuSim {
         STAT_ENCODE_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// フレーム書き出しを有効化する (デモ映像用)。
+    pub fn set_frames(&mut self, sink: Option<FrameSink>) {
+        self.frames = sink;
+    }
+
     /// steps 世代進める (変化ログは読まない)。
     pub fn run(&mut self, steps: u32) {
         let per_batch = self.batch.min(MAX_GENS_PER_BATCH);
@@ -677,6 +730,11 @@ impl GpuSim {
         while gens < gens_limit {
             let n = batch_gens.min(gens_limit - gens);
             let log = self.run_logged(n)?;
+            // デモ用: バッチごとにフレームを 1 枚書く (batch_gens = checkInterval 世代ぶん進んだ状態)
+            if let Some(mut sink) = self.frames.take() {
+                sink.maybe_dump(self, n)?;
+                self.frames = Some(sink);
+            }
             if let Some(i) = log.iter().position(|&changed_tiles| changed_tiles == 0) {
                 gens += i as u32 + 1;
                 let tiles: u64 = log[..i].iter().map(|&v| v as u64).sum();
