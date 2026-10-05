@@ -29,7 +29,14 @@ EXPECTED_DIVERGENCE_SINGLE="a_out: expected 0x42 got 0x2 (bits [6])"
 EXPECTED_DIVERGENCE_TWO_PHASE="a_out: expected 0x11 got 0x1 (bits [4])"
 
 if [ $# -gt 0 ]; then
-  PROGRAMS=("$@")
+  # golden は「プログラム」ではないので、glob (routed/sm83_full_*.json) で拾ってしまった分を落とす
+  PROGRAMS=()
+  for p in "$@"; do
+    case "$p" in
+      *.golden.json) echo "skip (golden): $p" ;;
+      *) PROGRAMS+=("$p") ;;
+    esac
+  done
 else
   PROGRAMS=("$SMOKE" "$TWO_PHASE")
 fi
