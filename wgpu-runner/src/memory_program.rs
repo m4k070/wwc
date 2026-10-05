@@ -575,6 +575,8 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let mut divergence: Option<Vec<String>> = None;
 
     for cycle in 0..prog.cycles {
+        // デモ用: これから走る周期をフレームに刻む (PPU 側の絵と突き合わせるため)
+        driver.set_frame_cycle(cycle as u64);
         // この周期の LY (0xFF44) を反映してからバスを見る (TB / Testbench.fs と同じ契約)
         mem.set_lcd_y(cycle);
         let result = run_bus_cycle(&mut driver, &clock, &bus, &mut mem, w, &last_cells, cycle == 0)?;

@@ -1,6 +1,8 @@
 // GpuSim — WireLevel CA の GPU シミュレータ本体。
 // ping-pong 2 バッファで世代を進め、収束判定は GPU 上の変化ログ (世代ごとの変化タイル数) で行う。
 use std::fs;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
@@ -128,6 +130,10 @@ pub struct FrameSink {
     /// (x, y, w, h) を指定するとその領域だけを書く
     pub crop: Option<(u32, u32, u32, u32)>,
     batch_index: u64,
+    /// 現在のバス周期番号 (memory_program が set_frame_cycle で刻む)
+    current_cycle: u64,
+    /// frames.tsv: 「フレーム番号 <TAB> バス周期」を 1 行ずつ書く。PPU 側の絵と突き合わせるのに使う
+    index: Option<BufWriter<File>>,
     /// 書いた枚数
     pub count: u64,
     /// ここまでに進んだ世代の累計 (最後のフレームの世代が分かる)
@@ -136,7 +142,13 @@ pub struct FrameSink {
 
 impl FrameSink {
     pub fn new(dir: PathBuf, every: u32, crop: Option<(u32, u32, u32, u32)>) -> Self {
-        FrameSink { dir, every: every.max(1), crop, batch_index: 0, count: 0, total_gens: 0 }
+        FrameSink { dir, every: every.max(1), crop, batch_index: 0, current_cycle: 0,
+                    index: None, count: 0, total_gens: 0 }
+    }
+
+    /// フレームに刻むバス周期番号を設定する。
+    pub fn set_cycle(&mut self, cycle: u64) {
+        self.current_cycle = cycle;
     }
 
     /// バッチが終わったところで呼ぶ。条件を満たせば 1 枚書く。
@@ -157,6 +169,13 @@ impl FrameSink {
             sub.extend_from_slice(&cells[o..o + w as usize]);
         }
         save_bin(&self.dir.join(format!("f{:06}.bin", self.count)), w, h, &sub)?;
+        if self.index.is_none() {
+            let f = File::create(self.dir.join("frames.tsv")).context("creating frames.tsv")?;
+            self.index = Some(BufWriter::new(f));
+        }
+        if let Some(ix) = &mut self.index {
+            writeln!(ix, "{}\t{}", self.count, self.current_cycle).context("writing frames.tsv")?;
+        }
         self.count += 1;
         Ok(())
     }
@@ -656,6 +675,13 @@ impl GpuSim {
     /// フレーム書き出しを有効化する (デモ映像用)。
     pub fn set_frames(&mut self, sink: Option<FrameSink>) {
         self.frames = sink;
+    }
+
+    /// デモ用: 以後に書くフレームへ刻むバス周期番号を設定する。
+    pub fn set_frame_cycle(&mut self, cycle: u64) {
+        if let Some(sink) = &mut self.frames {
+            sink.set_cycle(cycle);
+        }
     }
 
     /// steps 世代進める (変化ログは読まない)。
