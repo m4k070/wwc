@@ -1,0 +1,15 @@
+{
+  "circuit": "sm83_full",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_demo_scroll.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "cycles": 6000,
+  "checkInterval": 64,
+  "expectMem": {},
+  "trace": false,
+  "comment": "CA デモ映像用: demo/scroll.asm の ROM を 6,000 周期走らせる"
+}

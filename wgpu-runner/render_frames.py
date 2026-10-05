@@ -45,7 +45,7 @@ def build_table():
 TAB = build_table()
 
 
-def write_png(path, w, h, rgb):
+def write_png(path, w, h, rgb, level=6):
     raw = bytearray()
     stride = w * 3
     for y in range(h):
@@ -58,14 +58,51 @@ def write_png(path, w, h, rgb):
 
     out = b"\x89PNG\r\n\x1a\n"
     out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-    out += chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+    out += chunk(b"IDAT", zlib.compress(bytes(raw), level))
     out += chunk(b"IEND", b"")
     with open(path, "wb") as f:
         f.write(out)
 
 
-def render_frame(bin_path, out_path, scale, crop=None):
-    """crop = (x, y, w, h) なら、その領域だけを切り出して描く (bin がすでに crop 済みでも可)。"""
+# DMG の 4 階調 (0 = 最も明るい)
+PPU_SHADES = [(0x9B, 0xBC, 0x0F), (0x8B, 0xAC, 0x0F), (0x30, 0x62, 0x30), (0x0F, 0x38, 0x0F)]
+PPU_W, PPU_H = 160, 144
+GAP = 8     # CA と PPU の間の黒帯
+BORDER = 4  # 全体の余白 (PPU の枠もこの太さ)
+FRAME_RGB = (0x50, 0x58, 0x60)
+
+
+def load_index(path):
+    """tsv (番号<TAB>バス周期) を読んで [(番号, 周期)] を返す。"""
+    out = []
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 2:
+                out.append((int(parts[0]), int(parts[1])))
+    if not out:
+        raise SystemExit(f"{path} が空")
+    return out
+
+
+def ppu_rows(raw_path, scale):
+    """ExportPpuFrames.fsx が書いた 160x144 の階調 (0-3) を、scale 倍した RGB 行にする。"""
+    with open(raw_path, "rb") as f:
+        fb = f.read()
+    if len(fb) < PPU_W * PPU_H:
+        raise SystemExit(f"{raw_path}: 160x144 に対して {len(fb)} バイトしかない")
+    rows = []
+    for y in range(PPU_H):
+        line = b"".join(bytes(PPU_SHADES[min(v, 3)]) * scale for v in fb[y * PPU_W:(y + 1) * PPU_W])
+        rows.extend([line] * scale)
+    return rows
+
+
+def render_frame(bin_path, out_path, scale, crop=None, side=None):
+    """crop = (x, y, w, h) なら、その領域だけを切り出して描く (bin がすでに crop 済みでも可)。
+
+    side = (rows, w_px, h_px) を渡すと、右側にその画像を縦中央で並べる (PPU の絵など)。
+    """
     with open(bin_path, "rb") as f:
         data = f.read()
     gw, gh = struct.unpack("<ii", data[:8])
@@ -79,8 +116,31 @@ def render_frame(bin_path, out_path, scale, crop=None):
     for row in range(y, y + h):
         line = b"".join(TAB[b] * scale for b in cells[row * gw + x:row * gw + x + w])
         rows.extend([line] * scale)
-    write_png(out_path, w * scale, h * scale, b"".join(rows))
-    return w * scale, h * scale
+
+    cw, ch = w * scale, h * scale
+    if side is None:
+        write_png(out_path, cw, ch, b"".join(rows))
+        return cw, ch
+
+    srows, sw, sh = side
+    total_w = cw + GAP + sw + 2 * BORDER
+    total_h = max(ch, sh) + 2 * BORDER
+    canvas = bytearray(total_w * total_h * 3)  # 合成フレームは毎回作り直す (行数が多く使い回しの利得が薄い)
+    for i, line in enumerate(rows):
+        o = ((i + BORDER) * total_w + BORDER) * 3
+        canvas[o:o + cw * 3] = line
+    # PPU は縦中央に置き、DMG の筐体色で 1 周ぶん枠を描く
+    y0 = BORDER + (max(ch, sh) - sh) // 2
+    x0 = BORDER + cw + GAP
+    for i in range(sh + 2):
+        o = ((y0 - 1 + i) * total_w + x0 - 1) * 3
+        for x in range(sw + 2):
+            canvas[o + x * 3:o + x * 3 + 3] = bytes(FRAME_RGB)
+    for i, line in enumerate(srows):
+        o = ((y0 + i) * total_w + x0) * 3
+        canvas[o:o + sw * 3] = line
+    write_png(out_path, total_w, total_h, bytes(canvas), level=1)
+    return total_w, total_h
 
 
 def main():
@@ -91,8 +151,12 @@ def main():
     ap.add_argument("--scale", type=int, default=6, help="1 セルを何ピクセルにするか (既定 6)")
     ap.add_argument("--out-prefix", default="f", help="出力ファイル名の接頭辞 (既定 f)")
     ap.add_argument("--limit", type=int, default=0, help="先頭 N 枚だけ描く (0 = 全部)")
+    ap.add_argument("--step", type=int, default=1, help="N 枚に 1 枚だけ描く (既定 1 = 全部)")
     ap.add_argument("--crop", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                     help="切り出す領域 (bin が --frame-crop 済みでもさらに絞れる)")
+    ap.add_argument("--side-dir", help="右側に並べる画像のディレクトリ (ExportPpuFrames.fsx の出力)")
+    ap.add_argument("--side-scale", type=int, default=0,
+                    help="右側の画像の倍率 (0 = CA 側の高さに合わせる)")
     args = ap.parse_args()
 
     files = sorted(f for f in os.listdir(args.frames_dir) if f.endswith(".bin"))
@@ -101,12 +165,46 @@ def main():
     if not files:
         raise SystemExit(f"{args.frames_dir} に .bin がない")
     os.makedirs(args.out_dir, exist_ok=True)
+
+    ca_index = None
+    ppu_index = None
+    if args.side_dir:
+        ca_index = load_index(os.path.join(args.frames_dir, "frames.tsv"))
+        ppu_index = load_index(os.path.join(args.side_dir, "ppu.tsv"))
+        # 書き出し中に読むと .bin が index より 1 枚先行することがある。index のある範囲だけ描く
+        files = files[:len(ca_index)]
+
     size = None
+    out_i = 0
+    side_cache = (None, None)  # (index, rows)
+    j = 0
+    # --side-scale を省略したときは CA 側の高さに合わせる。高さは --crop か、先頭フレームのヘッダから取る
+    if args.side_dir and not args.side_scale:
+        if args.crop:
+            ca_h = args.crop[3]
+        else:
+            with open(os.path.join(args.frames_dir, files[0]), "rb") as f:
+                ca_h = struct.unpack("<ii", f.read(8))[1]
+        side_scale = max(1, round(args.scale * ca_h / PPU_H))
+    else:
+        side_scale = args.side_scale
     for i, f in enumerate(files):
+        if i % args.step:
+            continue
+        side = None
+        if args.side_dir:
+            cycle = ca_index[i][1]
+            while j + 1 < len(ppu_index) and ppu_index[j + 1][1] <= cycle:
+                j += 1
+            if side_cache[0] != j:
+                rows = ppu_rows(os.path.join(args.side_dir, f"ppu{ppu_index[j][0]:06d}.raw"), side_scale)
+                side_cache = (j, (rows, PPU_W * side_scale, PPU_H * side_scale))
+            side = side_cache[1]
         size = render_frame(os.path.join(args.frames_dir, f),
-                            os.path.join(args.out_dir, f"{args.out_prefix}{i:06d}.png"),
-                            args.scale, tuple(args.crop) if args.crop else None)
-    print(f"{len(files)} 枚を {args.out_dir} に描いた ({size[0]}x{size[1]})")
+                            os.path.join(args.out_dir, f"{args.out_prefix}{out_i:06d}.png"),
+                            args.scale, tuple(args.crop) if args.crop else None, side)
+        out_i += 1
+    print(f"{out_i} 枚を {args.out_dir} に描いた ({size[0]}x{size[1]})")
     print("動画にするには:")
     print(f"  ffmpeg -y -framerate 30 -i {args.out_dir}/{args.out_prefix}%06d.png "
           f"-c:v libx264 -pix_fmt yuv420p -crf 20 out.mp4")
