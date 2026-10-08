@@ -45,7 +45,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::clocking::{write_bus, CaDriver, ClockPins, GpuDriver, Phase, LABEL_DATA_IN, LABEL_SETUP};
-use crate::gpu::{load_bin, save_bin, Engine, GpuSim};
+use crate::gpu::{load_bin, save_bin, Engine, FrameSink, GpuSim};
 use crate::memory::{Memory, MemoryConfig, RomSource};
 use crate::routed_meta::{OutputProbe, RoutedMeta, Xy};
 
@@ -124,6 +124,12 @@ pub struct MemProgOpts {
     pub batch: u32,
     pub engine: Engine,
     pub dump_dir: Option<PathBuf>,
+    /// デモ映像用: 世代ごとのグリッドを f%06d.bin として書き出すディレクトリ
+    pub frames_dir: Option<PathBuf>,
+    /// N バッチ (= N x checkInterval 世代) に 1 枚だけ書く
+    pub frame_every: u32,
+    /// 書き出す領域 (x, y, w, h)。省略時は全体 (1 枚 1.8 MB になるので通常は絞る)
+    pub frame_crop: Option<(u32, u32, u32, u32)>,
 }
 
 const K_PIN: u8 = 1;
@@ -534,6 +540,12 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
         mem.rom.len(), mem.ram.len(), mem.config.ram_base, meta.format_version, clock.scheme_name());
 
     let mut sim = GpuSim::new(w, h, &init_cells, opts.batch, opts.engine)?;
+    if let Some(dir) = &opts.frames_dir {
+        fs::create_dir_all(dir).with_context(|| format!("creating frames dir {}", dir.display()))?;
+        eprintln!("frames: {} に 1 枚 / {} バッチ で書き出します (crop {:?})",
+            dir.display(), opts.frame_every.max(1), opts.frame_crop);
+        sim.set_frames(Some(FrameSink::new(dir.clone(), opts.frame_every, opts.frame_crop)));
+    }
     let mut driver = GpuDriver {
         sim: &mut sim,
         max_steps_per_phase: prog.max_steps_per_phase,
@@ -563,6 +575,8 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let mut divergence: Option<Vec<String>> = None;
 
     for cycle in 0..prog.cycles {
+        // デモ用: これから走る周期をフレームに刻む (PPU 側の絵と突き合わせるため)
+        driver.set_frame_cycle(cycle as u64);
         // この周期の LY (0xFF44) を反映してからバスを見る (TB / Testbench.fs と同じ契約)
         mem.set_lcd_y(cycle);
         let result = run_bus_cycle(&mut driver, &clock, &bus, &mut mem, w, &last_cells, cycle == 0)?;

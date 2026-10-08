@@ -15,6 +15,9 @@ fn print_usage() {
     eprintln!("       (全モード共通) [--engine tiled|dense]   # tiled: 動いたタイルだけ計算 (既定)、dense: 毎世代全セル");
     eprintln!("       wgpu-runner --program prog.json [--dump-regs] [--dump-dir DIR] [--batch B]");
     eprintln!("       wgpu-runner --memory prog.json [--batch B] [--dump-dir DIR]   # メモリバスモード (Step B)");
+    eprintln!("       wgpu-runner --memory prog.json --frames DIR [--frame-every N] [--frame-crop X Y W H]");
+    eprintln!("                                        # デモ映像用: settle のバッチ (= checkInterval 世代) ごとに");
+    eprintln!("                                        # グリッドを f%06d.bin で書き出す。描画は wgpu-runner/render_frames.py");
 }
 
 /// WWC_STATS=1 のとき、GPU 実行の内訳を stderr に出す。
@@ -62,6 +65,9 @@ fn main() -> Result<()> {
     let mut memory_path: Option<PathBuf> = None;
     let mut dump_regs = false;
     let mut dump_dir: Option<PathBuf> = None;
+    let mut frames_dir: Option<PathBuf> = None;
+    let mut frame_every = 1u32;
+    let mut frame_crop: Option<(u32, u32, u32, u32)> = None;
     let mut engine = Engine::Tiled;
 
     let mut i = 1;
@@ -74,6 +80,14 @@ fn main() -> Result<()> {
             "--memory" => { i += 1; memory_path = Some(PathBuf::from(&args[i])); }
             "--dump-regs" => { dump_regs = true; }
             "--dump-dir" => { i += 1; dump_dir = Some(PathBuf::from(&args[i])); }
+            "--frames" => { i += 1; frames_dir = Some(PathBuf::from(&args[i])); }
+            "--frame-every" => { i += 1; frame_every = args[i].parse().context("--frame-every must be a number")?; }
+            "--frame-crop" => {
+                anyhow::ensure!(i + 4 < args.len(), "--frame-crop needs X Y W H");
+                let v: Vec<u32> = args[i+1..i+5].iter().map(|s| s.parse().context("--frame-crop values must be numbers")).collect::<Result<_>>()?;
+                frame_crop = Some((v[0], v[1], v[2], v[3]));
+                i += 4;
+            }
             "--engine" => { i += 1; engine = args[i].parse()?; }
             s if s.starts_with('-') => { anyhow::bail!("unknown flag {s}"); }
             _ => { input = PathBuf::from(&args[i]); }
@@ -90,7 +104,7 @@ fn main() -> Result<()> {
 
     // ---- メモリバスモード (Step B: ROM/RAM 駆動シミュレーション) ----
     if let Some(prog) = memory_path {
-        let opts = memory_program::MemProgOpts { batch, engine, dump_dir };
+        let opts = memory_program::MemProgOpts { batch, engine, dump_dir, frames_dir, frame_every, frame_crop };
         let code = memory_program::run_memory_program(&prog, &opts)?;
         print_stats();
         std::process::exit(code);

@@ -44,6 +44,8 @@ pub trait CaDriver {
     fn write_pin(&mut self, at: Xy, level: bool);
     /// 固定点まで進める
     fn settle(&mut self) -> Result<Settled>;
+    /// デモ用: フレームに刻むバス周期番号を伝える (フレーム書き出しが無効なら何もしない)
+    fn set_frame_cycle(&mut self, _cycle: u64) {}
 }
 
 /// バス (LSB first) に整数値を書く。
@@ -68,6 +70,10 @@ impl CaDriver for GpuDriver<'_> {
     fn settle(&mut self) -> Result<Settled> {
         let (cells, gens, settled) = self.sim.run_until_settled(self.max_steps_per_phase, self.check_interval)?;
         Ok(Settled { cells, gens, settled })
+    }
+
+    fn set_frame_cycle(&mut self, cycle: u64) {
+        self.sim.set_frame_cycle(cycle);
     }
 }
 

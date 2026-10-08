@@ -10,6 +10,16 @@ wgpu-runner/run-tests.sh               # GPU golden tests (Rust + wgpu, RTX 3060
 cd wgpu-runner && cargo test           # Rust 側ユニットテスト
 wgpu-runner/memory-test.sh [program.json ...]   # メモリバス golden 照合 + 検証器の自己検証
 wgpu-runner/target/release/wgpu-runner --memory <prog.json> [--engine tiled|dense] [--batch B] [--dump-dir DIR]
+wgpu-runner/target/release/wgpu-runner --memory <prog.json> --frames DIR [--frame-every N] [--frame-crop X Y W H]
+    # CA のデモ映像用: settle のバッチ (= checkInterval 世代) ごとにグリッドを f%06d.bin で書き出す。
+    # --dump-dir はバス周期ごとなので 1 周期 (約 8,237 世代) を丸ごと飛ばしてしまい、命令が終わると
+    # HALT で静止する。世代粒度が要るのはこのため。crop しないと 1 枚 1.8 MB になる
+python3 wgpu-runner/render_frames.py <frames_dir> <out_dir> [--scale N] [--crop X Y W H] [--side-dir DIR]
+    # フレーム (.bin) を PNG に描く。ON/OFF の明暗差は web/index.html より大きく振ってある
+    # (web の配色は動画では差が潰れて動きが見えない)。--side-dir で右側に PPU の絵を並べられる
+    # (src/ExportPpuFrames.fsx の出力。160x144 の階調を DMG の緑 4 階調で描く)。--step N で N 枚に 1 枚
+    # 動画化:
+    #   ffmpeg -y -framerate 30 -i out_dir/f%06d.png -c:v libx264 -pix_fmt yuv420p -crf 20 out.mp4
 wgpu-runner/target/release/wgpu-runner <grid.bin> [--steps N] [--output out.bin] [--batch B] [--engine tiled|dense]   # 単発 .bin 実行
 ```
 
