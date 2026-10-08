@@ -25,9 +25,13 @@ pub const IO_SIZE: usize = 0x80;
 pub const LCD_Y_ADDR: u16 = 0xFF44;
 /// ブート ROM のマップ解除 (0xFF50 に 1 を書く)
 pub const BOOT_ROM_DISABLE_ADDR: u16 = 0xFF50;
-/// 1 フレーム = 154 ライン × 456 サイクル (LY の算出用)
-pub const FRAME_CYCLES: u32 = 70224;
-pub const LINE_CYCLES: u32 = 456;
+/// 1 フレーム = 154 ライン × 114 M サイクル、1 ライン = 114 M サイクル (LY の算出用)。
+///
+/// 実機の 1 ラインは 456 T = 114 M サイクル。program JSON の `cycle` は M サイクル
+/// (1 バスアクセス = 1 cycle) なので、T サイクルの値 (456 / 70224) を使うと LY が
+/// 4 倍遅く進み、LY を見て待つ ROM が gbfs の PPU と噛み合わなくなる。
+pub const FRAME_CYCLES: u32 = 17556;
+pub const LINE_CYCLES: u32 = 114;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MemoryConfig {
@@ -259,7 +263,7 @@ mod tests {
         assert_eq!(m.read(0xFF44), 0x00);
         m.write(0xFF44, 0x99); // 書込は無視
         assert_eq!(m.read(0xFF44), 0x00);
-        for (cycle, ly) in [(0u32, 0u8), (455, 0), (456, 1), (70223, 153), (70224, 0), (70380, 0)] {
+        for (cycle, ly) in [(0u32, 0u8), (113, 0), (114, 1), (17555, 153), (17556, 0), (17600, 0)] {
             m.set_lcd_y(cycle);
             assert_eq!(m.read(0xFF44), ly, "cycle {cycle}");
         }

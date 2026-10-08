@@ -54,11 +54,12 @@ module Testbench =
     /// ブート ROM のマップ解除 (0xFF50 に 1 を書く)
     [<Literal>]
     let BootRomDisableAddress = 0xFF50
-    /// 1 フレーム = 154 ライン × 456 サイクル (LY の算出用)
+    /// 1 フレーム = 154 ライン × 114 M サイクル (LY の算出用)。実機の 1 ラインは 456 T
+    /// だが、この M サイクル番号は 1 バスアクセス = 1 cycle なので 4 で割った値を使う。
     [<Literal>]
-    let FrameCycles = 70224
+    let FrameCycles = 17556
     [<Literal>]
-    let LineCycles = 456
+    let LineCycles = 114
 
     type MemoryImage =
         { Rom: byte[]
