@@ -316,6 +316,9 @@ type LockstepState =
       Reference: Decoder.CpuState
       Pending: PendingStep option
       Boundaries: int64
+      /// 参照 CPU が消費した累積 T サイクル (gbfs の stepWithCycles の総和)。
+      /// 境界ごとに 4 × RTL サイクル数と比べると、M サイクル数のずれが直接見える。
+      RefTCycles: int64
       Mismatches: Mismatch list
       MismatchCount: int64
       IoMismatchCount: int64 }
@@ -412,19 +415,27 @@ let lockstepBoundary
         | None -> ls
         | Some pending ->
             patchIoReads ioReads pending.Prepared.Mem
-            let stepped = Decoder.step pending.Prepared
-            let diffs = formatDiffs (diffRegisters (refRegisters stepped) rtlRegs) (diffMemory stepped.Mem peripherals.Mem)
+            let stepped, refCycles = Decoder.stepWithCycles pending.Prepared
+            let refTCycles = ls.RefTCycles + int64 refCycles
+            // 境界は「次の命令が始まるサイクル」なので、直前の命令までの累積 T は 4 × cycle と一致するはず。
+            // レジスタが一致していても M サイクル数がずれていればここで出る。
+            let cycleDiffs =
+                if refTCycles = 4L * cycle then []
+                else
+                    [ sprintf "累積T: gbfs=%d (%d M) rtl=%d (%d M) 差=%+d M"
+                        refTCycles (refTCycles / 4L) (4L * cycle) cycle (refTCycles / 4L - cycle) ]
+            let diffs = formatDiffs (diffRegisters (refRegisters stepped) rtlRegs) (diffMemory stepped.Mem peripherals.Mem) @ cycleDiffs
             // 読み違えないよう、食い違った命令の実行前の値 (RTL と一致していたもの) も添える
             let before =
                 refRegisters pending.Prepared
                 |> List.map (fun (name, v) -> sprintf "%s=%0*X" name (if name = "SP" || name = "PC" then 4 else 2) v)
                 |> String.concat " "
             let diffs = if diffs.IsEmpty then diffs else diffs @ [ "実行前: " + before ]
-            if diffs.IsEmpty then { ls with Reference = stepped }
+            if diffs.IsEmpty then { ls with Reference = stepped; RefTCycles = refTCycles }
             else
                 let m = { BoundaryIndex = ls.Boundaries; Cycle = cycle; Instruction = pending.Description
                           ReadIo = not ioReads.IsEmpty; Diffs = diffs }
-                { recordMismatch maxMismatches m ls with Reference = resyncReference rtlRegs control stepped }
+                { recordMismatch maxMismatches m ls with Reference = resyncReference rtlRegs control stepped; RefTCycles = refTCycles }
     // 2. この境界の種類を比べる (参照を RTL 側メモリのコピーに載せてから)
     let memCopy = copyMemory peripherals.Mem
     let reference =
@@ -506,7 +517,7 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
     let mutable lockstep =
         if opts.Lockstep then
             let reference = Decoder.createState () |> Decoder.loadRomToState rom
-            Some { Reference = reference; Pending = None; Boundaries = 0L; Mismatches = []; MismatchCount = 0L; IoMismatchCount = 0L }
+            Some { Reference = reference; Pending = None; Boundaries = 0L; RefTCycles = 0L; Mismatches = []; MismatchCount = 0L; IoMismatchCount = 0L }
         else None
 
     while not finished do
@@ -514,6 +525,12 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
         let wasFetchPhase = sim.Values.[fetchBit]
         let wasCbPrefix = sim.Values.[circuit.Probes.CbPrefix]
         let request = readBusRequest circuit sim
+        // 境界は「FETCH 相のサイクル = その命令の開始」なので、参照と比べる RTL の状態は
+        // このサイクルのクロックを打つ前 (= 直前の命令が完了した状態) でなければならない。
+        // 1 フェーズ = 1 M サイクルでは 1 サイクル命令がそのサイクル内で完了するため、
+        // クロック後を読むと 1 命令ずれる。
+        let regsAtBoundary = readRegisters circuit sim
+        let controlAtBoundary = readControl circuit sim
         // 2. 書込 (シリアルの観測を含む) → 割込み受付で IF を下ろす → 読出
         let mutable mem = peripherals.Mem
         if request.IsWrite then
@@ -543,7 +560,12 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
             else
                 sim |> applyWrites c ((bus.Clock, 0UL) :: lowWrites)
         sim <- sLow |> applyWrites c [ bus.Clock, 1UL ]
-        // 4. 命令境界の観測 (posedge 後のバス出力で判定する)
+        // 命令境界の観測。位相機械は 1 フェーズ = 1 M サイクルで、FETCH 相がそのまま
+        // オペコード読み出しを出す (addr/mem_read は組合せ出力)。したがって境界は
+        // 「クロック前に FETCH 相だった」かつ「そのクロック前のバス要求が読み出し」で判定する。
+        // クロック後のバス要求 (next) は次フェーズのものなので、旧 FSM (FETCH → FETCH2 の
+        // 2 相構造) のときだけ偶然一致していた。
+        // 割込みだけは例外で、FETCH 相のクロックで int_ack が立つのでクロック後 (next) を見る。
         let next = readBusRequest circuit sim
         match opts.Trace with
         | Some (fromCycle, toCycle) when cycle >= fromCycle && cycle <= toCycle ->
@@ -564,16 +586,14 @@ let runRom (opts: Options) (circuit: Circuit) (romPath: string) : RunResult =
         let boundary =
             if not wasFetchPhase then None
             elif next.IntAck <> 0uy then Some (InterruptDispatch next.IntAck)
-            elif next.IsRead && not wasCbPrefix then Some (InstructionStart next.Addr)
+            elif request.IsRead && not wasCbPrefix then Some (InstructionStart request.Addr)
             else None
         match boundary with
         | Some (InstructionStart _) -> instructions <- instructions + 1L
         | _ -> ()
         match boundary, lockstep with
         | Some kind, Some ls ->
-            let regs = readRegisters circuit sim
-            let control = readControl circuit sim
-            lockstep <- Some (lockstepBoundary opts.MaxMismatches cycle kind regs control ioReadsSinceBoundary peripherals scratchPpu scratchApu ls)
+            lockstep <- Some (lockstepBoundary opts.MaxMismatches cycle kind regsAtBoundary controlAtBoundary ioReadsSinceBoundary peripherals scratchPpu scratchApu ls)
         | _ -> ()
         if boundary.IsSome then ioReadsSinceBoundary <- Map.empty
         // 5. 周辺回路を 4 T サイクル進める

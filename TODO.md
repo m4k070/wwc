@@ -51,7 +51,7 @@ cargo test は meta v3 対応で 49。GPU golden はこのブランチで再計�
   (原因未確定。gbfs のフレームバッファの残りと見ているが未検証)。
 - コスト: この 1 本は **46.6 ms/サイクル** (他 34 本は 16.5 ms)。メモリ読み出し経路が長いため。
   6000 周期で 4m30s。GPU スイートの glob から外してある (`bootrom_minimal.json`、1 本 +4.5 分のため)。
-- RTL は仕様より **1 命令あたり約 +1 サイクル**かかる (例: `ld a,[bc]` 3 / `and n` 3 / `jr nz` 3)。
+- ~~RTL は仕様より **1 命令あたり約 +1 サイクル**かかる~~ **[解決済み 2026-10-04]** (プリフェッチ構造化で解消)。
   ROM 実測 57 サイクル/ソースバイト。既知の「サイクル精度」課題の実データ。
 
 - **tiled エンジンの世代あたりコストを削る (残課題 1 (e))** (2026-09-29、ブランチ `gpu-block-gens`):
@@ -195,9 +195,10 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
    (小規模回路では行優先で十分なため、回路規模で自動判定する案もある)。ピッチも同じ: `pitchFor` は >3000 で
    16x12 を返すが、sm83_full は 14x12 で完走する (12x10 は輻輳失敗)。大規模の基本ピッチを 14x12 に下げるか、
    行優先のときだけ 16x12 に上げるかは要検討 (2026-09-28)。
-3. **RTL のサイクル精度**: sm83_full は内部処理の M サイクルを持たない (例: `JP nn` は実機 4 M サイクル、
-   RTL は 3 バスサイクル。平均すると約 2.9 周期/命令)。直すなら blargg `instr_timing` ROM が物差しになる
-   (`/home/makoto/work/gb-test-roms/MANIFEST.md` の「タイミングを試す」区分)
+3. ~~**RTL のサイクル精度**~~ **[解決済み 2026-10-04]**: プリフェッチ構造に作り替え、実機と同じ
+   M サイクル数になった。blargg `instr_timing` **PASS**、opcode 表 221/223 (実質 223/223)、
+   lockstep (レジスタ + 累積 T) 食い違い 0、`DiffTestGbfs` 全 498 命令一致、GPU 全周期照合 37/37。
+   詳細は worklog の 2026-10-04 セクション。**タイミングを触ったらまずロックステップの累積 T 比較を回すこと**
 4. **mooneye acceptance の命令系を RTL で流す**: `daa`, `bits/reg_f`, `ei_sequence`, `ei_timing`
    (EI の 1 命令遅延), `rapid_di_ei`, `halt_ime0_ei`, `interrupts/ie_push`, `if_ie_registers` など。
    対象の一覧は `/home/makoto/work/gb-test-roms/MANIFEST.md` の「命令の意味を試す」区分
