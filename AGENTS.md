@@ -182,6 +182,28 @@ NetlistSimTest / TestbenchTest (sm83_full 仕様テスト含む) / GatePlacement
   sm83_full は K=16 で配線し直してあり (15.0 分、rip-up 80)、クロック最大到達は 1,478 / 1,494 → 186 / 196 世代
   (ピッチ 14x12 のとき。20x14 では 284 / 282 世代)。
 
+## メモリモデルの LY (0xFF44) と M サイクル
+
+CA のメモリモデルは **PPU を持たない**。LY と VRAM / I/O レジスタだけを持ち、STAT は無い
+（STAT をポーリングする ROM は CA 上で永久に待つ）。LY は読み出し専用で、**CA と F# が同じ式で
+作る**: `wgpu-runner/src/memory.rs` の `set_lcd_y` と `src/Testbench.fs` の `setLcdY` がどちらも
+`cycle / 114`（1 フレーム = 154 行 × 114 = 17,556 で折り返す）。
+
+program JSON の `cycle` は **M サイクル**（1 バスアクセス = 1 cycle = 4 T）。実機の 1 ラインは
+456 T = 114 M なので、T サイクルの定数（456 / 70224）で割ると **LY が実機の 4 倍遅く進む**。
+2026-10-09 までこのバグがあり、LY を見て待つ ROM が gbfs の PPU と噛み合わなかった
+（実測: 6,000 cycle で LY=13、修正後は 50）。LY の値は golden の `dataIn` に出るので、
+**golden は LY に依存する ROM では作り直しが要る**。
+
+LY に依存するもの。定数を変えるときは全部を直す:
+
+- `bootrom/minimal.asm`（LY を読んで RAM $C000 に記録）と `routed/bootrom_minimal.golden.json`
+- Bootix（`routed/bootrom_bootix.json`）— `DoTimeout` が LY==144 を待つ。所要時間の実測値は
+  `bootrom/bootix/README.md`（LCDC 初期化 cycle 75,119 など）と TODO.md にある
+- `src/TestbenchTests.fs` の LY テスト、`src/RenderBootRom.fsx` のフレーム数
+- `demo/scroll.asm`（走査線ごとに SCX / BGP を書き換える）。固定ディレイで近似してはいけない。
+  ループの周期を 114 M に合わせないと位相がずれ、実測で 129 行のフレームに 2 箇所ずれが出た
+
 ## External dependency
 
 - **Yosys** — Verilog を JSON に合成するために必要。Not bundled — `nix develop` 経由で使う。
