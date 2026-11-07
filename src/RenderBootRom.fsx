@@ -159,7 +159,7 @@ let exitCode =
                             // gbfs の PPU は Decoder と同じ粒度 (4 T サイクル) で進める必要がある。
                             // まとめて 1 フレーム分渡すとモード遷移が 1 回しか起きず描画されない。
                             let mutable ppu = state.Ppu
-                            for _ in 1 .. 2 * 70224 / 4 do
+                            for _ in 1 .. 2 * 17556 / 4 do
                                 let p, m = Ppu.step 4 ppu mem
                                 ppu <- p
                                 mem <- m

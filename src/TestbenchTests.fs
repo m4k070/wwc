@@ -60,9 +60,9 @@ module TestbenchTest =
            readMemory io 0xFF40us = 0x91uy && readMemory io 0xFF42us = 0x64uy
            && readMemory (writeMemory io 0xFF44us 0x99uy) 0xFF44us = 0uy
            && readMemory m 0xFF40us = 0xFFuy)
-          "TB: LY advances with the M-cycle counter (456 cycles/line, 70224 cycles/frame)",
+          "TB: LY advances with the M-cycle counter (114 cycles/line, 17556 cycles/frame)",
           (let ly c = readMemory (setLcdY m c) 0xFF44us
-           ly 0 = 0uy && ly 455 = 0uy && ly 456 = 1uy && ly 70223 = 153uy && ly 70224 = 0uy && ly 70380 = 0uy) ]
+           ly 0 = 0uy && ly 113 = 0uy && ly 114 = 1uy && ly 17555 = 153uy && ly 17556 = 0uy && ly 17600 = 0uy) ]
 
     let private parseTests () : (string * bool) list =
         let smokePath = repoPath "routed/sm83_subset_smoke.json"
