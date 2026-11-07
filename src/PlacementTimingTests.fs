@@ -223,7 +223,10 @@ module PlacementTimingTest =
                     let chosen = a.Rounds |> List.find (fun r -> r.Round = a.BestRound)
                     "PLACE-TIMING: chosen round cycle <= initial (round 0)",
                     r0.Round = 0 && a.Rounds.Length = unitTimingConfig.Rounds + 1 && chosen.Summary.Cycle <= r0.Summary.Cycle
-               | Error _ -> "PLACE-TIMING: chosen round cycle <= initial (round 0)", false) ]
+               | Error _ -> "PLACE-TIMING: chosen round cycle <= initial (round 0)", false)
+              // 境界: アーク集合が空なら、重みの指定に関わらずコストは 0
+              "PLACE-TIMING: empty arc set costs 0",
+              totalWeightedCost grid [||] 0.25 Uniform initial = 0L ]
 
     let private singleEdgeRejected (nl: Netlist) : (string * bool) list =
         let strategy = TimingDriven ({ unitAnnealConfig with Moves = 1_000 }, { unitTimingConfig with Rounds = 1; MovesPerRound = 1_000 })
