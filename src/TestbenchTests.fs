@@ -91,16 +91,43 @@ module TestbenchTest =
             match parseProgram "/tmp/p/bad.json" """{"meta":"m","init":"i","memory":{"rom":"r"},"cycles":1,"expectMem":{"C000":1}}""" with
             | Error (ProgramParseFailed (_, reason)) -> reason.Contains "C000"
             | _ -> false
+        let badRamBase =
+            match parseProgram "/tmp/p/rambad.json" """{"meta":"m","init":"i","memory":{"rom":"r","ramBase":65536},"cycles":1}""" with
+            | Error (ProgramParseFailed (_, reason)) -> reason.Contains "ramBase"
+            | _ -> false
+        let badRamWindow =
+            match parseProgram "/tmp/p/ramwin.json" """{"meta":"m","init":"i","memory":{"rom":"r","ramBase":65280,"ramSize":8192},"cycles":1}""" with
+            | Error (ProgramParseFailed (_, reason)) -> reason.Contains "ramBase"
+            | _ -> false
         [ "TB: parses the sm83_subset smoke program (paths resolved from the program dir)", smokeOk
           "TB: parses defaults, base64 ROM, and decimal/hex expectMem", inlineOk
-          "TB: rejects an expectMem address without 0x prefix (same as runner)", badAddress ]
+          "TB: rejects an expectMem address without 0x prefix (same as runner)", badAddress
+          "TB: rejects ramBase outside 16 bits (matches the runner)", badRamBase
+          "TB: rejects a RAM window that runs past 0xFFFF (matches the runner)", badRamWindow ]
 
     let private busTests () : (string * bool) list =
-        match loadCircuit "counter4" with
-        | Error msg -> [ sprintf "TB: counter4 loads (%s)" msg, false ]
-        | Ok (_, ports) ->
-            [ "TB: resolveBus reports the first missing bus port",
-              (match resolveBus ports with Error (MissingBusPort "rst") -> true | _ -> false) ]
+        let missingPort =
+            match loadCircuit "counter4" with
+            | Error _ -> false
+            | Ok (_, ports) ->
+                match resolveBus ports with
+                | Error (MissingBusPort "rst") -> true
+                | _ -> false
+        // 65bit の出力ポートを足す。uint64 に詰める経路なので計画段階で拒否されるはず。
+        // バスが揃っている回路は sm83_subset だけ (counter4/sm83_min/sm83_p0 はバス不足)。
+        let widePortRejected =
+            match loadCircuit "sm83_subset" with
+            | Error _ -> false
+            | Ok (c, ports) ->
+                match resolveBus ports with
+                | Error _ -> false
+                | Ok bus ->
+                    let wide = { Name = "wide"; Direction = OutputPort; Bits = List.replicate 65 (ConstBit false) }
+                    match run c (wide :: ports) bus (createMemory [||] defaultMemoryConfig) 1 1 with
+                    | Error (SimulationFailed (PortTooWide (name, bits))) -> name = "wide" && bits = 65
+                    | _ -> false
+        [ "TB: resolveBus reports the first missing bus port", missingPort
+          "TB: rejects an output port wider than 64 bits before simulating", widePortRejected ]
 
     let private subsetSmokeTest () : (string * bool) list =
         // GPU smoke (2026-09-16, RTX 3060) のトレースのうち、golden と同じ時点で取った値:

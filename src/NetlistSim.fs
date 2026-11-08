@@ -31,6 +31,7 @@ module NetlistSim =
         | CombinationalLoop of nets: NetId list
         | NotPrimaryInput of net: NetId
         | UndrivenOutput of port: string * bitIndex: int * net: NetId
+        | PortTooWide of port: string * bits: int
 
     let describeSimError (e: SimError) : string =
         let netNo (NetId n) = n
@@ -45,6 +46,7 @@ module NetlistSim =
             sprintf "組合せ回路に閉路がある (%d nets: %s%s)" nets.Length shown (if nets.Length > 10 then ", …" else "")
         | NotPrimaryInput net -> sprintf "net %d は外部入力ではないので値を書けない" (netNo net)
         | UndrivenOutput (port, i, net) -> sprintf "出力 %s[%d] (net %d) に駆動元がない" port i (netNo net)
+        | PortTooWide (port, bits) -> sprintf "出力 %s の幅が %d bit (uint64 に詰めるので 64 bit まで)" port bits
 
     /// 組合せゲート (NAND/NOT)。インデックスは CompiledNetlist.NetIndex の密な番号。
     /// struct + 平坦配列にして、ゲート配列も入力配列も連続配置にする。入力は
