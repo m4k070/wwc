@@ -218,6 +218,12 @@ SM83 (Game Boy CPU) を WireLevel で E2E コンパイル・検証している�
 | sm83_subset | 3,553 | ✅ 配線完走 (20x14、行優先、111.6 分、skew 46)。CA がネットリストと全周期一致 (367 周期) |
 | sm83_full | 10,859 combinational + 181 DFF (2 相化で DFF 362、gateCount 11,221) | ✅ 配線完走 (**16x12**、タイミング駆動アニーリング配置 + 2 相クロック + クロックピン 16 本、14.4 分、rip-up 0、2026-11-08)。2026-09-28〜11-08 は 14x12 で完走していたが、`mem_write_r` の修正でネットリストが +172 cells になり 14x12 は輻輳失敗 (530 rip-ups) するようになったため 16x12 に移した — GPU 実行時間は 34 本で 109 秒のまま変わっていない。全命令セット (通常命令は STOP を除く + CB prefix 256) + 割込み (irq / int_ack、HALT バグ含む)。gbfs の CPU との差分テストで通常命令+CB 命令の全 498 通り × 4 パターン一致 (NetlistSim)。RTL の正しさは blargg `cpu_instrs` 11/11、RTL≡CA は GPU 全周期照合 37/37 で確認済み |
 
+> **既知の逸脱**: 未定義オペコード 11 個 (`$D3 $DB $DD $E3 $E4 $EB $EC $ED $F4 $FC $FD`) は
+> 1 M サイクルの **NOP** として実行される。実機の SM83 はこの 11 個で**ハードロック**する
+> (Pan Docs "CPU Instruction Set")。参照モデルの gbfs も同じ NOP を返すため `DiffTestGbfs` では
+> 検出できず、忠実性を上げるには RTL と gbfs を同時に変える必要がある。正当な ROM はこの 11 個を
+> 踏まないので、ブート ROM / デモの経路には影響しない。
+
 ### コンパイル
 
 ```bash

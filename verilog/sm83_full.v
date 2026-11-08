@@ -776,6 +776,12 @@ module sm83_full (
                     end else if ((op & 8'hC0) == 8'h80) begin
                         phase <= PHASE_FETCH;
                     end else begin
+                        // 未定義オペコード 11 個 ($D3 $DB $DD $E3 $E4 $EB $EC $ED $F4 $FC $FD) は
+                        // ここに落ちて「1 M サイクルで状態を変えない」= NOP 相当になる。
+                        // 実機の SM83 はこの 11 個でハードロックする (Pan Docs "CPU Instruction Set") が、
+                        // 参照モデル gbfs も Decoder.fs の `| _ -> (advancePc 1 state, 4)` で同じ NOP を
+                        // 返すため、DiffTestGbfs では差が出ない。忠実性を上げるなら RTL と gbfs を
+                        // 同時に変える (片側だけだと差分テストの前提が崩れる)。AGENTS.md 参照。
                         phase <= PHASE_FETCH;
                     end
                 end
