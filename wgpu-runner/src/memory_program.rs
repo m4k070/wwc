@@ -216,10 +216,53 @@ fn interrupt_ports(meta: &RoutedMeta) -> Result<Option<(Vec<Xy>, Vec<OutputProbe
     }
 }
 
+/// プログラム JSON の memory セクションから RAM の窓を作る。
+/// ramBase は u32 で受けて範囲を検査してから u16 に落とす。以前は `as u16` で切り詰めて
+/// いたため、ramBase=0x10000 が 0x0000 に回り込み、RAM 窓が ROM 領域を覆って
+/// 「ROM への書込は無視」の規則が崩れていた (F# 側は int のまま保持するので食い違う)。
+fn memory_config(mem: &MemorySection) -> Result<MemoryConfig> {
+    let ram_base_raw = mem.ram_base.unwrap_or(0xC000);
+    let ram_size = mem.ram_size.unwrap_or(8192);
+    anyhow::ensure!(
+        ram_base_raw <= 0xFFFF,
+        "ramBase must fit in 16 bits (got {ram_base_raw:#X})"
+    );
+    anyhow::ensure!(
+        ram_base_raw as usize + ram_size <= 0x1_0000,
+        "ramBase + ramSize exceeds the 16-bit address space ({ram_base_raw:#X} + {ram_size})"
+    );
+    Ok(MemoryConfig {
+        ram_base: ram_base_raw as u16,
+        ram_size,
+    })
+}
+
+/// ポート幅が u64 に収まるかを検査する。read_bus / observable_mask / read_reg は `1u64 << i`
+/// で組み立てるので、64 を超えるとシフトが折り返して (i mod 64) 同じビットに重なり、黙って
+/// 値が壊れる。読み出し側の前提をここで守る。
+fn validate_port_widths(meta: &RoutedMeta) -> Result<()> {
+    for (name, probes) in &meta.outputs {
+        anyhow::ensure!(
+            probes.len() <= 64,
+            "output '{name}' has {} probes — the runner reads ports as u64 (max 64 bits)",
+            probes.len()
+        );
+    }
+    for (name, pins) in &meta.inputs {
+        anyhow::ensure!(
+            pins.len() <= 64,
+            "input '{name}' has {} bits — the runner writes ports as u64 (max 64 bits)",
+            pins.len()
+        );
+    }
+    Ok(())
+}
+
 /// meta の入力座標 (と 2 相のクロックピン) が Pin セル、出力 probe が Pin/Nand/Dff セルを指しているか。
 /// meta と .bin の取り違えを GPU 実行前に検出する。
 fn validate_meta_against_grid(meta: &RoutedMeta, cells: &[u8]) -> Result<()> {
     let (w, h) = (meta.width, meta.height);
+    validate_port_widths(meta)?;
     for (name, c) in meta.driven_pins() {
         anyhow::ensure!(c.x < w && c.y < h, "{name} at ({},{}) out of range", c.x, c.y);
         let k = cell_kind(cells, w, &c);
@@ -344,7 +387,7 @@ struct BusPorts {
 
 impl BusPorts {
     fn from_meta(meta: &RoutedMeta) -> Result<Self> {
-        Ok(BusPorts {
+        let bus = BusPorts {
             rst: required_input(meta, "rst")?.clone(),
             data_in: required_input(meta, "data_in")?.clone(),
             addr: required_output(meta, "addr")?.clone(),
@@ -352,7 +395,22 @@ impl BusPorts {
             mem_read: required_output(meta, "mem_read")?.clone(),
             mem_write: required_output(meta, "mem_write")?.clone(),
             interrupts: interrupt_ports(meta)?,
-        })
+        };
+        // F# 側 (src/Testbench.fs の resolveBus) と同じ幅を要求する。ここを緩めると
+        // 同じ program JSON で F# は停止し runner は別挙動で走る、という食い違いが起きる。
+        // 特に mem_read/mem_write は read_bus(..) > 0 で判定しているので、2 ビット以上を
+        // 許すと「F# は = 1 で偽、runner は真」になり得る。
+        for (name, bits, want) in [
+            ("rst", bus.rst.len(), 1usize),
+            ("data_in", bus.data_in.len(), 8),
+            ("addr", bus.addr.len(), 16),
+            ("data_out", bus.data_out.len(), 8),
+            ("mem_read", bus.mem_read.len(), 1),
+            ("mem_write", bus.mem_write.len(), 1),
+        ] {
+            anyhow::ensure!(bits == want, "meta: bus port '{name}' must be {want} bit(s) (got {bits})");
+        }
+        Ok(bus)
     }
 }
 
@@ -523,10 +581,7 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
         None => None,
     };
 
-    let cfg = MemoryConfig {
-        ram_base: prog.memory.ram_base.unwrap_or(0xC000) as u16,
-        ram_size: prog.memory.ram_size.unwrap_or(8192),
-    };
+    let cfg = memory_config(&prog.memory)?;
     let mut mem = match boot_rom {
         Some(boot) => Memory::with_boot_rom(rom, boot, cfg),
         None => Memory::new(rom, cfg),
@@ -852,6 +907,87 @@ mod tests {
         RoutedMeta::from_json(&format!(
             r#"{{"formatVersion":1,"circuit":"c","width":1,"height":1,"inputs":{{{inputs}}},"outputs":{{{outputs}}}}}"#
         )).unwrap()
+    }
+
+    fn xy_list(n: usize) -> String {
+        (0..n)
+            .map(|i| format!(r#"{{"x":{},"y":0}}"#, i % 8))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// F# 側 (Testbench.resolveBus) と同じ幅を要求する。緩めると F# は止まり runner は走る。
+    #[test]
+    fn rejects_bus_ports_with_the_wrong_width() {
+        let wide_addr = meta_with_ports(
+            &format!(r#""rst":[{}],"data_in":[{}]"#, xy_list(1), xy_list(8)),
+            &format!(
+                r#""addr":[{}],"data_out":[{}],"mem_read":[{}],"mem_write":[{}]"#,
+                xy_list(8),
+                xy_list(8),
+                xy_list(1),
+                xy_list(1)
+            ),
+        );
+        let err = match BusPorts::from_meta(&wide_addr) {
+            Ok(_) => panic!("expected a bus width error for addr"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("'addr'") && err.contains("16"), "{err}");
+
+        let two_bit_mem_read = meta_with_ports(
+            &format!(r#""rst":[{}],"data_in":[{}]"#, xy_list(1), xy_list(8)),
+            &format!(
+                r#""addr":[{}],"data_out":[{}],"mem_read":[{}],"mem_write":[{}]"#,
+                xy_list(16),
+                xy_list(8),
+                xy_list(2),
+                xy_list(1)
+            ),
+        );
+        let err = match BusPorts::from_meta(&two_bit_mem_read) {
+            Ok(_) => panic!("expected a bus width error for mem_read"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("mem_read") && err.contains('1'), "{err}");
+    }
+
+    /// 65 ビット以上のポートは読み出し側で `1u64 << i` が折り返して壊れるので弾く。
+    #[test]
+    fn rejects_ports_wider_than_u64() {
+        let wide = meta_with_ports(
+            r#""a":[{"x":0,"y":0}]"#,
+            &format!(r#""wide":[{}]"#, xy_list(65)),
+        );
+        let err = validate_port_widths(&wide).unwrap_err().to_string();
+        assert!(err.contains("wide") && err.contains("65"), "{err}");
+
+        let at_limit = meta_with_ports(
+            r#""a":[{"x":0,"y":0}]"#,
+            &format!(r#""w64":[{}]"#, xy_list(64)),
+        );
+        assert!(validate_port_widths(&at_limit).is_ok());
+    }
+
+    /// ramBase は 16 bit に収まり、ramBase + ramSize が 0x10000 を超えないこと。
+    #[test]
+    fn memory_config_rejects_out_of_range_ram_base() {
+        let defaults: MemorySection = serde_json::from_str(r#"{"rom":"r"}"#).unwrap();
+        let cfg = memory_config(&defaults).unwrap();
+        assert_eq!((cfg.ram_base, cfg.ram_size), (0xC000, 8192));
+
+        let too_high: MemorySection = serde_json::from_str(r#"{"rom":"r","ramBase":65536}"#).unwrap();
+        let err = memory_config(&too_high).unwrap_err().to_string();
+        assert!(err.contains("16 bits"), "{err}");
+
+        let past_end: MemorySection =
+            serde_json::from_str(r#"{"rom":"r","ramBase":65280,"ramSize":8192}"#).unwrap();
+        let err = memory_config(&past_end).unwrap_err().to_string();
+        assert!(err.contains("address space"), "{err}");
+
+        let fits: MemorySection =
+            serde_json::from_str(r#"{"rom":"r","ramBase":61440,"ramSize":4096}"#).unwrap();
+        assert_eq!(memory_config(&fits).unwrap().ram_base, 0xF000);
     }
 
     #[test]

@@ -275,14 +275,22 @@ module Testbench =
                     |> Result.mapError fail
             expectMem
             |> Result.map (fun expectMem ->
+                // runner (memory_program.rs) と同じ制約をここでも課す。ramBase が 16 bit を
+                // 超えると RAM 窓がアドレス空間の外へ出る (Rust 側は以前 `as u16` で
+                // 切り詰めていたので、同じ JSON で F# と runner の挙動が食い違っていた)。
+                let ramBase = intOr memory "ramBase" defaultMemoryConfig.RamBase
+                let ramSize = intOr memory "ramSize" defaultMemoryConfig.RamSize
+                if ramBase < 0 || ramBase > 0xFFFF then
+                    failwithf "memory.ramBase は 0x0000-0xFFFF の範囲である必要がある (0x%X)" ramBase
+                if ramSize < 0 || ramBase + ramSize > 0x1_0000 then
+                    failwithf "memory.ramBase + ramSize が 16 bit アドレス空間を超える (0x%X + %d)" ramBase ramSize
                 ({ ProgramName = name
                    Circuit = tryProperty root "circuit" |> Option.map (fun v -> v.GetString ())
                    MetaPath = resolve (root.GetProperty("meta").GetString ())
                    InitPath = resolve (root.GetProperty("init").GetString ())
                    Rom = rom
                    BootRom = bootRom
-                   Memory = { RamBase = intOr memory "ramBase" defaultMemoryConfig.RamBase
-                              RamSize = intOr memory "ramSize" defaultMemoryConfig.RamSize }
+                   Memory = { RamBase = ramBase; RamSize = ramSize }
                    RstPulses = intOr root "rstPulses" 2
                    Cycles = root.GetProperty("cycles").GetInt32 ()
                    Expect = expect
@@ -369,16 +377,21 @@ module Testbench =
           Bits: int[] }
 
     let private planPort (c: CompiledNetlist) (p: YosysPortBits) : Result<PortPlan, SimError> =
-        p.Bits
-        |> List.mapi (fun i bit ->
-            match bit with
-            | ConstBit b -> Ok (if b then -2 else -1)
-            | NetBit net ->
-                match Map.tryFind net c.NetIndex with
-                | Some idx -> Ok idx
-                | None -> Error (UndrivenOutput (p.Name, i, net)))
-        |> traverse id
-        |> Result.map (fun bits -> { PlanName = p.Name; Bits = List.toArray bits })
+        // ポート値は uint64 に詰める。幅が 65 以上だと `1UL <<< i` のシフト量が .NET 側で
+        // ビット幅に丸められ (i mod 64)、別ビットに重なって黙って壊れる。
+        if p.Bits.Length > 64 then
+            Error (PortTooWide (p.Name, p.Bits.Length))
+        else
+            p.Bits
+            |> List.mapi (fun i bit ->
+                match bit with
+                | ConstBit b -> Ok (if b then -2 else -1)
+                | NetBit net ->
+                    match Map.tryFind net c.NetIndex with
+                    | Some idx -> Ok idx
+                    | None -> Error (UndrivenOutput (p.Name, i, net)))
+            |> traverse id
+            |> Result.map (fun bits -> { PlanName = p.Name; Bits = List.toArray bits })
 
     /// 解決済みポートの値を読む (定数ビット込み、LSB first)。ホットパスなので割り当てしない。
     let private readPlanned (s: SimState) (plan: PortPlan) : uint64 =
