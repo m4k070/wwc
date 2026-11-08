@@ -102,14 +102,16 @@ module sm83_full (
     reg [15:0] addr_r;
     reg        mem_read_r;
 
-    // mem_write が立っているフェーズは、前のフェーズが用意した書き込み先 (addr_r) を
-    // そのまま出す (書き込みは「次フェーズで実行される」設計のため上書きしてはいけない)。
-    assign addr     = mem_write_r ? addr_r
-                    : (phase == PHASE_FETCH) ? (halt_bug ? pc + 1 : pc)
+    // 書込は「次フェーズで実行される」設計なので、書き込み先 (addr_r) を保つ相
+    // (PHASE_MEM_WRITE / MEM_WRITE2 / CALL_PUSH / INT_PUSH2 / WRITE_NN2 / INTERNAL2) では
+    // 下の mux のフォールバックが addr_r / mem_read_r を選ぶ。
+    // 以前は mem_write_r という**未宣言の識別子**で mux を gate していたが、この信号は
+    // 存在せず合成後のネットリストでは定数 x になっていた (verilog/sm83_full.json の
+    // mem_write_r は bits=['x'])。書込を発行する相はすべて適用相へ遷移するので gate は不要。
+    assign addr     = (phase == PHASE_FETCH) ? (halt_bug ? pc + 1 : pc)
                     : (phase == PHASE_IMM || phase == PHASE_IMM2) ? pc
                     : addr_r;
-    assign mem_read = mem_write_r ? 1'b0
-                    : (phase == PHASE_FETCH || phase == PHASE_IMM || phase == PHASE_IMM2) ? 1'b1
+    assign mem_read = (phase == PHASE_FETCH || phase == PHASE_IMM || phase == PHASE_IMM2) ? 1'b1
                     : mem_read_r;
 
     // ----------------------------------------------------------------
@@ -140,35 +142,6 @@ module sm83_full (
                 2: read_rr = {h, l};
                 3: read_rr = sp;
                 default: read_rr = 16'h0000;
-            endcase
-        end
-    endfunction
-
-    function [15:0] read_stk;
-        input [1:0] idx;
-        begin
-            case (idx)
-                0: read_stk = {b, c};
-                1: read_stk = {d, e};
-                2: read_stk = {h, l};
-                3: read_stk = {a, f & 8'hF0};
-                default: read_stk = 16'h0000;
-            endcase
-        end
-    endfunction
-
-    // ----------------------------------------------------------------
-    // 条件チェック
-    // ----------------------------------------------------------------
-    function check_cond;
-        input [1:0] cc;
-        begin
-            case (cc)
-                0: check_cond = (f[7] == 0);
-                1: check_cond = (f[7] == 1);
-                2: check_cond = (f[4] == 0);
-                3: check_cond = (f[4] == 1);
-                default: check_cond = 0;
             endcase
         end
     endfunction
@@ -231,14 +204,6 @@ module sm83_full (
     // 命令の次の番地。FETCH2 / IMM / IMM2 では pc <= pc + 1 と同じ周期に使うため、
     // 戻り番地として積む値は pc ではなく pc + 1
     wire [15:0] pc_plus1 = pc + 16'd1;
-
-    // 16bit ADD HL, rr
-    wire [15:0] add16_r;
-    wire        add16_h, add16_c;
-    assign add16_r = {h, l} + read_rr(/* will be set by mux */ 0);
-    // ADD SP, e8
-    wire [15:0] sp_e8;
-    wire        sp_e8_h, sp_e8_c;
 
     // ----------------------------------------------------------------
     // 8bit 回転/シフト (CB 命令用)
@@ -796,11 +761,13 @@ module sm83_full (
                             addr_r <= {h, l}; mem_read_r <= 1;
                             phase <= PHASE_MEM_DATA;
                         end else if (op[5:3] == 3'b110) begin
-                            // LD (HL), r
+                            // LD (HL), r — 0x70..0x77 は上の明示ケースで処理済み。ここへは落ちないが、
+                            // 落ちた場合に備えて書込は適用相 (PHASE_MEM_WRITE) へ遷移させる
+                            // (PHASE_FETCH へ戻すと mov の書込が消える)
                             addr_r <= {h, l};
                             data_out <= read_r8(op[2:0]);
                             mem_write <= 1;
-                            phase <= PHASE_FETCH;
+                            phase <= PHASE_MEM_WRITE;
                         end else begin
                             // LD r, r'
                             ld_rr(op[5:3], read_r8(op[2:0]));

@@ -2,7 +2,7 @@
   "format": "wwc-golden/1",
   "circuit": "sm83_full",
   "program": "bootrom_bootix",
-  "sourceSha256": "08f46c87b7cb86c076dc5545b89692abaf840b2643c634d7d30f6ff9471ce03e",
+  "sourceSha256": "8471945cc0582b4920fdb24d6d426555eb1ed2fc41c4398799f762fa18fa5afe",
   "romSha256": "d9b1afd77446ca2edd3d09c4bb446968d12f59f0db98c559424b7a57d587732e",
   "bootRomSha256": "c313435280dda8ccfae0786c7159aab791a00930605101c647794f64bfa17b5e",
   "rstPulses": 2,

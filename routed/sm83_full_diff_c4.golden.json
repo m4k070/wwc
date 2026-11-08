@@ -2,7 +2,7 @@
   "format": "wwc-golden/1",
   "circuit": "sm83_full",
   "program": "sm83_full_diff_c4",
-  "sourceSha256": "08f46c87b7cb86c076dc5545b89692abaf840b2643c634d7d30f6ff9471ce03e",
+  "sourceSha256": "8471945cc0582b4920fdb24d6d426555eb1ed2fc41c4398799f762fa18fa5afe",
   "romSha256": "85ff9d0924b394851538c8150adf70bae1f6f65c057ce7dd562394e73a2871a0",
   "rstPulses": 2,
   "cycles": [

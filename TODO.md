@@ -74,6 +74,10 @@ cargo test は meta v3 対応で 49。GPU golden はこのブランチで再計�
   (4 本の部分計測)、クロック最大到達は 284 / 282 → **186 / 196 世代**。16x12 も完走 (133.0 秒)、
   12x10 は輻輳失敗 (18,041/18,691 で探索上限)。検証は AnalyzeHold (2 相の不変条件 成立) /
   GPU 全周期照合 37/37 / `run-tests.sh` 24/24 / F# 421/421 / cargo 49/49 / LoadRouted 整合性・鮮度 OK。
+  **2026-11-08 追記**: `mem_write_r`（未宣言の識別子で bus mux を gate していた）修正でネットリストが
+  10,964 → 11,136 cells (+172) になり、14x12 は 530 rip-ups の末に `RoutingCongestion (NetId 5905)` で
+  配線できなくなった。現在は **16x12 で完走** (18,862 終端、rip-up 0、14.4 分)。34 本の memory-test は
+  14x12 (main) でも 16x12 でも 109 秒で、実時間の差は出ていない (両方 2026-11-08 に vega で実測)。
 
 - **クロックピンの複数化 (issue #7 (b))** (2026-09-28、ブランチ `multi-clock-pins`):
   clk_a / clk_b を各 16 本に分けて配線し直した (`--place anneal-timing --clocking two-phase --clock-pins 16`、
