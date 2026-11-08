@@ -134,13 +134,18 @@ type Evaluation =
 /// クロックピンは常に 1 本 (分割なし、issue #7 (b) は AnalyzePlacementTiming.fsx では未対応。
 /// ExportRouted.fsx --clock-pins K で作った配線結果は --routed の突き合わせ対象にしない)。
 let private resolvePinsOf (grid: GatePlacement.SlotGrid) (circuit: PipelineWL.PreparedCircuit) (x: GatePlacement.Assignment) =
-    let placedX, pinsX, _ = PipelineWL.placeCircuitFromAssignment grid circuit x 1
-    let placedArr = List.toArray placedX
-    pinsX, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs)
+    PipelineWL.placeCircuitFromAssignment grid circuit x 1
+    |> Result.mapError (fun e -> PinPlacementFailed (sprintf "%A" e))
+    |> Result.map (fun (placedX, pinsX, _) ->
+        let placedArr = List.toArray placedX
+        pinsX, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs))
 
 let evaluatePlacement (grid: GatePlacement.SlotGrid) (circuit: PipelineWL.PreparedCircuit) (net: TimingNetwork) (a: GatePlacement.Assignment)
     : Result<Evaluation, string> =
-    let placed, pins, _ = PipelineWL.placeCircuitFromAssignment grid circuit a 1
+    let placed, pins, _ =
+        match PipelineWL.placeCircuitFromAssignment grid circuit a 1 with
+        | Ok v -> v
+        | Error e -> failwithf "placeCircuitFromAssignment: %A" e
     let coordOf (g: int) = GatePlacement.slotCoord grid a.[g]
     evaluate defaultTimingModel grid net (resolvePinsOf grid circuit) a
     |> Result.mapError describePlacementTimingError
@@ -180,7 +185,10 @@ let compareWithRouted
         | RoutedArtifact.TwoPhaseClocking (_, a, b) when a.Length <> 1 || b.Length <> 1 ->
             Error (sprintf "配線結果のクロックピンが複数本 (clk_a %d 本 / clk_b %d 本) — --routed の突き合わせは k=1 のみ対応 (issue #7 (b))" a.Length b.Length)
         | RoutedArtifact.TwoPhaseClocking (_, [ clkA ], [ clkB ]) ->
-            let _, pins, _ = PipelineWL.placeCircuitFromAssignment grid prepared a 1
+            let _, pins, _ =
+                match PipelineWL.placeCircuitFromAssignment grid prepared a 1 with
+                | Ok v -> v
+                | Error e -> failwithf "placeCircuitFromAssignment: %A" e
             let placedClkA = Map.find net.ClockA pins
             // meta の座標は正規化座標 (exportGrid が原点を詰める)。クロックピンでずれを求める
             let dx, dy = clkA.X - placedClkA.X, clkA.Y - placedClkA.Y

@@ -185,7 +185,7 @@ module PipelineWL =
         (grid: GatePlacement.SlotGrid)
         (terminals: Coord list)
         (taken: Set<Coord>)
-        : Coord =
+        : Result<Coord, CompileError> =
         let maxDist (c: Coord) =
             terminals |> List.map (fun t -> abs (t.X - c.X) + abs (t.Y - c.Y)) |> List.max
         let (cx, cy), _ = minimaxCenter terminals
@@ -214,7 +214,10 @@ module PipelineWL =
             | [] -> candidatesAt maxRadius   // 最後の手段 (グリッド全域。taken で全滅なら空のまま例外にする)
             | found -> found
         search 3
-        |> List.minBy (fun c -> maxDist c, abs (float c.X - cx) + abs (float c.Y - cy))
+        |> function
+            | [] -> Error (PinSlotExhausted (grid.Columns * grid.Rows, taken.Count))
+            | found ->
+                Ok (found |> List.minBy (fun c -> maxDist c, abs (float c.X - cx) + abs (float c.Y - cy)))
 
     // --- クロックピン分割 (issue #7 (b)) ---------------------------------------
     //
@@ -376,7 +379,7 @@ module PipelineWL =
         (placed: WlPlaced list)
         (clockNets: NetId list)
         (clocking: CircuitClocking)
-        : (NetId * Coord) list =
+        : Result<(NetId * Coord) list, CompileError> =
         let dffs = placed |> List.filter (fun p -> p.Gate.Kind = Dff)
         let drivenBy (clk: NetId) =
             match clocking with
@@ -386,12 +389,13 @@ module PipelineWL =
         let snap (v: int) (pitch: int) (origin: int) =
             origin + ((v - origin) / pitch) * pitch + pitch / 2
         clockNets
-        |> List.fold (fun (acc: (NetId * Coord) list) clk ->
-            match drivenBy clk with
-            | [] -> acc
-            | group ->
-                let taken = acc |> List.map snd |> Set.ofList
-                let pin =
+        |> List.fold (fun (acc: Result<(NetId * Coord) list, CompileError>) clk ->
+            acc
+            |> Result.bind (fun acc ->
+                match drivenBy clk with
+                | [] -> Ok acc
+                | group ->
+                    let taken = acc |> List.map snd |> Set.ofList
                     match clocking with
                     | SingleEdgeClock _ ->
                         let cx = group |> List.averageBy (fun p -> float p.Coord.X) |> int
@@ -399,11 +403,11 @@ module PipelineWL =
                         let centroid = { X = snap cx grid.PitchX grid.Origin.X; Y = snap cy grid.PitchY grid.Origin.Y }
                         let rec freeFrom (c: Coord) =
                             if Set.contains c taken then freeFrom { c with X = c.X + grid.PitchX } else c
-                        freeFrom centroid
+                        Ok (acc @ [ clk, freeFrom centroid ])
                     | TwoPhaseClock _ ->
                         minimaxGapPin grid (group |> List.map (fun p -> toward p.Coord S)) taken
-                acc @ [ clk, pin ])
-            []
+                        |> Result.map (fun pin -> acc @ [ clk, pin ])))
+            (Ok [])
 
     /// クロック以外の外部入力ピン (data_in などビットごと) の座標。2 相のときだけ、
     /// 左端 (X=0) からそのネットの受け手 (ゲート入力終端) 群への L1 ミニマックス中心へ移す
@@ -417,21 +421,24 @@ module PipelineWL =
         (clocking: CircuitClocking)
         (nl: Netlist)
         (basePins: Map<NetId, Coord>)
-        : Map<NetId, Coord> =
+        : Result<Map<NetId, Coord>, CompileError> =
         match clocking with
-        | SingleEdgeClock _ -> basePins
+        | SingleEdgeClock _ -> Ok basePins
         | TwoPhaseClock _ ->
             let clockNets = clockNetsOf clocking |> Set.ofList
             let terminalsByNet = externalInputTerminals placed
             nl.PrimaryInputs
             |> List.filter (fun netId -> not (Set.contains netId clockNets))
-            |> List.fold (fun (acc: Map<NetId, Coord>) netId ->
-                match Map.tryFind netId terminalsByNet with
-                | None | Some [] -> acc  // 受け手が無い (未使用) 入力は左端のまま
-                | Some terminals ->
-                    let taken = acc |> Map.toList |> List.map snd |> Set.ofList
-                    Map.add netId (minimaxGapPin grid terminals taken) acc)
-                basePins
+            |> List.fold (fun (acc: Result<Map<NetId, Coord>, CompileError>) netId ->
+                acc
+                |> Result.bind (fun acc ->
+                    match Map.tryFind netId terminalsByNet with
+                    | None | Some [] -> Ok acc  // 受け手が無い (未使用) 入力は左端のまま
+                    | Some terminals ->
+                        let taken = acc |> Map.toList |> List.map snd |> Set.ofList
+                        minimaxGapPin grid terminals taken
+                        |> Result.map (fun pin -> Map.add netId pin acc)))
+                (Ok basePins)
 
     /// 割り当て (ゲート → スロット) から配置とピン座標を作る。clockPins (k) は 2 相のときだけ
     /// 意味を持つ (issue #7 (b))。1 なら分割せず、既存の挙動と完全に一致する。
@@ -441,7 +448,7 @@ module PipelineWL =
         (circuit: PreparedCircuit)
         (assignment: GatePlacement.Assignment)
         (clockPins: int)
-        : WlPlaced list * Map<NetId, Coord> * Map<NetId, Coord list> =
+        : Result<WlPlaced list * Map<NetId, Coord> * Map<NetId, Coord list>, CompileError> =
         let nl = circuit.Netlist
         let placed0 =
             nl.Gates |> List.mapi (fun i g ->
@@ -451,19 +458,23 @@ module PipelineWL =
         let placed, splitOf = splitClockNets clockPins nl circuit.Clocking placed0
         let baseClockNets = clockNetsOf circuit.Clocking
         let expandedClockNets = splitOf |> Map.toList |> List.collect snd
-        let withClockPins =
-            clockPinCoords grid placed expandedClockNets circuit.Clocking
-            |> List.fold (fun acc (clk, c) -> Map.add clk c acc) (leftEdgePins grid.PitchY nl)
-        // 分割した元のクロックネット (もう配線されない) を pins から落とす。leftEdgePins が
-        // 種として置いた左端の座標がそのまま残ると、意味のない Pin セルがグリッドに残るため。
-        let withClockPins =
-            baseClockNets
-            |> List.fold (fun acc c -> if List.contains c expandedClockNets then acc else Map.remove c acc) withClockPins
-        let pins =
+        clockPinCoords grid placed expandedClockNets circuit.Clocking
+        |> Result.map (fun clockPinsCoords ->
+            let withClockPins =
+                clockPinsCoords
+                |> List.fold (fun acc (clk, c) -> Map.add clk c acc) (leftEdgePins grid.PitchY nl)
+            // 分割した元のクロックネット (もう配線されない) を pins から落とす。leftEdgePins が
+            // 種として置いた左端の座標がそのまま残ると、意味のない Pin セルがグリッドに残るため。
+            let withClockPins =
+                baseClockNets
+                |> List.fold (fun acc c -> if List.contains c expandedClockNets then acc else Map.remove c acc) withClockPins
+            withClockPins)
+        |> Result.bind (fun withClockPins ->
             nonClockInputPinCoords grid placed circuit.Clocking nl withClockPins
-        let clockPinGroups =
-            splitOf |> Map.map (fun _ subNets -> subNets |> List.choose (fun n -> Map.tryFind n pins))
-        placed, pins, clockPinGroups
+            |> Result.map (fun pins ->
+                let clockPinGroups =
+                    splitOf |> Map.map (fun _ subNets -> subNets |> List.choose (fun n -> Map.tryFind n pins))
+                placed, pins, clockPinGroups))
 
     /// 配置結果。Annealing は Annealed / TimingDriven 戦略のときだけ Some (総アーク距離の
     /// アニーリングの前後コスト)。TimingDriven は TimingDriven に焼き直しの記録が入る。
@@ -486,7 +497,7 @@ module PipelineWL =
         (circuit: PreparedCircuit)
         (assignment: GatePlacement.Assignment)
         (clockPins: int)
-        : WlPlaced list * Map<NetId, Coord> * Map<NetId, Coord list> =
+        : Result<WlPlaced list * Map<NetId, Coord> * Map<NetId, Coord list>, CompileError> =
         placeFromAssignment grid circuit assignment clockPins
 
     /// 総アーク距離のアニーリングで使うアーク (外部入力ピンは左端列の固定端子、クロックは除外)。
@@ -516,9 +527,11 @@ module PipelineWL =
             Error (InvalidPlacementConfig "タイミング駆動配置は 2 相クロック (--clocking two-phase) のみ対応")
         | TwoPhaseClock tp ->
             let resolvePins (a: GatePlacement.Assignment) =
-                let placed, pins, _ = placeFromAssignment grid circuit a clockPins
-                let placedArr = List.toArray placed
-                pins, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs)
+                placeFromAssignment grid circuit a clockPins
+                |> Result.mapError (fun e -> PlacementTiming.PinPlacementFailed (sprintf "%A" e))
+                |> Result.map (fun (placed, pins, _) ->
+                    let placedArr = List.toArray placed
+                    pins, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs))
             PlacementTiming.buildNetwork tp
             |> Result.bind (fun net ->
                 PlacementTiming.timingDrivenAnneal
@@ -544,20 +557,23 @@ module PipelineWL =
             |> Result.mapError (GatePlacement.describeConfigError >> InvalidPlacementConfig)
         match strategy with
         | GatePlacement.RowMajor ->
-            let placed, pins, groups = placeFromAssignment grid circuit initial clockPins
-            Ok { Placed = placed; Pins = pins; Annealing = None; TimingDriven = None; ClockPinGroups = groups }
+            placeFromAssignment grid circuit initial clockPins
+            |> Result.map (fun (placed, pins, groups) ->
+                { Placed = placed; Pins = pins; Annealing = None; TimingDriven = None; ClockPinGroups = groups })
         | GatePlacement.Annealed cfg ->
             annealed cfg
-            |> Result.map (fun outcome ->
-                let placed, pins, groups = placeFromAssignment grid circuit outcome.Best clockPins
-                { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = None; ClockPinGroups = groups })
+            |> Result.bind (fun outcome ->
+                placeFromAssignment grid circuit outcome.Best clockPins
+                |> Result.map (fun (placed, pins, groups) ->
+                    { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = None; ClockPinGroups = groups }))
         | GatePlacement.TimingDriven (cfg, tdCfg) ->
             annealed cfg
             |> Result.bind (fun outcome ->
                 timingDrivenFrom clockPins tdCfg cfg grid circuit outcome.Best
-                |> Result.map (fun td ->
-                    let placed, pins, groups = placeFromAssignment grid circuit td.Best clockPins
-                    { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = Some td; ClockPinGroups = groups }))
+                |> Result.bind (fun td ->
+                    placeFromAssignment grid circuit td.Best clockPins
+                    |> Result.map (fun (placed, pins, groups) ->
+                        { Placed = placed; Pins = pins; Annealing = Some outcome; TimingDriven = Some td; ClockPinGroups = groups })))
 
     /// 配置戦略を指定して配置する (単相、クロックピン分割は常に 1)。
     let placeWLWithStrategy
@@ -571,9 +587,13 @@ module PipelineWL =
     /// ゲートを JSON 宣言順に正方格子に配置する (ピッチ指定版、行優先、単相)。
     let placeWLWithPitch (pitchX: int) (pitchY: int) (nl: Netlist) : WlPlaced list * Map<NetId, Coord> =
         let grid = GatePlacement.squareSlotGrid nl.Gates.Length gateOrigin pitchX pitchY
+        // 単相の経路は minimaxGapPin を通らない (ピンは左端列に固定) ので Error は起きない。
+        // 起きたら不変条件の破れなので、黙って続けずに落とす。
         let placed, pins, _ =
-            placeFromAssignment grid { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
-                (GatePlacement.rowMajorAssignment nl.Gates.Length) 1
+            match placeFromAssignment grid { Netlist = nl; Clocking = SingleEdgeClock nl.ClockNet }
+                      (GatePlacement.rowMajorAssignment nl.Gates.Length) 1 with
+            | Ok v -> v
+            | Error e -> failwithf "placeWLWithPitch: 単相の配置でピン配置に失敗した (不変条件違反): %A" e
         placed, pins
 
     /// 回路規模に応じたピッチで配置する。
