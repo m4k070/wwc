@@ -84,6 +84,13 @@ dotnet fsi src/AnalyzePlacement.fsx <circuit> [--pitch X Y] [--place rowmajor|an
 # sm83_full ネットリスト vs ../gbfs (別リポジトリの F# 製 GB エミュレータ) の CPU 全命令差分テスト
 # 前提: dotnet build src/WwHdl.fsproj と (cd ../gbfs && nix develop -c dotnet build src/gbfs.Lib/gbfs.Lib.fsproj -c Release)
 dotnet fsi src/DiffTestGbfs.fsx [--variants N] [--seed S] [--only 0x86,0xCB46,...] [--interrupts N]
+# 未定義オペコード 11 個 ($D3 $DB $DD $E3 $E4 $EB $EC $ED $F4 $FC $FD) の扱い:
+#   sm83_full.v は exec_normal の最終 else で PHASE_FETCH に戻るだけ = 1 M サイクルの NOP
+#   (状態を変えず PC だけ +1)。gbfs も Decoder.fs の `| _ -> (advancePc 1 state, 4)` で同じ NOP を
+#   返すため、上の差分テストでは差が出ない (両側が同じ逸脱を共有している)。実機の SM83 はこの
+#   11 個でハードロックする (Pan Docs "CPU Instruction Set")。忠実性を上げるなら RTL と gbfs を
+#   同時に変える — 片側だけだと差分テストの意味が壊れ、netlist が変わるので再配線 (16x12、約 15 分)
+#   + golden 41 本 + GPU 照合まで付いてくる。
 
 # sm83_full の RTL (NetlistSim) を gbfs の周辺回路 (Timer/Ppu/Joypad) につないで公開テスト ROM (blargg) を流す
 # NetlistSim は Debug だと遅いため Release ビルド必須
