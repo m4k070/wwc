@@ -89,6 +89,8 @@ module PlacementTiming =
         | MissingPin of NetId
         | AnnealFailed of AnnealConfigError
         | InvalidTimingConfig of string
+        /// ピン座標の確定に失敗した (2 相の小規模回路で隙間が尽きる等)
+        | PinPlacementFailed of string
 
     let describePlacementTimingError (e: PlacementTimingError) : string =
         match e with
@@ -96,6 +98,7 @@ module PlacementTiming =
         | MissingPin (NetId n) -> sprintf "外部入力ピン (ネット %d) の座標がない" n
         | AnnealFailed e -> sprintf "焼き直しに失敗: %s" (describeConfigError e)
         | InvalidTimingConfig msg -> sprintf "タイミング駆動の設定が不正: %s" msg
+        | PinPlacementFailed msg -> sprintf "ピン座標を決められない: %s" msg
 
     /// 配線対象のデータ入力 (GatePlacement.routedSignalInputs と同じ規則 + 2 相のクロック除外)。
     let private dataInputs (clocks: Set<NetId>) (g: Gate) : NetId list =
@@ -457,16 +460,17 @@ module PlacementTiming =
             (model: TimingModel)
             (grid: SlotGrid)
             (net: TimingNetwork)
-            (resolvePins: Assignment -> Map<NetId, Coord> * (int -> NetId))
+            (resolvePins: Assignment -> Result<Map<NetId, Coord> * (int -> NetId), PlacementTimingError>)
             (assignment: Assignment)
         : Result<WindowTiming list * Arc[] * int64, PlacementTimingError> =
-        let pins, clockNetOfGate = resolvePins assignment
-        analyze model net (fun g -> slotCoord grid assignment.[g]) pins clockNetOfGate
-        |> Result.bind (fun windows ->
-            toPlacementArcs net pins
-            |> Result.map (fun arcs ->
-                let distance = totalCost grid arcs 0.0 assignment / CostScale
-                windows, arcs, distance))
+        resolvePins assignment
+        |> Result.bind (fun (pins, clockNetOfGate) ->
+            analyze model net (fun g -> slotCoord grid assignment.[g]) pins clockNetOfGate
+            |> Result.bind (fun windows ->
+                toPlacementArcs net pins
+                |> Result.map (fun arcs ->
+                    let distance = totalCost grid arcs 0.0 assignment / CostScale
+                    windows, arcs, distance)))
 
     /// タイミング駆動の再アニーリング。initial (通常は総アーク距離のアニーリング結果) から
     /// 「解析 → 重み更新 → 低温から焼き直し」を cfg.Rounds 回繰り返す。
@@ -479,7 +483,7 @@ module PlacementTiming =
             (cfg: TimingDrivenConfig)
             (grid: SlotGrid)
             (net: TimingNetwork)
-            (resolvePins: Assignment -> Map<NetId, Coord> * (int -> NetId))
+            (resolvePins: Assignment -> Result<Map<NetId, Coord> * (int -> NetId), PlacementTimingError>)
             (initial: Assignment)
         : Result<TimingDrivenOutcome, PlacementTimingError> =
         let roundAnneal (round: int) : AnnealConfig =

@@ -157,15 +157,21 @@ module PlacementTimingTest =
             let grid = PipelineWL.slotGridOf unitPitchX unitPitchY circuit
             let n = circuit.Netlist.Gates.Length
             let resolvePins (a: Assignment) =
-                let placed, pins, _ = PipelineWL.placeCircuitFromAssignment grid circuit a 1
-                let placedArr = List.toArray placed
-                pins, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs)
+                PipelineWL.placeCircuitFromAssignment grid circuit a 1
+                |> Result.mapError (fun e -> PinPlacementFailed (sprintf "%A" e))
+                |> Result.map (fun (placed, pins, _) ->
+                    let placedArr = List.toArray placed
+                    pins, (fun (g: int) -> List.head placedArr.[g].Gate.Inputs))
+            let pinsOf (a: Assignment) =
+                match resolvePins a with
+                | Ok v -> v
+                | Error e -> failwithf "resolvePins に失敗: %s" (describePlacementTimingError e)
             let initial = rowMajorAssignment n
             // (a) アーク列が annealArcsOf (buildArcs) と同じ並び
             let arcsMatch =
                 // annealArcsOf は左端ピン、こちらはミニマックス中心のピンなので固定端子の座標は
                 // 比べない (並び・受け手・駆動元ゲート・固定端子かどうかを比べる)
-                match toPlacementArcs net (fst (resolvePins initial)) with
+                match toPlacementArcs net (fst (pinsOf initial)) with
                 | Error _ -> false
                 | Ok timingArcs ->
                     let pinsOfArcs = PipelineWL.annealArcsOf unitPitchY circuit
@@ -178,7 +184,7 @@ module PlacementTimingTest =
                             | _ -> false)) timingArcs pinsOfArcs
             // (b) 重み付きの増分評価 = 全再計算
             let incremental =
-                match toPlacementArcs net (fst (resolvePins initial)) with
+                match toPlacementArcs net (fst (pinsOf initial)) with
                 | Error e -> Error (describePlacementTimingError e)
                 | Ok arcs ->
                     // 決定的な擬似乱数の重み (1.0〜8.999)
@@ -197,7 +203,7 @@ module PlacementTimingTest =
                 | Ok a, Ok b -> Ok (a, b)
                 | Error e, _ | _, Error e -> Error (describePlacementTimingError e)
             let weightErrors =
-                match toPlacementArcs net (fst (resolvePins initial)) with
+                match toPlacementArcs net (fst (pinsOf initial)) with
                 | Error _ -> false
                 | Ok arcs ->
                     match annealWeighted unitAnnealConfig grid n arcs (Weighted [| 1L |]) initial with

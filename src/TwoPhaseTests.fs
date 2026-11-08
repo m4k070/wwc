@@ -127,6 +127,20 @@ module WlTwoPhaseTest =
             match compileNetlistWL { defaultCompileOptions with Clocking = TwoPhase } gatedClock with
             | Error (Route.UnsupportedClocking (ClockDrivenByGate _)) -> true
             | _ -> false
+        // 2 相化するとゲート 1 個 (DFF) が 2 個になり、12x10 でも隙間が 2 個しかない。
+        // クロックピン 2 本 + データ入力 1 本で尽きるので、ピン配置は Error を返す必要がある
+        // (2026-11-08 まで List.minBy の ArgumentException がそのまま漏れていた)。
+        let tinyDff = netlistOf [ gate 0 Dff [ 2; 1 ] 3 ] [ 1; 2 ] [ 3 ] (Some 2)
+        let pinExhaustion =
+            match toTwoPhase tinyDff with
+            | Error _ -> false
+            | Ok tp ->
+                let circuit = { Netlist = tp.Netlist; Clocking = TwoPhaseClock tp }
+                try
+                    match placeCircuitWithStrategy GatePlacement.RowMajor 1 12 10 circuit with
+                    | Error e -> (sprintf "%A" e).Contains "PinSlotExhausted"
+                    | Ok _ -> false
+                with _ -> false
         [ "WL-2PH: rejects gate-driven clock",
           expectError gatedClock (function ClockDrivenByGate (NetId 10, 0) -> true | _ -> false)
           "WL-2PH: rejects multiple clock nets",
@@ -138,7 +152,8 @@ module WlTwoPhaseTest =
           expectError undrivenClock (function ClockNotPrimaryInput (NetId 9) -> true | _ -> false)
           "WL-2PH: rejects DFF with unsupported inputs",
           expectError oneInputDff (function UnsupportedDffInputs (0, 1) -> true | _ -> false)
-          "WL-2PH: compileNetlistWL reports UnsupportedClocking", pipelineRejects ]
+          "WL-2PH: compileNetlistWL reports UnsupportedClocking", pipelineRejects
+          "WL-2PH: pin exhaustion is a CompileError (not an exception)", pinExhaustion ]
 
     // --- settleIncremental = settle ---------------------------------------------
 

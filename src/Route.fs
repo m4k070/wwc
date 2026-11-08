@@ -18,6 +18,8 @@ module Route =
         | InvalidPlacementConfig of string
         /// 指定したクロック方式に変換できない回路 (2 相化の前提外)
         | UnsupportedClocking of Clocking.TwoPhaseError
+        /// ピンを置く隙間が尽きた (グリッドのセル数 < 置きたいピン数)。2 相の小規模回路で起きる
+        | PinSlotExhausted of cells: int * pins: int
 
     /// 1 本の配線。長さ (= Path のセル数) がそのまま遅延になる。
     /// Consumer は、この Wire を消費するゲートの Output NetId。
