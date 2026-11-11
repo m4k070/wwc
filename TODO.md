@@ -211,6 +211,21 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
      * その次 B: 配線済みグリッドを遅延グラフにコンパイルし (Wire / Cross は `v_out(t) = v_in(t−L)` の
        遅延線)、ゲート遷移だけをタイムホイールで処理する。イベント数 約 1/100 → **30〜100 倍 (推定、未実測)**。
        グリッドから作るので配線・skew・hold の検証の意味は残る。A と GPU を oracle にして照合する
+     * **A・B とも実装した (2026-11-11、ブランチ `feat/cpu-graph-engine`)**: `--engine cpu` (cpu.rs) と
+       `--engine graph` (graph.rs、`--cross-check` で cpu と settle ごとに全セル照合)。moon (GPU なし) の実測:
+       | | cpu | graph |
+       |---|---|---|
+       | daa_edge 400 周期 | 10.5〜15.9 秒 | 1.0〜1.3 秒 (settle は 0.055 秒。残りは起動時の cpu 立ち上げ 0.7 秒と読込) |
+       | 34 本 + 自己検証 3 本 | 37/37、110 秒 | 37/37、40 秒 (突き合わせ付きは 9 分で 37/37) |
+       | Bootix 110,000 周期 | — | 110,000/110,000、38〜40 秒 = **0.35 ms/サイクル** (GPU は 91 分 = 49.6 ms) |
+       計時は各 1〜2 回で、moon は回ごとの振れが大きい (cpu の daa_edge で 1.5 倍)。graph の settle は
+       cpu の約 190 倍 (daa_edge: 10.45 秒 → 0.055 秒、イベント 160 万 / ゲート遷移 113 万、34 ns/イベント)。
+       世代数の合計 1,733,369 は GPU の値と一致。A の「詰めて 3〜5 倍」は手を付けていない (B が出たので不要)
+     * **段階 2 (Bootix フル起動 23.3M サイクル) は graph で約 2.3 時間の見込み** (0.35 ms × 23.3M。未実行)。
+       golden 無しで流すか、golden を分割生成するかは未決
+     * 未確認: GPU エンジンの再計測 (`CaDriver` がセルを settle の戻り値で返さなくなった。vega で
+       `memory-test.sh` / `run-tests.sh` を回す)。GPU と cpu の直接照合はスパイク時の daa_edge 1 本だけ
+       (cpu ≡ F# `settle` は単発 golden 24 本で確認済み)
      * スパイクのコード・内訳・先行研究 (MCHPRS Redpiler / GATSPI / GL0AM / GEM) は
        `~/llm-wiki/worklog/wwc/2026-11.md` の 2026-11-11 節
 2. **`compileWL` / `ExportRouted.fsx` の既定値の見直し**: 既定は今も**単相・行優先** (`--place rowmajor`

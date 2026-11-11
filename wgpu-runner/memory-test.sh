@@ -12,6 +12,8 @@
 # 3. 古い golden: romSha256 を書き換えた golden が GPU 初期化前にエラーになることを確認する
 #
 # Usage: ./wgpu-runner/memory-test.sh [program.json ...]   (1 の対象。既定: 下の PROGRAMS)
+#        WWC_ENGINE=cpu|graph ./wgpu-runner/memory-test.sh ...   GPU を使わないエンジンで回す (既定は tiled)
+#        WWC_CROSS_CHECK=1 (WWC_ENGINE=graph のとき)   cpu を並走させ settle ごとに世代数と全セルを照合
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,6 +24,9 @@ if [ -z "${IN_NIX_SHELL:-}" ]; then
 fi
 
 RUNNER=./wgpu-runner/target/release/wgpu-runner
+ENGINE_ARGS=()
+[ -n "${WWC_ENGINE:-}" ] && ENGINE_ARGS+=(--engine "$WWC_ENGINE")
+[ -n "${WWC_CROSS_CHECK:-}" ] && ENGINE_ARGS+=(--cross-check)
 SMOKE=routed/sm83_subset_smoke.json
 TWO_PHASE=routed/membus_tiny_2p_xor.json
 # D 入力を切ったビットが、その周期でそのビットだけ食い違うはず
@@ -55,7 +60,7 @@ fail() { echo "FAIL  $1"; FAILED=$((FAILED + 1)); }
 # --- 1. golden 照合 --------------------------------------------------------
 for prog in "${PROGRAMS[@]}"; do
   set +e
-  out=$("$RUNNER" --memory "$prog" 2>&1)
+  out=$("$RUNNER" "${ENGINE_ARGS[@]}" --memory "$prog" 2>&1)
   code=$?
   set -e
   summary=$(echo "$out" | grep -E '^golden:|^expect checks:' | tr '\n' ' ' || true)
@@ -147,7 +152,7 @@ make_variants "$TWO_PHASE" "$WORK" mutated_2p a_out 4 twoPhase
 check_mutation() {
   local name=$1 expected=$2 cycle=$3 label=$4
   set +e
-  out=$("$RUNNER" --memory "$WORK/$name.json" --dump-dir "$WORK/dump_$name" 2>&1)
+  out=$("$RUNNER" "${ENGINE_ARGS[@]}" --memory "$WORK/$name.json" --dump-dir "$WORK/dump_$name" 2>&1)
   code=$?
   set -e
   if [ $code -eq 1 ] && echo "$out" | grep -qF "$expected" && [ -f "$WORK/dump_$name/diverge_cycle${cycle}_high.bin" ]; then
@@ -163,7 +168,7 @@ check_mutation mutated_2p "$EXPECTED_DIVERGENCE_TWO_PHASE" 000 "two-phase mutate
 
 # --- 3. 古い golden ---------------------------------------------------------
 set +e
-out=$("$RUNNER" --memory "$WORK/mutated_stale.json" 2>&1)
+out=$("$RUNNER" "${ENGINE_ARGS[@]}" --memory "$WORK/mutated_stale.json" 2>&1)
 code=$?
 set -e
 if [ $code -ne 0 ] && echo "$out" | grep -q "romSha256" && ! echo "$out" | grep -q "^Adapter:"; then
