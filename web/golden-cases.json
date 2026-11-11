@@ -46,7 +46,7 @@
   {
     "name": "sm83-mc-nop-high",
     "initFile": "sm83_mc_nop_high_init.bin",
-    "steps": 1773,
+    "steps": 1248,
     "expectedFile": "sm83_mc_nop_high.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
@@ -54,7 +54,7 @@
   {
     "name": "sm83-mc-nop-low",
     "initFile": "sm83_mc_nop_low_init.bin",
-    "steps": 758,
+    "steps": 239,
     "expectedFile": "sm83_mc_nop_low.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
@@ -62,7 +62,7 @@
   {
     "name": "sm83-mc-lda-high",
     "initFile": "sm83_mc_lda_high_init.bin",
-    "steps": 2057,
+    "steps": 1722,
     "expectedFile": "sm83_mc_lda_high.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
@@ -70,7 +70,7 @@
   {
     "name": "sm83-mc-lda-low",
     "initFile": "sm83_mc_lda_low_init.bin",
-    "steps": 758,
+    "steps": 239,
     "expectedFile": "sm83_mc_lda_low.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
@@ -78,7 +78,7 @@
   {
     "name": "sm83-mc-ldb-high",
     "initFile": "sm83_mc_ldb_high_init.bin",
-    "steps": 2500,
+    "steps": 2242,
     "expectedFile": "sm83_mc_ldb_high.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
@@ -86,7 +86,7 @@
   {
     "name": "sm83-mc-ldb-low",
     "initFile": "sm83_mc_ldb_low_init.bin",
-    "steps": 758,
+    "steps": 239,
     "expectedFile": "sm83_mc_ldb_low.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
@@ -94,7 +94,7 @@
   {
     "name": "sm83-mc-add-high",
     "initFile": "sm83_mc_add_high_init.bin",
-    "steps": 2419,
+    "steps": 1912,
     "expectedFile": "sm83_mc_add_high.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
@@ -102,7 +102,7 @@
   {
     "name": "sm83-mc-add-low",
     "initFile": "sm83_mc_add_low_init.bin",
-    "steps": 758,
+    "steps": 239,
     "expectedFile": "sm83_mc_add_low.bin",
     "exportScript": "src/ExportSm83Multi.fsx",
     "timeoutMs": 180000
