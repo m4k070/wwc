@@ -20,7 +20,15 @@ python3 wgpu-runner/render_frames.py <frames_dir> <out_dir> [--scale N] [--crop 
     # (src/ExportPpuFrames.fsx の出力。160x144 の階調を DMG の緑 4 階調で描く)。--step N で N 枚に 1 枚
     # 動画化:
     #   ffmpeg -y -framerate 30 -i out_dir/f%06d.png -c:v libx264 -pix_fmt yuv420p -crf 20 out.mp4
-wgpu-runner/target/release/wgpu-runner <grid.bin> [--steps N] [--output out.bin] [--batch B] [--engine tiled|dense]   # 単発 .bin 実行
+wgpu-runner/target/release/wgpu-runner <grid.bin> [--steps N] [--output out.bin] [--batch B] [--engine tiled|dense|cpu]   # 単発 .bin 実行
+# GPU (Vulkan) の無いマシンでは --engine cpu / graph を使う (2026-11-11。仕組みは DESIGN-VERIFY.md §5.2.1):
+wgpu-runner/target/release/wgpu-runner --memory <prog.json> --engine cpu      # セル単位のイベント駆動。全セル・世代数とも GPU と一致
+wgpu-runner/target/release/wgpu-runner --memory <prog.json> --engine graph [--cross-check]
+    # 配線を遅延線に畳んだグラフでゲート遷移だけ計算する。固定点のセルと収束世代数は cpu と一致。
+    # --cross-check は cpu を並走させ settle ごとに世代数と全セルを照合する (graph.rs を触ったら回す)
+WWC_ENGINE=cpu|graph [WWC_CROSS_CHECK=1] wgpu-runner/memory-test.sh [program.json ...]
+WWC_ENGINE=cpu wgpu-runner/run-tests.sh
+    # --frames と --program は GPU エンジン専用。graph は --memory 専用 (収束途中のセルを持たない)
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
@@ -34,6 +42,11 @@ they reference the compiled DLL (`src/bin/Debug/net8.0/WwHdl.dll`).
 `cargo test` (wgpu-runner) **49/49** / `wgpu-runner/run-tests.sh` (GPU golden) **24/24** /
 `wgpu-runner/memory-test.sh` (引数なし) **5/5**。
 Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計測。
+GPU を使わないエンジン (2026-11-11、moon = GPU なし): `cargo test` **67/67** /
+`WWC_ENGINE=cpu run-tests.sh` **24/24** / `memory-test.sh routed/sm83_full_*.json` は cpu・graph・
+graph + `WWC_CROSS_CHECK=1` のいずれも **37/37** (所要 110 秒 / 40 秒 / 9 分)。
+**GPU エンジン (tiled / dense) は `CaDriver` の変更後に未再計測** — GPU のあるマシン (vega) で
+`memory-test.sh` と `run-tests.sh` を回すこと。
 
 ### 配線・検証まわりのスクリプト (`src/*.fsx`)
 

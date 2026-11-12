@@ -30,22 +30,38 @@ pub fn pin_cell(level: bool) -> u8 {
 
 /// 1 回の収束待ちの結果。
 pub struct Settled {
-    /// 収束後 (または打ち切り時) のセル配列
-    pub cells: Vec<u8>,
     /// 実行した世代数
     pub gens: u32,
     /// maxStepsPerPhase 以内に固定点に達したか
     pub settled: bool,
 }
 
-/// CA を駆動する最小の操作。GpuSim の他、テストでは書込と収束の記録器が実装する。
+/// CA を駆動する最小の操作。GPU (GpuDriver) / CPU (cpu.rs, graph.rs) の各エンジンの他、
+/// テストでは書込と収束の記録器が実装する。
+///
+/// セルは settle の戻り値ではなく cell / snapshot で読む。1 周期に観測するのは出力 probe の百数十セル
+/// だけなので、収束のたびに全グリッド (sm83_full で 1.9 MB) を作らせない (graph エンジンは全グリッドを
+/// 持たず、求められたときに復元する)。
 pub trait CaDriver {
     /// Pin セルに level を書く。次の settle から反映される (同じ settle の前に書いたものは同時に効く)
     fn write_pin(&mut self, at: Xy, level: bool);
     /// 固定点まで進める
     fn settle(&mut self) -> Result<Settled>;
+    /// 最後の settle が終わった時点のセル (settle 前は初期グリッド)。settle していないピン書込が
+    /// 見えるかどうかはエンジンによる (違いが出るのは書いた Pin セル自身を読むときだけ)
+    fn cell(&self, at: Xy) -> u8;
+    /// 最後の settle が終わった時点の全セル (行優先、width × height)。ダンプ用
+    fn snapshot(&self) -> Vec<u8>;
     /// デモ用: フレームに刻むバス周期番号を伝える (フレーム書き出しが無効なら何もしない)
     fn set_frame_cycle(&mut self, _cycle: u64) {}
+}
+
+impl CaDriver for Box<dyn CaDriver> {
+    fn write_pin(&mut self, at: Xy, level: bool) { (**self).write_pin(at, level) }
+    fn settle(&mut self) -> Result<Settled> { (**self).settle() }
+    fn cell(&self, at: Xy) -> u8 { (**self).cell(at) }
+    fn snapshot(&self) -> Vec<u8> { (**self).snapshot() }
+    fn set_frame_cycle(&mut self, cycle: u64) { (**self).set_frame_cycle(cycle) }
 }
 
 /// バス (LSB first) に整数値を書く。
@@ -55,21 +71,38 @@ pub fn write_bus<D: CaDriver>(driver: &mut D, coords: &[Xy], value: u64) {
     }
 }
 
-/// GpuSim を収束パラメータ付きで CaDriver にする。
-pub struct GpuDriver<'a> {
-    pub sim: &'a mut GpuSim,
-    pub max_steps_per_phase: u32,
-    pub check_interval: u32,
+/// GpuSim を収束パラメータ付きで CaDriver にする。最後に読み戻したセル配列を持つ。
+pub struct GpuDriver {
+    sim: GpuSim,
+    width: u32,
+    cells: Vec<u8>,
+    max_steps_per_phase: u32,
+    check_interval: u32,
 }
 
-impl CaDriver for GpuDriver<'_> {
+impl GpuDriver {
+    pub fn new(sim: GpuSim, width: u32, init_cells: Vec<u8>, max_steps_per_phase: u32, check_interval: u32) -> Self {
+        GpuDriver { sim, width, cells: init_cells, max_steps_per_phase, check_interval }
+    }
+}
+
+impl CaDriver for GpuDriver {
     fn write_pin(&mut self, at: Xy, level: bool) {
         self.sim.write_cell(at.x, at.y, pin_cell(level));
     }
 
     fn settle(&mut self) -> Result<Settled> {
         let (cells, gens, settled) = self.sim.run_until_settled(self.max_steps_per_phase, self.check_interval)?;
-        Ok(Settled { cells, gens, settled })
+        self.cells = cells;
+        Ok(Settled { gens, settled })
+    }
+
+    fn cell(&self, at: Xy) -> u8 {
+        self.cells[(at.y * self.width + at.x) as usize]
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        self.cells.clone()
     }
 
     fn set_frame_cycle(&mut self, cycle: u64) {
@@ -233,7 +266,15 @@ pub mod testing {
 
         fn settle(&mut self) -> Result<Settled> {
             self.events.push(Event::Settle);
-            Ok(Settled { cells: self.cells.clone(), gens: 7, settled: true })
+            Ok(Settled { gens: 7, settled: true })
+        }
+
+        fn cell(&self, at: Xy) -> u8 {
+            self.cells[(at.y * self.width + at.x) as usize]
+        }
+
+        fn snapshot(&self) -> Vec<u8> {
+            self.cells.clone()
         }
     }
 }
@@ -277,7 +318,8 @@ mod tests {
         let labels: Vec<&str> = latch.iter().map(|p| p.label).collect();
         assert_eq!(labels, [LABEL_PHASE_A, LABEL_PHASE_B]);
         // 最後の段の出力は clkA=0, clkB=1
-        assert_eq!(latch[1].settled.cells, vec![pin_cell(false), pin_cell(false), pin_cell(true)]);
+        assert_eq!(latch.len(), 2);
+        assert_eq!(d.cells, vec![pin_cell(false), pin_cell(false), pin_cell(true)]);
     }
 
     #[test]

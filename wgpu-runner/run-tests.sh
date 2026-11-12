@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # WireLevel GPU golden tests — uses native wgpu-runner (RTX 3060)
 # Usage: ./wgpu-runner/run-tests.sh [--list] [test-name-prefix]
+#        WWC_ENGINE=cpu ./wgpu-runner/run-tests.sh   GPU を使わない cpu エンジンで回す (既定は tiled)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 RUNNER=./wgpu-runner/target/release/wgpu-runner
+ENGINE="${WWC_ENGINE:-tiled}"
 
 if [ ! -x "$RUNNER" ]; then
   echo "Building wgpu-runner..."
@@ -36,7 +38,7 @@ while IFS= read -r line; do
   $LIST_ONLY && echo "$name" && continue
 
   tmp=$(mktemp /tmp/wgpu_test.XXXXXX.bin)
-  if nix develop -c bash -c "\"$RUNNER\" \"web/$init\" --steps \"$steps\" --output \"$tmp\"" 2>/dev/null; then
+  if nix develop -c bash -c "\"$RUNNER\" \"web/$init\" --steps \"$steps\" --output \"$tmp\" --engine \"$ENGINE\"" 2>/dev/null; then
     if cmp -s "$tmp" "web/$expected"; then
       echo "PASS $name"
       passed=$((passed+1))
