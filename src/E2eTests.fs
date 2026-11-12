@@ -1919,30 +1919,31 @@ module WlSm83InstrTest =
     open Domain
     open WireLevel
 
-    /// 正規化グリッド上の DFF 座標 (exportGrid の (0,0) 基点)
-    /// sm83_min 出力ポート:
-    ///   a_out[7:0]   NetId 20-27 → Y=292, X=12,36,60,84,108,132,156,180
-    ///   flags[3:0]    NetId 34-37 → Y=292, X=204,228,252,276
-    ///   pc_out[7:0]   NetId 12-19 → Y=292, X=300,324,348,372,396,420,444,468
-    ///   b_out[5:0]    NetId 28-33 → Y=276, X=348,372,396,420,444,468
-    let private regCoords =
-        let c x y = { X = x; Y = y }
-        [|  // a[0..7]
-            for x in [12;36;60;84;108;132;156;180] -> c x 292
-        |], [| // b[0..5]
-            for x in [348;372;396;420;444;468] -> c x 276
-        |], [| // pc[0..7]
-            for x in [300;324;348;372;396;420;444;468] -> c x 292
-        |], [| // flags[0..3]
-            for x in [204;228;252;276] -> c x 292
-        |]
+    /// レジスタの DFF 座標は web/sm83_mc_reg_coords.json から読む (ExportSm83Multi.fsx が .bin と一緒に書く)。
+    /// 座標をここに直書きしない: 配置はコンパイラ (ピッチ・配置アルゴリズム) で変わるので、.bin を
+    /// 再生成するたびにずれる (2026-11-10 の再生成で 4 件とも落ちた)。
+    /// 戻り値は (a, b, pc, flags)。各配列は LSB first。
+    let private loadRegCoords (path: string) : (Coord[] * Coord[] * Coord[] * Coord[]) option =
+        if not (System.IO.File.Exists path) then None
+        else
+            try
+                use doc = System.Text.Json.JsonDocument.Parse (System.IO.File.ReadAllText path)
+                let regs = doc.RootElement.GetProperty "regs"
+                let coords (name: string) =
+                    [| for e in (regs.GetProperty name).EnumerateArray () ->
+                        { X = (e.GetProperty "x").GetInt32 (); Y = (e.GetProperty "y").GetInt32 () } |]
+                Some (coords "a", coords "b", coords "pc", coords "flags")
+            with _ -> None
 
     let runAll () : (string * bool) list =
         let testOutDir =
             System.IO.Path.Combine (__SOURCE_DIRECTORY__, "..", "web")
             |> System.IO.Path.GetFullPath
 
-        let aPins, bPins, pcPins, flagPins = regCoords
+        let coordsPath = System.IO.Path.Combine (testOutDir, "sm83_mc_reg_coords.json")
+        match loadRegCoords coordsPath with
+        | None -> [ "WL-SM83-INSTR: web/sm83_mc_reg_coords.json を読める", false ]
+        | Some (aPins, bPins, pcPins, flagPins) ->
 
         let readReg (p: Coord[]) (g: LGrid) : int =
             p |> Array.mapi (fun i c -> if levelOf g c then 1 <<< i else 0) |> Array.sum
