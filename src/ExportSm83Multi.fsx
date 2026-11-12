@@ -145,12 +145,18 @@ let exitCode =
                 g <- gLow
 
             // --- メタデータ出力 (座標マッピング) ---
+            // 座標は .bin の中の位置で書く。exportGrid はグリッドの最小座標を (0,0) に寄せるので、
+            // コンパイル時の座標のままだと .bin を読む側 (E2eTests の WlSm83InstrTest) とずれる
+            // (配線が y<0 にはみ出すと 1 行ずれる、など)。セルは増減しないので原点は全 .bin で同じ
+            let originX = grid |> Map.toSeq |> Seq.map (fun (c, _) -> c.X) |> Seq.min
+            let originY = grid |> Map.toSeq |> Seq.map (fun (c, _) -> c.Y) |> Seq.min
+            let inBin (c: Coord) = {| x = c.X - originX; y = c.Y - originY |}
             let meta = {|
                 regs = {|
-                    a   = [| for c in aOutPins -> {| x = c.X; y = c.Y |} |]
-                    b   = [| for c in bOutPins -> {| x = c.X; y = c.Y |} |]
-                    pc  = [| for c in pcOutPins -> {| x = c.X; y = c.Y |} |]
-                    flags = [| for c in flagPins -> {| x = c.X; y = c.Y |} |]
+                    a   = [| for c in aOutPins -> inBin c |]
+                    b   = [| for c in bOutPins -> inBin c |]
+                    pc  = [| for c in pcOutPins -> inBin c |]
+                    flags = [| for c in flagPins -> inBin c |]
                 |}
             |}
             let metaJson = System.Text.Json.JsonSerializer.Serialize(meta, System.Text.Json.JsonSerializerOptions(WriteIndented = true))
