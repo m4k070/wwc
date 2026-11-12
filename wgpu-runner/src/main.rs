@@ -1,5 +1,7 @@
 mod clocking;
+mod cpu;
 mod gpu;
+mod graph;
 mod memory;
 mod memory_program;
 mod program;
@@ -13,6 +15,9 @@ use gpu::{load_bin, save_bin, Engine, GpuSim};
 fn print_usage() {
     eprintln!("Usage: wgpu-runner <input.bin> [--steps N] [--output out.bin] [--batch B]");
     eprintln!("       (全モード共通) [--engine tiled|dense]   # tiled: 動いたタイルだけ計算 (既定)、dense: 毎世代全セル");
+    eprintln!("       [--engine cpu]     # GPU を使わない。変化したセルを読むセルだけを計算 (GPU と byte-exact)。単発 / --memory");
+    eprintln!("       [--engine graph]   # GPU を使わない。配線を遅延線に畳み、ゲート遷移だけを計算。--memory 専用");
+    eprintln!("       [--cross-check]    # --engine graph の検証: cpu を並走させ settle ごとに世代数と全セルを照合");
     eprintln!("       wgpu-runner --program prog.json [--dump-regs] [--dump-dir DIR] [--batch B]");
     eprintln!("       wgpu-runner --memory prog.json [--batch B] [--dump-dir DIR]   # メモリバスモード (Step B)");
     eprintln!("       wgpu-runner --memory prog.json --frames DIR [--frame-every N] [--frame-crop X Y W H]");
@@ -69,6 +74,7 @@ fn main() -> Result<()> {
     let mut frame_every = 1u32;
     let mut frame_crop: Option<(u32, u32, u32, u32)> = None;
     let mut engine = Engine::Tiled;
+    let mut cross_check = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -89,6 +95,7 @@ fn main() -> Result<()> {
                 i += 4;
             }
             "--engine" => { i += 1; engine = args[i].parse()?; }
+            "--cross-check" => { cross_check = true; }
             s if s.starts_with('-') => { anyhow::bail!("unknown flag {s}"); }
             _ => { input = PathBuf::from(&args[i]); }
         }
@@ -97,6 +104,7 @@ fn main() -> Result<()> {
 
     // ---- プログラムモード (命令レベル検証) ----
     if let Some(prog) = program_path {
+        anyhow::ensure!(engine.uses_gpu(), "--program needs a GPU engine (--engine tiled|dense)");
         let opts = program::ProgOpts { batch, engine, dump_regs, dump_dir };
         let code = program::run_program(&prog, &opts)?;
         std::process::exit(code);
@@ -104,9 +112,11 @@ fn main() -> Result<()> {
 
     // ---- メモリバスモード (Step B: ROM/RAM 駆動シミュレーション) ----
     if let Some(prog) = memory_path {
-        let opts = memory_program::MemProgOpts { batch, engine, dump_dir, frames_dir, frame_every, frame_crop };
+        let opts = memory_program::MemProgOpts { batch, engine, cross_check, dump_dir, frames_dir, frame_every, frame_crop };
         let code = memory_program::run_memory_program(&prog, &opts)?;
-        print_stats();
+        if engine.uses_gpu() {
+            print_stats();
+        }
         std::process::exit(code);
     }
 
@@ -118,9 +128,19 @@ fn main() -> Result<()> {
     let (w, h, cells) = load_bin(&input)?;
     println!("Loaded {w}×{h} grid ({} cells)", cells.len());
 
-    let mut sim = GpuSim::new(w, h, &cells, batch, engine)?;
-    sim.run(steps);
-    let result = sim.read_cells()?;
+    let result = match engine {
+        Engine::Graph => anyhow::bail!("--engine graph は固定点しか持たないので単発実行 (--steps) には使えません (--memory 専用)"),
+        Engine::Cpu => {
+            let mut sim = cpu::CpuSim::new(w, h, &cells, steps)?;
+            sim.run(steps);
+            sim.cells()
+        }
+        Engine::Dense | Engine::Tiled => {
+            let mut sim = GpuSim::new(w, h, &cells, batch, engine)?;
+            sim.run(steps);
+            sim.read_cells()?
+        }
+    };
 
     if let Some(out) = &output {
         save_bin(out, w, h, &result)?;

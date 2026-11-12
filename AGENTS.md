@@ -20,7 +20,15 @@ python3 wgpu-runner/render_frames.py <frames_dir> <out_dir> [--scale N] [--crop 
     # (src/ExportPpuFrames.fsx の出力。160x144 の階調を DMG の緑 4 階調で描く)。--step N で N 枚に 1 枚
     # 動画化:
     #   ffmpeg -y -framerate 30 -i out_dir/f%06d.png -c:v libx264 -pix_fmt yuv420p -crf 20 out.mp4
-wgpu-runner/target/release/wgpu-runner <grid.bin> [--steps N] [--output out.bin] [--batch B] [--engine tiled|dense]   # 単発 .bin 実行
+wgpu-runner/target/release/wgpu-runner <grid.bin> [--steps N] [--output out.bin] [--batch B] [--engine tiled|dense|cpu]   # 単発 .bin 実行
+# GPU (Vulkan) の無いマシンでは --engine cpu / graph を使う (2026-11-11。仕組みは DESIGN-VERIFY.md §5.2.1):
+wgpu-runner/target/release/wgpu-runner --memory <prog.json> --engine cpu      # セル単位のイベント駆動。全セル・世代数とも GPU と一致
+wgpu-runner/target/release/wgpu-runner --memory <prog.json> --engine graph [--cross-check]
+    # 配線を遅延線に畳んだグラフでゲート遷移だけ計算する。固定点のセルと収束世代数は cpu と一致。
+    # --cross-check は cpu を並走させ settle ごとに世代数と全セルを照合する (graph.rs を触ったら回す)
+WWC_ENGINE=cpu|graph [WWC_CROSS_CHECK=1] wgpu-runner/memory-test.sh [program.json ...]
+WWC_ENGINE=cpu wgpu-runner/run-tests.sh
+    # --frames と --program は GPU エンジン専用。graph は --memory 専用 (収束途中のセルを持たない)
 ```
 
 No separate lint or typecheck step — the F# compiler covers both. No formatter config found.
@@ -34,6 +42,12 @@ they reference the compiled DLL (`src/bin/Debug/net8.0/WwHdl.dll`).
 `cargo test` (wgpu-runner) **49/49** / `wgpu-runner/run-tests.sh` (GPU golden) **24/24** /
 `wgpu-runner/memory-test.sh` (引数なし) **5/5**。
 Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計測。
+GPU を使わないエンジン (2026-11-11、moon = GPU なし): `cargo test` **67/67** /
+`WWC_ENGINE=cpu run-tests.sh` **24/24** / `memory-test.sh routed/sm83_full_*.json` は cpu・graph・
+graph + `WWC_CROSS_CHECK=1` のいずれも **37/37** (所要 110 秒 / 40 秒 / 9 分)。
+GPU エンジンは `CaDriver` の変更後に vega (RTX 3060) で再計測済み (2026-11-12、`3b30fa4`):
+`memory-test.sh routed/sm83_full_*.json` (tiled) **37/37** (85 秒) / `memory-test.sh` (引数なし) **5/5** /
+`run-tests.sh` は tiled・dense とも **24/24** / `cargo test` **67/67**。
 
 ### 配線・検証まわりのスクリプト (`src/*.fsx`)
 
@@ -54,6 +68,12 @@ dotnet fsi src/LoadRouted.fsx <circuit> [--dir DIR]
 
 # プログラム JSON (wgpu-runner --memory と同形式) を NetlistSim で実行し golden を生成
 dotnet fsi src/ExportGolden.fsx <program.json>
+
+# 同じ golden を分割形式 (目次 JSON + 1 周期 32 バイトのバイナリ) で書く。数百万周期以上はこちら
+# (JSON は 1 周期 約 400 バイトで、全周期をメモリに持つ)。runner は目次の format で見分ける。
+# 形式は DESIGN-VERIFY.md §6.2.1。前提: -c Release でビルド。部分ファイル (*.partNNN.bin) はコミットしない
+# 例: Bootix のフル起動 (routed/bootix_full.json、1,900,000 周期。生成 170 秒 + graph の照合 4 分半)
+dotnet fsi src/ExportGoldenParts.fsx <program.json> [--part-cycles N]
 
 # NetlistSim の速度計測 (golden の直列化を含めない純粋なシミュレーション時間、既定 3 回の中央値)。
 # 最適化の前後は同じプログラム・同じ負荷条件で測ること (1 回の計測は ±10% 以上ばらつき、

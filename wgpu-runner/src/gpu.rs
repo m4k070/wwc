@@ -83,6 +83,17 @@ pub enum Engine {
     Dense,
     /// 前世代に変化したタイルとその隣接タイルだけを計算する
     Tiled,
+    /// GPU を使わない。変化したセルを読んでいるセルだけを CPU で計算する (cpu.rs)。全セル・世代数とも GPU と一致
+    Cpu,
+    /// GPU を使わない。配線を遅延線に畳んだ遅延グラフ上でゲート遷移だけを計算する (graph.rs)。
+    /// 固定点のセルと収束世代数は cpu と一致する (収束途中のセルは持たない)。--memory 専用
+    Graph,
+}
+
+impl Engine {
+    pub fn uses_gpu(self) -> bool {
+        matches!(self, Engine::Dense | Engine::Tiled)
+    }
 }
 
 impl std::str::FromStr for Engine {
@@ -91,7 +102,9 @@ impl std::str::FromStr for Engine {
         match s {
             "dense" => Ok(Engine::Dense),
             "tiled" => Ok(Engine::Tiled),
-            _ => anyhow::bail!("unknown engine {s:?} (expected dense or tiled)"),
+            "cpu" => Ok(Engine::Cpu),
+            "graph" => Ok(Engine::Graph),
+            _ => anyhow::bail!("unknown engine {s:?} (expected tiled, dense, cpu or graph)"),
         }
     }
 }
@@ -299,6 +312,7 @@ impl GpuSim {
         let cell_count = (w as usize) * (h as usize);
         anyhow::ensure!(cells.len() == cell_count, "cell count mismatch: {} cells for {w}x{h}", cells.len());
         anyhow::ensure!(batch >= 1, "batch must be >= 1");
+        anyhow::ensure!(engine.uses_gpu(), "GpuSim cannot run the {engine:?} engine");
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
@@ -480,6 +494,7 @@ impl GpuSim {
                 });
                 Stepper::Dense { step_dense: make_pipeline("step_dense", &layout) }
             }
+            Engine::Cpu | Engine::Graph => unreachable!("checked by uses_gpu above"),
             Engine::Tiled => {
                 let tile_count = tiles_x * tiles_y;
                 let max_workgroups = device.limits().max_compute_workgroups_per_dimension;

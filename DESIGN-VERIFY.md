@@ -142,6 +142,29 @@ K=1 は dispatch 律速で悪化 (daa_edge 単体 16.8 秒) / K≥12 は halo �
 両エンジンは周期ごとの収束後グリッドが byte 単位で一致する。収束後のグリッドは GPU 上で 1 セル 1 バイトに
 詰めてから読み戻す。
 
+**GPU を使わないエンジン (2026-11-11)**: `--engine cpu` と `--engine graph` は Vulkan 無しで動く。
+どちらも周期の手順 (下記) は同じで、`CaDriver` (clocking.rs) の実装だけが違う。
+
+- `cpu` (cpu.rs): 前世代に変化したセルを**実際に読んでいるセル**だけを再評価する同期更新。規則は
+  wirelevel.wgsl と同じで、全セル・収束世代数とも GPU と一致する (単発の golden 24 本を F# `settle` の
+  出力と byte 比較して確認)。収束途中のセルも持つ
+- `graph` (graph.rs): グリッドを「ドライバ (Pin / NAND / DFF) と遅延」のグラフに畳む。Wire と Cross の
+  各チャネルは決まった 1 個の近傍を 1 世代遅れで写すだけなので、ドライバ r から L セル先の配線セルは
+  `v(t) = r(t − L)` (グリッチ込みで厳密)。ゲートの入力反転だけをタイムホイールで処理する。
+  - 収束世代数 = max(ドライバの遷移時刻 + その配線木の最大深さ) + 1 で、cpu / GPU と同じ値になる
+  - 固定点の全セル = 「配線セルは根のドライバの値、ゲートセルはゲートの状態」で復元する。
+    収束途中のセルは持たない (未収束で打ち切った後の読み出しは近似。その実行は UNSETTLED で失敗する)
+  - 起動直後は cpu で動かし、最初の固定点でグラフに切り替える (初期グリッドは固定点でないため)。
+    固定点のグリッドがグラフと矛盾する / ドライバの無い配線の輪がある場合は cpu のまま動かす
+  - ネットリストではなく**配線済みグリッドから**作るので、配線の接続・遅延・クロック到達差の検証と
+    いう意味は残る (NetlistSim との違い)。規則そのもの (wgsl) の検証にはならないので、GPU / cpu の
+    照合を置き換えるものではなく、長い実行を回すための近道
+  - `--cross-check` を付けると cpu を並走させ、settle のたびに世代数・収束・全セルを突き合わせる
+
+セルは settle の戻り値ではなく `CaDriver::cell` / `snapshot` で読む (1 周期に観測するのは出力 probe の
+百数十セルだけ。graph は全グリッドを持たないので、求められたときだけ復元する)。`--frames` と `--program` は
+GPU エンジン専用。
+
 **手順 (2026-09-27 短縮)**: 「最初の周期 (リセット直後) だけ」`clkA=0, clkB=0` の収束を挟み、
 2 周期目以降はそれを行わない。前周期の `clkB=1` の立ち下がりは、次の周期の `clkA=1` の立ち上がりと
 同じ収束にまとめる (手順 5' 参照)。
@@ -276,6 +299,30 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
   runner の `trace` 表示の `addr` は手順 2 (clk=0 settle 時点) の値なので、golden の `outputs.addr` とは時点が違う
 - 出力はポート単位の整数 (LSB first)。runner は meta の probe に従って読み、
   `Unobservable` のビットは比較から除外する
+
+### 6.2.1 分割 golden (`wwc-golden-parts/1`、2026-11-12)
+
+上の JSON は 1 周期あたり約 400 バイトで、F# も runner も全周期を 1 個の値として持つ。数千万周期
+(Bootix のフル起動) では 9 GB を超えるので、周期ごとの固定長レコードを並べたバイナリに分ける。
+`src/ExportGoldenParts.fsx <program.json> [--part-cycles N]` が書き、プログラムの `golden` には目次を指す。
+runner は目次の `format` で形式を見分ける。
+
+```json
+{
+  "format": "wwc-golden-parts/1",
+  "circuit": "sm83_full", "program": "bootix_full",
+  "sourceSha256": "…", "romSha256": "…", "bootRomSha256": "…", "rstPulses": 2,
+  "totalCycles": 23400000,
+  "ports": ["a_out", "addr", "…"],
+  "parts": [ { "file": "bootix_full.golden.part000.bin", "cycles": 1000000, "sha256": "…" } ]
+}
+```
+
+- レコード = `dataIn` (u8) + `irq` (u8) + 出力ポートの値 (u16 LE、`ports` の順)。sm83_full は 32 バイト。
+  値が幅に収まらなければ F# 側が例外で止まる (黙って切り捨てない)
+- 見出し (`sourceSha256` など) の照合は 6.2 と同じ。加えて runner は実行前に「部分の周期数の合計 =
+  `totalCycles` = プログラムの `cycles`」「各部分ファイルの大きさ」を検査し、部分を読むときに SHA-256 を確かめる
+- 部分ファイルは目次と同じディレクトリに置く。大きいのでリポジトリには入れない (RTL から再生成できる)
 
 ### 6.3 routed meta (`routed/<circuit>.meta.json`、`src/RoutedArtifact.fs` が生成)
 
