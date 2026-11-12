@@ -10,3 +10,5 @@
 # ログと書込途中の一時ファイルは除外
 /routed/*.log
 /routed/*.tmp
+# 分割 golden の部分ファイル (ExportGoldenParts.fsx。RTL から再生成できる)
+/routed/*.part[0-9][0-9][0-9].bin

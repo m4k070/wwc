@@ -1,0 +1,19 @@
+{
+  "circuit": "sm83_full",
+  "comment": "CA デモ: Bootix v1.2 のフル起動 (段階 2)。golden は分割形式 (ExportGoldenParts.fsx)",
+  "meta": "sm83_full.meta.json",
+  "init": "sm83_full.bin",
+  "memory": {
+    "rom": "rom_bootrom_bootix.bin",
+    "bootRom": "bootix_dmg.bin",
+    "ramBase": 49152,
+    "ramSize": 8192
+  },
+  "rstPulses": 2,
+  "cycles": 1900000,
+  "maxStepsPerPhase": 12000,
+  "checkInterval": 64,
+  "expectMem": {},
+  "golden": "bootix_full.golden.json",
+  "trace": false
+}

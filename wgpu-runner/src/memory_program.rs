@@ -18,7 +18,8 @@
 //     "checkInterval": 256,
 //     "expect": { "a_out": 66, "pc_out": 264 },  // meta の outputs にあるポート名
 //     "expectMem": { "49152": 42 },        // RAM 絶対アドレス (10進 or "0xC000" 16進) → 値
-//     "golden": "prog.golden.json",        // optional: ExportGolden.fsx の出力と全周期を照合
+//     "golden": "prog.golden.json",        // optional: ExportGolden.fsx の出力と全周期を照合。
+//                                          // ExportGoldenParts.fsx の目次 (wwc-golden-parts/1) でもよい
 //     "trace": false
 //   }
 //
@@ -34,6 +35,10 @@
 //
 // golden を指定すると、周期ごとに data_in と全出力 (latch の最後の settle 後) を NetlistSim の結果と
 // 比べ、最初に食い違った周期で止める (DESIGN-VERIFY.md §6.2)。
+// golden には 2 形式ある (ファイルの "format" で見分ける):
+//   wwc-golden/1        全周期を 1 個の JSON に持つ (ExportGolden.fsx)
+//   wwc-golden-parts/1  目次 JSON + 周期ごとの固定長レコードを並べたバイナリ (ExportGoldenParts.fsx)。
+//                       数千万周期用。runner は進行に合わせて 1 部分ずつ読み、SHA-256 を確かめる
 //
 // 設定ミス (expect の未知ポート名・値の幅超え・meta と grid の座標ずれ・古い golden) は GPU 実行前に
 // エラーにする。収束しなかった周期は結果が信用できないので失敗として扱う (終了コード 1)。
@@ -79,6 +84,151 @@ pub struct Golden {
     pub boot_rom_sha256: Option<String>,
     pub rst_pulses: u32,
     pub cycles: Vec<GoldenCycle>,
+}
+
+/// Testbench.fs (GoldenPartsFormat) が書く分割 golden の目次。
+const GOLDEN_PARTS_FORMAT: &str = "wwc-golden-parts/1";
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GoldenPart {
+    /// 目次と同じディレクトリからの相対パス
+    pub file: String,
+    pub cycles: u32,
+    pub sha256: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GoldenParts {
+    pub circuit: String,
+    pub program: String,
+    pub source_sha256: String,
+    pub rom_sha256: String,
+    #[serde(default)]
+    pub boot_rom_sha256: Option<String>,
+    pub rst_pulses: u32,
+    pub total_cycles: u32,
+    /// レコード内の出力ポートの並び (各 u16 LE。その前に dataIn u8 + irq u8)
+    pub ports: Vec<String>,
+    pub parts: Vec<GoldenPart>,
+}
+
+impl GoldenParts {
+    fn record_size(&self) -> usize { 2 + 2 * self.ports.len() }
+}
+
+/// 分割 golden を周期順に読む。今いる部分だけをメモリに持つ。
+struct PartsReader {
+    dir: PathBuf,
+    manifest: GoldenParts,
+    /// 各部分の先頭周期
+    starts: Vec<u32>,
+    /// 読み込み済みの部分 (番号, バイト列)
+    loaded: Option<(usize, Vec<u8>)>,
+    /// 返す周期の置き場 (outputs のキーは最初に作り、値だけを書き換える)
+    current: GoldenCycle,
+    /// current.outputs のキー順 (昇順) → レコード内の位置
+    order: Vec<usize>,
+}
+
+impl PartsReader {
+    /// 目次の整合 (周期数の合計・部分ファイルの有無と大きさ) を実行前に検査する。
+    /// 中身の SHA-256 は読むときに確かめる (全部を先に読むと数百 MB の読み込みが 2 回になる)。
+    fn new(dir: &Path, manifest: GoldenParts) -> Result<Self> {
+        let record = manifest.record_size() as u64;
+        let mut starts = Vec::with_capacity(manifest.parts.len());
+        let mut total = 0u64;
+        for part in &manifest.parts {
+            anyhow::ensure!(part.cycles > 0, "golden part {} has 0 cycles", part.file);
+            starts.push(total as u32);
+            total += part.cycles as u64;
+            let path = dir.join(&part.file);
+            let len = fs::metadata(&path).with_context(|| format!("golden part {path:?}"))?.len();
+            anyhow::ensure!(len == part.cycles as u64 * record,
+                "golden part {} is {len} bytes but {} cycles × {record} bytes = {} expected — regenerate golden (src/ExportGoldenParts.fsx)",
+                part.file, part.cycles, part.cycles as u64 * record);
+        }
+        anyhow::ensure!(total == manifest.total_cycles as u64,
+            "golden parts hold {total} cycles but totalCycles is {}", manifest.total_cycles);
+        let outputs: BTreeMap<String, u64> = manifest.ports.iter().map(|p| (p.clone(), 0)).collect();
+        anyhow::ensure!(outputs.len() == manifest.ports.len(), "golden parts list a port twice: {:?}", manifest.ports);
+        let order = outputs.keys()
+            .map(|name| manifest.ports.iter().position(|p| p == name).expect("key came from ports"))
+            .collect();
+        Ok(PartsReader { dir: dir.to_path_buf(), manifest, starts, loaded: None,
+            current: GoldenCycle { data_in: 0, irq: 0, outputs }, order })
+    }
+
+    fn cycle(&mut self, k: u32) -> Result<&GoldenCycle> {
+        anyhow::ensure!(k < self.manifest.total_cycles, "golden has no cycle {k}");
+        let index = self.starts.partition_point(|&start| start <= k) - 1;
+        if self.loaded.as_ref().map(|(i, _)| *i) != Some(index) {
+            let part = &self.manifest.parts[index];
+            let path = self.dir.join(&part.file);
+            let bytes = fs::read(&path).with_context(|| format!("reading golden part {path:?}"))?;
+            let sha = sha256_hex(&bytes);
+            anyhow::ensure!(sha == part.sha256,
+                "golden part {} sha256 {}… != manifest {}… — the file changed after the manifest was written",
+                part.file, short_hash(&sha), short_hash(&part.sha256));
+            anyhow::ensure!(bytes.len() == part.cycles as usize * self.manifest.record_size(),
+                "golden part {} changed size while running", part.file);
+            self.loaded = Some((index, bytes));
+        }
+        let (_, bytes) = self.loaded.as_ref().expect("loaded above");
+        let size = self.manifest.record_size();
+        let record = &bytes[(k - self.starts[index]) as usize * size..][..size];
+        self.current.data_in = record[0] as u64;
+        self.current.irq = record[1] as u64;
+        for (value, &pos) in self.current.outputs.values_mut().zip(&self.order) {
+            *value = u16::from_le_bytes([record[2 + 2 * pos], record[3 + 2 * pos]]) as u64;
+        }
+        Ok(&self.current)
+    }
+}
+
+/// 周期ごとの期待値の出どころ (1 個の JSON か、分割 golden か)。
+enum GoldenSource {
+    Whole(Golden),
+    Parts(PartsReader),
+}
+
+impl GoldenSource {
+    /// golden を読み、この配線結果・ROM・プログラムのものかを実行前に検査する。
+    fn load(path: &Path, meta: &RoutedMeta, rst_pulses: u32, cycles: u32, rom_sha256: &str,
+        boot_rom_sha256: Option<&str>) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct FormatOnly { format: String }
+        let text = fs::read_to_string(path).with_context(|| format!("reading golden {path:?}"))?;
+        let format = serde_json::from_str::<FormatOnly>(&text)
+            .with_context(|| format!("parsing golden {path:?}"))?.format;
+        if format == GOLDEN_PARTS_FORMAT {
+            let manifest: GoldenParts = serde_json::from_str(&text)
+                .with_context(|| format!("parsing golden parts manifest {path:?}"))?;
+            validate_golden_header(&GoldenHeader::of_parts(&manifest), meta, rst_pulses, cycles, rom_sha256, boot_rom_sha256)?;
+            let mut golden_ports: Vec<&str> = manifest.ports.iter().map(String::as_str).collect();
+            golden_ports.sort_unstable();
+            let meta_ports: Vec<&str> = meta.outputs.keys().map(String::as_str).collect();
+            anyhow::ensure!(golden_ports == meta_ports,
+                "golden parts ports {golden_ports:?} != meta outputs {meta_ports:?}");
+            println!("Golden: {} ({} cycles in {} parts, program={})", path.display(),
+                manifest.total_cycles, manifest.parts.len(), manifest.program);
+            let dir = path.parent().unwrap_or(Path::new("."));
+            Ok(GoldenSource::Parts(PartsReader::new(dir, manifest)?))
+        } else {
+            let g: Golden = serde_json::from_str(&text).with_context(|| format!("parsing golden {path:?}"))?;
+            validate_golden(&g, meta, rst_pulses, cycles, rom_sha256, boot_rom_sha256)?;
+            println!("Golden: {} ({} cycles, program={})", path.display(), g.cycles.len(), g.program);
+            Ok(GoldenSource::Whole(g))
+        }
+    }
+
+    fn cycle(&mut self, k: u32) -> Result<&GoldenCycle> {
+        match self {
+            GoldenSource::Whole(g) => Ok(&g.cycles[k as usize]),
+            GoldenSource::Parts(reader) => reader.cycle(k),
+        }
+    }
 }
 
 fn default_rst_pulses() -> u32 { 2 }
@@ -312,22 +462,55 @@ fn validate_expect(outputs: &BTreeMap<String, Vec<OutputProbe>>, expect: &BTreeM
     Ok(())
 }
 
+/// golden の 2 形式に共通の見出し (何に対して作られた golden か)。
+struct GoldenHeader<'a> {
+    circuit: &'a str,
+    source_sha256: &'a str,
+    rom_sha256: &'a str,
+    boot_rom_sha256: Option<&'a str>,
+    rst_pulses: u32,
+    cycles: usize,
+}
+
+impl<'a> GoldenHeader<'a> {
+    fn of_whole(g: &'a Golden) -> Self {
+        GoldenHeader { circuit: &g.circuit, source_sha256: &g.source_sha256, rom_sha256: &g.rom_sha256,
+            boot_rom_sha256: g.boot_rom_sha256.as_deref(), rst_pulses: g.rst_pulses, cycles: g.cycles.len() }
+    }
+    fn of_parts(g: &'a GoldenParts) -> Self {
+        GoldenHeader { circuit: &g.circuit, source_sha256: &g.source_sha256, rom_sha256: &g.rom_sha256,
+            boot_rom_sha256: g.boot_rom_sha256.as_deref(), rst_pulses: g.rst_pulses, cycles: g.total_cycles as usize }
+    }
+}
+
 /// golden がこの配線結果・ROM・プログラムに対して作られたものかを実行前に検査する。
 fn validate_golden(golden: &Golden, meta: &RoutedMeta, rst_pulses: u32, cycles: u32, rom_sha256: &str,
     boot_rom_sha256: Option<&str>) -> Result<()> {
     anyhow::ensure!(golden.format == GOLDEN_FORMAT,
-        "golden format '{}' is not supported (expected {GOLDEN_FORMAT})", golden.format);
+        "golden format '{}' is not supported (expected {GOLDEN_FORMAT} or {GOLDEN_PARTS_FORMAT})", golden.format);
+    validate_golden_header(&GoldenHeader::of_whole(golden), meta, rst_pulses, cycles, rom_sha256, boot_rom_sha256)?;
+    let meta_ports: Vec<&str> = meta.outputs.keys().map(String::as_str).collect();
+    for (k, cycle) in golden.cycles.iter().enumerate() {
+        let golden_ports: Vec<&str> = cycle.outputs.keys().map(String::as_str).collect();
+        anyhow::ensure!(golden_ports == meta_ports,
+            "golden cycle {k} outputs {golden_ports:?} != meta outputs {meta_ports:?}");
+    }
+    Ok(())
+}
+
+fn validate_golden_header(golden: &GoldenHeader, meta: &RoutedMeta, rst_pulses: u32, cycles: u32, rom_sha256: &str,
+    boot_rom_sha256: Option<&str>) -> Result<()> {
     anyhow::ensure!(golden.circuit == meta.circuit,
         "golden circuit '{}' != meta circuit '{}'", golden.circuit, meta.circuit);
     let meta_sha = meta.source_sha256.as_deref()
         .context("meta has no sourceSha256 — cannot check that golden matches the routed grid")?;
     anyhow::ensure!(golden.source_sha256 == meta_sha,
         "golden sourceSha256 {}… != meta {}… — the netlist changed; re-route or regenerate golden",
-        short_hash(&golden.source_sha256), short_hash(meta_sha));
+        short_hash(golden.source_sha256), short_hash(meta_sha));
     anyhow::ensure!(golden.rom_sha256 == rom_sha256,
         "golden romSha256 {}… != ROM {}… — regenerate golden (src/ExportGolden.fsx)",
-        short_hash(&golden.rom_sha256), short_hash(rom_sha256));
-    match (boot_rom_sha256, golden.boot_rom_sha256.as_deref()) {
+        short_hash(golden.rom_sha256), short_hash(rom_sha256));
+    match (boot_rom_sha256, golden.boot_rom_sha256) {
         (Some(actual), Some(expected)) => anyhow::ensure!(expected == actual,
             "golden bootRomSha256 {}… != boot ROM {}… — regenerate golden (src/ExportGolden.fsx)",
             short_hash(expected), short_hash(actual)),
@@ -341,14 +524,8 @@ fn validate_golden(golden: &Golden, meta: &RoutedMeta, rst_pulses: u32, cycles: 
     }
     anyhow::ensure!(golden.rst_pulses == rst_pulses,
         "golden rstPulses {} != program rstPulses {rst_pulses}", golden.rst_pulses);
-    anyhow::ensure!(golden.cycles.len() == cycles as usize,
-        "golden has {} cycles but program runs {cycles}", golden.cycles.len());
-    let meta_ports: Vec<&str> = meta.outputs.keys().map(String::as_str).collect();
-    for (k, cycle) in golden.cycles.iter().enumerate() {
-        let golden_ports: Vec<&str> = cycle.outputs.keys().map(String::as_str).collect();
-        anyhow::ensure!(golden_ports == meta_ports,
-            "golden cycle {k} outputs {golden_ports:?} != meta outputs {meta_ports:?}");
-    }
+    anyhow::ensure!(golden.cycles == cycles as usize,
+        "golden has {} cycles but program runs {cycles}", golden.cycles);
     Ok(())
 }
 
@@ -570,16 +747,9 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     };
     let boot_rom_sha256 = boot_rom.as_ref().map(|b| sha256_hex(b));
 
-    let golden: Option<Golden> = match &prog.golden {
-        Some(spec) => {
-            let path = dir.join(spec);
-            let g: Golden = serde_json::from_str(
-                &fs::read_to_string(&path).with_context(|| format!("reading golden {path:?}"))?
-            ).with_context(|| format!("parsing golden {path:?}"))?;
-            validate_golden(&g, &meta, prog.rst_pulses, prog.cycles, &rom_sha256, boot_rom_sha256.as_deref())?;
-            println!("Golden: {} ({} cycles, program={})", path.display(), g.cycles.len(), g.program);
-            Some(g)
-        }
+    let mut golden: Option<GoldenSource> = match &prog.golden {
+        Some(spec) => Some(GoldenSource::load(&dir.join(spec), &meta, prog.rst_pulses, prog.cycles,
+            &rom_sha256, boot_rom_sha256.as_deref())?),
         None => None,
     };
 
@@ -642,7 +812,14 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
     let mut golden_matched = 0u32;
     let mut divergence: Option<Vec<String>> = None;
 
+    // 長い実行 (数百万周期〜) は途中経過を出す
+    const PROGRESS_EVERY: u32 = 1_000_000;
+    let started = std::time::Instant::now();
+
     for cycle in 0..prog.cycles {
+        if cycle > 0 && cycle % PROGRESS_EVERY == 0 {
+            eprintln!("[progress] {cycle} / {} cycles ({:.0}s)", prog.cycles, started.elapsed().as_secs_f64());
+        }
         // デモ用: これから走る周期をフレームに刻む (PPU 側の絵と突き合わせるため)
         driver.set_frame_cycle(cycle as u64);
         // この周期の LY (0xFF44) を反映してからバスを見る (TB / Testbench.fs と同じ契約)
@@ -677,8 +854,8 @@ pub fn run_memory_program(prog_path: &Path, opts: &MemProgOpts) -> Result<i32> {
         }
 
         // golden 照合 (data_in と latch 後の全出力)
-        if let Some(g) = &golden {
-            let expected = &g.cycles[cycle as usize];
+        if let Some(g) = golden.as_mut() {
+            let expected = g.cycle(cycle)?;
             let mut report: Vec<String> = Vec::new();
             if expected.data_in != result.data_in {
                 report.push(format!("data_in: expected {:#04X} got {:#04X} (bus addr={:#06X} mem_read={} — memory model or bus diverged)",
@@ -864,6 +1041,67 @@ mod tests {
             "romSha256":"{rom_sha}","rstPulses":2,
             "cycles":[{{"dataIn":62,"outputs":{{"b_out":1,"flag":0}}}}]}}"#);
         serde_json::from_str(&json).unwrap()
+    }
+
+    /// 2 ポート (b_out, flag) の分割 golden を dir に書く。レコードは dataIn, irq, flag (u16), b_out (u16) の順
+    /// (ports をわざと名前の降順にして、キー順との対応づけを確かめる)
+    fn write_parts(dir: &Path, records: &[[u8; 6]], split: usize) -> GoldenParts {
+        fs::create_dir_all(dir).unwrap();
+        let parts = records.chunks(split).enumerate().map(|(i, chunk)| {
+            let bytes = chunk.concat();
+            let file = format!("g.part{i:03}.bin");
+            fs::write(dir.join(&file), &bytes).unwrap();
+            GoldenPart { file, cycles: chunk.len() as u32, sha256: sha256_hex(&bytes) }
+        }).collect();
+        GoldenParts { circuit: "c".into(), program: "p".into(), source_sha256: "ab".into(), rom_sha256: "r".into(),
+            boot_rom_sha256: None, rst_pulses: 2, total_cycles: records.len() as u32,
+            ports: vec!["flag".into(), "b_out".into()], parts }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("wwc-golden-parts-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn parts_reader_decodes_records_across_part_boundaries() {
+        let dir = temp_dir("decode");
+        // dataIn, irq, flag (LE), b_out (LE)
+        let records: Vec<[u8; 6]> = (0..5u8).map(|k| [k, 10 + k, 1, 0, k, 0x12]).collect();
+        let mut reader = PartsReader::new(&dir, write_parts(&dir, &records, 2)).unwrap();
+        // 順方向だけでなく、前の部分に戻っても読める
+        for k in [0u32, 1, 2, 3, 4, 1] {
+            let cycle = reader.cycle(k).unwrap();
+            assert_eq!((cycle.data_in, cycle.irq), (k as u64, 10 + k as u64));
+            assert_eq!(cycle.outputs["flag"], 1);
+            assert_eq!(cycle.outputs["b_out"], 0x1200 + k as u64);
+        }
+        assert!(reader.cycle(5).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parts_reader_rejects_missing_resized_or_altered_parts() {
+        let dir = temp_dir("reject");
+        let records: Vec<[u8; 6]> = (0..4u8).map(|k| [k, 0, 0, 0, 0, 0]).collect();
+        // 中身が変わった (大きさは同じ): 読むときに SHA-256 で落ちる
+        let manifest = write_parts(&dir, &records, 2);
+        fs::write(dir.join("g.part001.bin"), [9u8; 12]).unwrap();
+        let mut reader = PartsReader::new(&dir, manifest).unwrap();
+        assert!(reader.cycle(0).is_ok());
+        let err = reader.cycle(2).unwrap_err().to_string();
+        assert!(err.contains("sha256"), "{err}");
+        // 大きさが違う / ファイルが無い / 合計が totalCycles と合わない: 実行前に落ちる
+        let manifest = write_parts(&dir, &records, 2);
+        fs::write(dir.join("g.part001.bin"), [0u8; 6]).unwrap();
+        assert!(PartsReader::new(&dir, manifest).is_err());
+        let manifest = write_parts(&dir, &records, 2);
+        fs::remove_file(dir.join("g.part000.bin")).unwrap();
+        assert!(PartsReader::new(&dir, manifest).is_err());
+        let mut manifest = write_parts(&dir, &records, 2);
+        manifest.total_cycles = 5;
+        let err = PartsReader::new(&dir, manifest).err().unwrap().to_string();
+        assert!(err.contains("totalCycles"), "{err}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -1,0 +1,39 @@
+{
+  "format": "wwc-golden-parts/1",
+  "circuit": "sm83_full",
+  "program": "bootix_full",
+  "sourceSha256": "8471945cc0582b4920fdb24d6d426555eb1ed2fc41c4398799f762fa18fa5afe",
+  "romSha256": "d9b1afd77446ca2edd3d09c4bb446968d12f59f0db98c559424b7a57d587732e",
+  "bootRomSha256": "c313435280dda8ccfae0786c7159aab791a00930605101c647794f64bfa17b5e",
+  "rstPulses": 2,
+  "totalCycles": 1900000,
+  "ports": [
+    "a_out",
+    "addr",
+    "b_out",
+    "c_out",
+    "d_out",
+    "data_out",
+    "e_out",
+    "f_out",
+    "h_out",
+    "int_ack",
+    "l_out",
+    "mem_read",
+    "mem_write",
+    "pc_out",
+    "sp_out"
+  ],
+  "parts": [
+    {
+      "file": "bootix_full.golden.part000.bin",
+      "cycles": 1000000,
+      "sha256": "fcd491e7604d8abc7edd0246d7994f478fed60d8a283562bd511f4c53088761e"
+    },
+    {
+      "file": "bootix_full.golden.part001.bin",
+      "cycles": 900000,
+      "sha256": "eaa8bb36c1aeb5680d4f98cddd2fafd4c9d1fca5387cb27803e56a093524d08b"
+    }
+  ]
+}
