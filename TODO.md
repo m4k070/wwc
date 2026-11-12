@@ -1,10 +1,19 @@
 # WireLevel コンパイラ TODO
 
-## 現在のテスト結果: F# 421/421 / cargo test (wgpu-runner) 49/49 / GPU golden 24/24 / memory-test.sh 5/5 / Playwright 24/24 PASS
-(2026-09-28 実測。F# は PR #5 時点の 287 からタイミング駆動配置・クロックピン分割 (ClockPinSplitTests) 分が増えて 421、
-cargo test は meta v3 対応で 49。GPU golden はこのブランチで再計測して 24/24、Playwright は d008cbe, 2026-08-14 時点で未再計測)
+## 現在のテスト結果: F# 431/431 / cargo test (wgpu-runner) 56/56 / 34 本 memory-test 37/37 / Playwright 24/24 PASS
+(2026-11-08 実測 = F# 431 / cargo 56 / memory-test 37/37。PR #44 で新規 3 件ずつ追加した時点の値。
+Playwright 24/24 は 2026-11-10 に実測 (PR #48)。GPU golden (`run-tests.sh`) は 2026-11-08 時点で 24/24)
 
-## 現在の到達点 (2026-09-30)
+## 現在の到達点
+
+### (2026-11-11) web/sm83_mc_*.bin を現行コンパイラで再生成 (PR #48)
+
+2026-06-13 生成の WebGPU golden 用 `.bin` はクロック未接続バグ入りの旧回路が元だった。
+`src/ExportSm83Multi.fsx` を回し直し、16 本 (139,364 → 144,119 bytes) と
+`sm83_mc_reg_coords.json` / `golden-cases-mc-sm83_min.json` を差し替えた (725.8 s、4 命令すべて
+`✓ regs match expected`)。settle 世代数が変わったので `web/golden-cases.json` の `sm83-mc-*` 8 件の
+`steps` を更新した (nop-high 1773→1248 / lda-high 2057→1722 / ldb-high 2500→2242 /
+add-high 2419→1912、low は 4 件とも 758→239)。検証は `web/run-test.sh` 24/24 PASS (20.7 分)。
 
 ### (2026-09-30) 実機構造を持つブート ROM を CA で走らせる (段階 1) — ブランチ `bootrom-stage1`
 
@@ -266,7 +275,10 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
    (`remotes/origin/test-rom-runner`) にあり、PR は未作成。また gbfs の `src/gbfs.Lib/WireLevelCpu.fs` は
    中身がネイティブ CPU への委譲だけのスタブで (`WireLevelCpu.fs:63` にコメントあり)、名前と実体が一致していない。
    CA を gbfs の CPU として実時間で動かすのは 1 周期 0.03〜0.05 秒でも 1 フレームに数分〜十数分かかり非現実的
-8. `web/sm83_mc_*.bin` (2026-06-13 生成) はクロック未接続バグ入りの古い回路のまま — 再生成が必要 (P3 参照)
+8. ~~`web/sm83_mc_*.bin` (2026-06-13 生成) はクロック未接続バグ入りの古い回路のまま~~ **[解決済み 2026-11-11]** (PR #48):
+   現行コンパイラで `src/ExportSm83Multi.fsx` を回し直し、16 本の `.bin` (139,364 → 144,119 bytes) と
+   `sm83_mc_reg_coords.json` / `golden-cases-mc-sm83_min.json` を差し替えた。settle 世代数が変わるため
+   `web/golden-cases.json` の `sm83-mc-*` 8 件の `steps` も更新 (詳細は冒頭「現在の到達点」)
 9. `placement-hilbert` ブランチ (ローカル + `remotes/origin/placement-hilbert`) はヒルベルト配置の負の結果の
    記録として残している。採用しない。理由: 総配線長は約 7% 短くなるのに、sm83_full 28x20 の配線到達点が
    16,016 → 13,600 端子に下がり、sm83_subset でも面積比 (需要/bbox) が 1.427 → 1.518 に悪化したため
@@ -427,7 +439,7 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
       16.1 分 (20x14 完走) に短縮 (2026-09-27)。ネット単位の並列化は未着手のまま
 - [ ] sm83_min のクロックのずれを `verify_clock.fsx` で測り直す
       (2026-09-15 の ExportRouted 実行で `ClockSkewUnresolved (NetId 2, 92)` — 旧記録 110 から改善したが未解消)
-- [ ] web/sm83_mc_*.bin の再生成 (P3 参照。冒頭「残課題」8 と同一項目)
+- [x] web/sm83_mc_*.bin の再生成 (2026-11-11、PR #48。冒頭「残課題」8 参照)
 
 最終目標: ゲームボーイエミュレータに組込める CPU をセルオートマトンで実現する。
 
