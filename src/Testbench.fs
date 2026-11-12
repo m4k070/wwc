@@ -544,7 +544,10 @@ module Testbench =
         | _, _, _, Error e -> Error e
 
     /// DESIGN-VERIFY.md §5.2 の手順でリセットと cycles 周期を実行する。
-    let run
+    /// sink が Some なら周期ごとの記録を sink に渡し、リストには溜めない (結果の Cycles は空)。
+    /// 数千万周期の golden を分割して書き出すときに使う (全周期をメモリに持てないため)。
+    let private runCore
+        (sink: (int -> CycleRecord -> unit) option)
         (c: CompiledNetlist)
         (ports: YosysPortBits list)
         (bus: BusPorts)
@@ -613,12 +616,26 @@ module Testbench =
                                 | Error e -> Error e
                                 | Ok sHigh ->
                                     let outputs = readOutputsPlanned sHigh outputPlan
-                                    loop (k + 1) sHigh mem'' ({ DataIn = dataIn; Irq = recordedIrq; Outputs = outputs } :: acc)
+                                    let record = { DataIn = dataIn; Irq = recordedIrq; Outputs = outputs }
+                                    match sink with
+                                    | Some emit ->
+                                        emit k record
+                                        loop (k + 1) sHigh mem'' acc
+                                    | None -> loop (k + 1) sHigh mem'' (record :: acc)
 
                 [ 1 .. rstPulses ]
                 |> List.fold (fun acc _ -> Result.bind resetPulse acc) (Ok (initial c))
                 |> Result.bind (fun s -> loop 0 s memory [])
         runCore () |> Result.mapError SimulationFailed
+
+    /// リセットと cycles 周期を実行し、全周期の記録を返す。
+    let run c ports bus memory rstPulses cycles : Result<TestbenchRun, TestbenchError> =
+        runCore None c ports bus memory rstPulses cycles
+
+    /// run と同じ実行だが、周期ごとの記録を sink に渡して溜めない (結果の Cycles は空)。
+    let runStreaming (sink: int -> CycleRecord -> unit) c ports bus memory rstPulses cycles
+        : Result<TestbenchRun, TestbenchError> =
+        runCore (Some sink) c ports bus memory rstPulses cycles
 
     /// expect / expectMem を最終状態と照合し、不一致の説明を返す (空なら合格)。
     let checkExpectations (program: MemoryProgram) (result: TestbenchRun) : string list =
@@ -670,6 +687,65 @@ module Testbench =
             for (name, value) in cycle.Outputs do
                 w.WriteNumber (name, value)
             w.WriteEndObject ()
+            w.WriteEndObject ()
+        w.WriteEndArray ()
+        w.WriteEndObject ()
+        w.Flush ()
+        Text.Encoding.UTF8.GetString (stream.ToArray ())
+
+    // --- 分割 golden (wwc-golden-parts/1) ---------------------------------------
+    //
+    // 数千万周期の golden は JSON だと数 GB になり、F# も runner も 1 個の値として持てない。
+    // 周期ごとの固定長レコードを partCycles 周期ずつのバイナリに分け、目次 (manifest JSON) から参照する。
+    //   レコード = dataIn (u8) + irq (u8) + 出力ポートの値 (u16 LE、manifest の ports の順)
+    // runner (memory_program.rs の GoldenParts) は進行に合わせて 1 部分ずつ読み、SHA-256 を確かめる。
+
+    [<Literal>]
+    let GoldenPartsFormat = "wwc-golden-parts/1"
+
+    type GoldenPart =
+        { PartFile: string
+          PartCycles: int
+          PartSha256: string }
+
+    /// 1 周期を固定長レコードに詰める。値がレコードの幅に収まらなければ例外 (黙って切り捨てない)。
+    let encodeGoldenRecord (record: CycleRecord) (buffer: byte[]) (offset: int) : unit =
+        if record.DataIn > 0xFFUL || record.Irq > 0xFFUL then
+            failwithf "golden parts: dataIn=0x%X irq=0x%X が 8 bit に収まらない" record.DataIn record.Irq
+        buffer.[offset] <- byte record.DataIn
+        buffer.[offset + 1] <- byte record.Irq
+        for i = 0 to record.Outputs.Length - 1 do
+            let name, value = record.Outputs.[i]
+            if value > 0xFFFFUL then failwithf "golden parts: %s=0x%X が 16 bit に収まらない" name value
+            buffer.[offset + 2 + 2 * i] <- byte value
+            buffer.[offset + 3 + 2 * i] <- byte (value >>> 8)
+
+    let goldenRecordSize (portCount: int) : int = 2 + 2 * portCount
+
+    let goldenPartsToJson (info: GoldenInfo) (ports: string[]) (totalCycles: int) (parts: GoldenPart list) : string =
+        use stream = new MemoryStream ()
+        use w = new Utf8JsonWriter (stream, JsonWriterOptions (Indented = true))
+        w.WriteStartObject ()
+        w.WriteString ("format", GoldenPartsFormat)
+        w.WriteString ("circuit", info.GoldenCircuit)
+        w.WriteString ("program", info.GoldenProgram)
+        w.WriteString ("sourceSha256", info.SourceSha256)
+        w.WriteString ("romSha256", info.RomSha256)
+        match info.BootRomSha256 with
+        | Some sha -> w.WriteString ("bootRomSha256", sha)
+        | None -> ()
+        w.WriteNumber ("rstPulses", info.RstPulses)
+        w.WriteNumber ("totalCycles", totalCycles)
+        w.WriteStartArray "ports"
+        for name in ports do
+            w.WriteStringValue name
+        w.WriteEndArray ()
+        w.WriteStartArray "parts"
+        for part in parts do
+            w.WriteStartObject ()
+            w.WriteString ("file", part.PartFile)
+            w.WriteNumber ("cycles", part.PartCycles)
+            w.WriteString ("sha256", part.PartSha256)
             w.WriteEndObject ()
         w.WriteEndArray ()
         w.WriteEndObject ()

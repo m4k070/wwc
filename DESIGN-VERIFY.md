@@ -300,6 +300,30 @@ CA では posedge がクロック木を伝わる間 (skew) に、先にラッチ
 - 出力はポート単位の整数 (LSB first)。runner は meta の probe に従って読み、
   `Unobservable` のビットは比較から除外する
 
+### 6.2.1 分割 golden (`wwc-golden-parts/1`、2026-11-12)
+
+上の JSON は 1 周期あたり約 400 バイトで、F# も runner も全周期を 1 個の値として持つ。数千万周期
+(Bootix のフル起動) では 9 GB を超えるので、周期ごとの固定長レコードを並べたバイナリに分ける。
+`src/ExportGoldenParts.fsx <program.json> [--part-cycles N]` が書き、プログラムの `golden` には目次を指す。
+runner は目次の `format` で形式を見分ける。
+
+```json
+{
+  "format": "wwc-golden-parts/1",
+  "circuit": "sm83_full", "program": "bootix_full",
+  "sourceSha256": "…", "romSha256": "…", "bootRomSha256": "…", "rstPulses": 2,
+  "totalCycles": 23400000,
+  "ports": ["a_out", "addr", "…"],
+  "parts": [ { "file": "bootix_full.golden.part000.bin", "cycles": 1000000, "sha256": "…" } ]
+}
+```
+
+- レコード = `dataIn` (u8) + `irq` (u8) + 出力ポートの値 (u16 LE、`ports` の順)。sm83_full は 32 バイト。
+  値が幅に収まらなければ F# 側が例外で止まる (黙って切り捨てない)
+- 見出し (`sourceSha256` など) の照合は 6.2 と同じ。加えて runner は実行前に「部分の周期数の合計 =
+  `totalCycles` = プログラムの `cycles`」「各部分ファイルの大きさ」を検査し、部分を読むときに SHA-256 を確かめる
+- 部分ファイルは目次と同じディレクトリに置く。大きいのでリポジトリには入れない (RTL から再生成できる)
+
 ### 6.3 routed meta (`routed/<circuit>.meta.json`、`src/RoutedArtifact.fs` が生成)
 
 `formatVersion` 3 (2026-09-28、issue #7 (b): クロックピンの複数分割)。2 (2026-09-27) との違いは

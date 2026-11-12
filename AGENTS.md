@@ -45,8 +45,9 @@ Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計
 GPU を使わないエンジン (2026-11-11、moon = GPU なし): `cargo test` **67/67** /
 `WWC_ENGINE=cpu run-tests.sh` **24/24** / `memory-test.sh routed/sm83_full_*.json` は cpu・graph・
 graph + `WWC_CROSS_CHECK=1` のいずれも **37/37** (所要 110 秒 / 40 秒 / 9 分)。
-**GPU エンジン (tiled / dense) は `CaDriver` の変更後に未再計測** — GPU のあるマシン (vega) で
-`memory-test.sh` と `run-tests.sh` を回すこと。
+GPU エンジンは `CaDriver` の変更後に vega (RTX 3060) で再計測済み (2026-11-12、`3b30fa4`):
+`memory-test.sh routed/sm83_full_*.json` (tiled) **37/37** (85 秒) / `memory-test.sh` (引数なし) **5/5** /
+`run-tests.sh` は tiled・dense とも **24/24** / `cargo test` **67/67**。
 
 ### 配線・検証まわりのスクリプト (`src/*.fsx`)
 
@@ -67,6 +68,12 @@ dotnet fsi src/LoadRouted.fsx <circuit> [--dir DIR]
 
 # プログラム JSON (wgpu-runner --memory と同形式) を NetlistSim で実行し golden を生成
 dotnet fsi src/ExportGolden.fsx <program.json>
+
+# 同じ golden を分割形式 (目次 JSON + 1 周期 32 バイトのバイナリ) で書く。数百万周期以上はこちら
+# (JSON は 1 周期 約 400 バイトで、全周期をメモリに持つ)。runner は目次の format で見分ける。
+# 形式は DESIGN-VERIFY.md §6.2.1。前提: -c Release でビルド。部分ファイル (*.partNNN.bin) はコミットしない
+# 例: Bootix のフル起動 (routed/bootix_full.json、1,900,000 周期。生成 170 秒 + graph の照合 4 分半)
+dotnet fsi src/ExportGoldenParts.fsx <program.json> [--part-cycles N]
 
 # NetlistSim の速度計測 (golden の直列化を含めない純粋なシミュレーション時間、既定 3 回の中央値)。
 # 最適化の前後は同じプログラム・同じ負荷条件で測ること (1 回の計測は ±10% 以上ばらつき、

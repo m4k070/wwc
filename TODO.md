@@ -29,6 +29,8 @@ cargo test は meta v3 対応で 49。GPU golden はこのブランチで再計�
   1 回あたりは 11.5K〜17.6K の幅 (1 フレーム = 17,556)。したがって「16,416 固定」で見積もらない。
   フル実行は 1,329 フレーム × 17,556 = **23.3M サイクル**。実測レート (110,000 周期 = 91 分 = 49.6 ms/サイクル)
   で換算すると **CA 約 321 時間**。CA 高速化は打ち止め (残課題 1) なので段階 2 は非現実的
+  → **この見積りは誤り (2026-11-12 実測)**。RTL でブート ROM 解除 (0xFF50 書込) まで走らせると
+  **1,824,740 サイクル (約 104 フレーム)** で、23.3M の約 1/13 だった。段階 2 は下の「段階 2」参照
 - 実装: `src/ExportBootRom.fsx` に `--bootrom <file>` / `--name` を追加。外部 ROM は 0x00E0 の
   展開テーブルを持たないので、テーブル検査と `expectMem` は自作 ROM のときだけ出す
 - RTL (Release DLL) は約 7,700 サイクル/秒。`RenderBootRom.fsx` でロゴの描画確認ができる
@@ -221,11 +223,17 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
        計時は各 1〜2 回で、moon は回ごとの振れが大きい (cpu の daa_edge で 1.5 倍)。graph の settle は
        cpu の約 190 倍 (daa_edge: 10.45 秒 → 0.055 秒、イベント 160 万 / ゲート遷移 113 万、34 ns/イベント)。
        世代数の合計 1,733,369 は GPU の値と一致。A の「詰めて 3〜5 倍」は手を付けていない (B が出たので不要)
-     * **段階 2 (Bootix フル起動 23.3M サイクル) は graph で約 2.3 時間の見込み** (0.35 ms × 23.3M。未実行)。
-       golden 無しで流すか、golden を分割生成するかは未決
-     * 未確認: GPU エンジンの再計測 (`CaDriver` がセルを settle の戻り値で返さなくなった。vega で
-       `memory-test.sh` / `run-tests.sh` を回す)。GPU と cpu の直接照合はスパイク時の daa_edge 1 本だけ
-       (cpu ≡ F# `settle` は単発 golden 24 本で確認済み)
+     * **段階 2 (Bootix フル起動) は完走 (2026-11-12、ブランチ `feat/golden-parts`)**: `routed/bootix_full.json`
+       (1,900,000 周期) を graph で流し、分割 golden と **1,900,000/1,900,000 一致** (4 分 27 秒 =
+       0.14 ms/サイクル、1 回計測)。ブート ROM 解除 (0xFF50 書込) は cycle 1,824,740、その後カートリッジの
+       0x0100 → 0x0200 の本体を実行して cycle 1,824,767 以降は spin。「23.3M サイクル」の見積りは誤りだった。
+       golden は分割形式 (`src/ExportGoldenParts.fsx`、DESIGN-VERIFY.md §6.2.1。1 周期 32 バイト、
+       1.9M 周期で 61 MB、RTL の生成は 170 秒)。部分ファイルはコミットしない。
+       最終画面の描画 (`RenderBootRom.fsx`) は moon に gbfs の Release ビルドが無く未実施
+     * GPU エンジンは `CaDriver` の変更後に vega で再計測済み (2026-11-12、`3b30fa4`): `memory-test.sh
+       routed/sm83_full_*.json` (tiled) 37/37 (85 秒)、引数なし 5/5、`run-tests.sh` は tiled・dense とも 24/24、
+       daa_edge の dense 実行 400/400。GPU と cpu の直接のセル照合はスパイク時の daa_edge 1 本だけ
+       (cpu ≡ F# `settle` は単発 golden 24 本、GPU ≡ F# `settle` も同じ 24 本で確認しているので間接的には揃う)
      * スパイクのコード・内訳・先行研究 (MCHPRS Redpiler / GATSPI / GL0AM / GEM) は
        `~/llm-wiki/worklog/wwc/2026-11.md` の 2026-11-11 節
 2. **`compileWL` / `ExportRouted.fsx` の既定値の見直し**: 既定は今も**単相・行優先** (`--place rowmajor`
