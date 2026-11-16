@@ -45,9 +45,13 @@ Playwright (`web/run-test.sh`) は 2026-08-14 時点で 24/24 のまま未再計
 GPU を使わないエンジン (2026-11-11、moon = GPU なし): `cargo test` **67/67** /
 `WWC_ENGINE=cpu run-tests.sh` **24/24** / `memory-test.sh routed/sm83_full_*.json` は cpu・graph・
 graph + `WWC_CROSS_CHECK=1` のいずれも **37/37** (所要 110 秒 / 40 秒 / 9 分)。
-GPU エンジンは `CaDriver` の変更後に vega (RTX 3060) で再計測済み (2026-11-12、`3b30fa4`):
-`memory-test.sh routed/sm83_full_*.json` (tiled) **37/37** (85 秒) / `memory-test.sh` (引数なし) **5/5** /
-`run-tests.sh` は tiled・dense とも **24/24** / `cargo test` **67/67**。
+cpu / graph エンジン・分割 golden・#52 を統合した main (`f340c04`) での再計測 (2026-11-13〜16):
+moon は F# `RunTests.fsx` **432/432** / `cargo test` **69/69** / graph で `memory-test.sh routed/sm83_full_*.json`
+**37/37** / `routed/bootix_full.json` (graph、分割 golden) **1,900,000/1,900,000**。
+vega (RTX 3060) は `memory-test.sh routed/sm83_full_*.json` (tiled) **37/37** (82 秒) / `memory-test.sh` (引数なし)
+**5/5** / `run-tests.sh` は tiled・dense とも **24/24** / `cargo test` **69/69** / 分割 golden を tiled で照合
+(Bootix 2000 周期を 3 部分に分けたもの) **2000/2000** (2 分 2 秒)。
+Bootix フル起動 (1.9M 周期) は GPU エンジンでは流していない (上の割合だと 30 時間以上)。
 
 ### 配線・検証まわりのスクリプト (`src/*.fsx`)
 
