@@ -239,9 +239,11 @@ blargg cpu_instrs 11/11 ──▶ RTL (NetlistSim + gbfs の周辺回路)
        golden は分割形式 (`src/ExportGoldenParts.fsx`、DESIGN-VERIFY.md §6.2.1。1 周期 32 バイト、
        1.9M 周期で 61 MB、RTL の生成は 170 秒)。部分ファイルはコミットしない。
        最終画面の描画 (`RenderBootRom.fsx`) は moon に gbfs の Release ビルドが無く未実施
-     * GPU エンジンは `CaDriver` の変更後に vega で再計測済み (2026-11-12、`3b30fa4`): `memory-test.sh
-       routed/sm83_full_*.json` (tiled) 37/37 (85 秒)、引数なし 5/5、`run-tests.sh` は tiled・dense とも 24/24、
-       daa_edge の dense 実行 400/400。GPU と cpu の直接のセル照合はスパイク時の daa_edge 1 本だけ
+     * GPU エンジンは vega で再計測済み。`CaDriver` の変更直後 (2026-11-12、`3b30fa4`) と、分割 golden まで
+       統合した main (2026-11-16、`f340c04`) の 2 回で、どちらも `memory-test.sh routed/sm83_full_*.json` (tiled)
+       37/37 (85 秒 / 82 秒)、引数なし 5/5、`run-tests.sh` は tiled・dense とも 24/24。1 回目は daa_edge の
+       dense 実行 400/400、2 回目は分割 golden の tiled 照合 (Bootix 2000 周期・3 部分) 2000/2000 (2 分 2 秒) も確認。
+       Bootix フル起動 (1.9M 周期) は GPU では流していない (この割合だと 30 時間以上)。GPU と cpu の直接のセル照合はスパイク時の daa_edge 1 本だけ
        (cpu ≡ F# `settle` は単発 golden 24 本、GPU ≡ F# `settle` も同じ 24 本で確認しているので間接的には揃う)
      * スパイクのコード・内訳・先行研究 (MCHPRS Redpiler / GATSPI / GL0AM / GEM) は
        `~/llm-wiki/worklog/wwc/2026-11.md` の 2026-11-11 節
